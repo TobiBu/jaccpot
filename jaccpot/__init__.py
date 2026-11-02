@@ -24,6 +24,7 @@ from .odisseo import OdisseoFMMCoupler
 from .production import GalaxySettings, ProductionRunner, SegmentConfig
 from .runtime.fused_provider import FusedForceProvider
 from .runtime.fused_topology import ForceParams
+from .runtime.grad_rollout import RolloutResult, differentiable_rollout
 from .solver import FastMultipoleMethod
 
 __all__ = [
@@ -42,9 +43,11 @@ __all__ = [
     "NearFieldConfig",
     "OdisseoFMMCoupler",
     "ProductionRunner",
+    "RolloutResult",
     "RuntimePolicyConfig",
     "SegmentConfig",
     "TraversalOverrides",
     "TreeConfig",
+    "differentiable_rollout",
     "direct_sum_gravitational_acceleration",
 ]

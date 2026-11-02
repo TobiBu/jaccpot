@@ -53,7 +53,7 @@ with (``tests/integration/strict/test_strict_runners_on_provider.py``). User gui
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -65,6 +65,7 @@ from ..softening import support_factor
 from ._large_n_pipeline import evaluate_large_n_potential, evaluate_large_n_state
 from ._large_n_types import LargeNPreparedState
 from .fused_topology import (
+    OVERFLOW_GRAD_LISTS,
     OVERFLOW_PARAMS,
     ForceParams,
     FusedTopology,
@@ -79,6 +80,11 @@ from .strict_carry import (
     materialize_template,
     shape_template,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only
+    # deferred, as ``fmm_evaluate`` defers it: the gradient lane's modules stay out
+    # of the forward lane's import graph
+    from ._large_n_grad import LargeNGradPlan, LargeNGradStatics
 
 __all__ = [
     "FusedForceProvider",
@@ -180,6 +186,110 @@ def _engine_of(solver: Any) -> Any:
     return getattr(solver, "_impl", solver)
 
 
+def _fold_verdict(
+    bits: Array, needs: Array, bits_in: Any, needs_in: Any
+) -> tuple[Array, Array]:
+    """Fold one step's bits and needs into the ones ``aux`` carried.
+
+    A step counts only when it started on the trajectory: every step ``aux`` has
+    seen fitted. After a failure the caller's scan steps on a truncated force, and
+    a retry re-plans from these needs (nornax's ``retry_segment``), as
+    ``strict_run_v2``'s scans fold them. :meth:`FusedForceProvider.step`'s fold,
+    shared with :meth:`FusedForceProvider.differentiable_step` (the same ops).
+
+    Parameters
+    ----------
+    bits : Array
+        This step's ``uint32`` overflow bits.
+    needs : Array
+        This step's ``int32`` needs.
+    bits_in : Any
+        The bits ``aux`` carried, or ``None``.
+    needs_in : Any
+        The needs ``aux`` carried, or ``None``.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(bits, needs)`` folded.
+    """
+    on_trajectory = None
+    if bits_in is not None:
+        bits_in = jnp.asarray(bits_in, jnp.uint32)
+        on_trajectory = overflow_ok(bits_in)
+        bits = jnp.where(on_trajectory, bits, jnp.uint32(0)) | bits_in
+    if needs_in is not None:
+        needs_in = jnp.asarray(needs_in, jnp.int32)
+        needs = jnp.maximum(needs_in, needs)
+        if on_trajectory is not None:
+            needs = jnp.where(on_trajectory, needs, needs_in)
+    return bits, needs
+
+
+@jax.custom_vjp
+def _gradient_gate(acc: Array, ok: Array) -> Array:
+    """``acc`` itself; its cotangent becomes NaN when ``ok`` is ``False``.
+
+    The differentiable step's refusal, in the program: on lists its reverses
+    cannot read (``ok`` the plan's symmetry verdict) the gradient is NaN, never a
+    plausible wrong number, whether or not the caller reads the bits.
+
+    Parameters
+    ----------
+    acc : Array
+        The accelerations.
+    ok : Array
+        Boolean scalar.
+
+    Returns
+    -------
+    Array
+        ``acc``.
+    """
+    del ok
+    return acc
+
+
+def _gradient_gate_fwd(acc: Array, ok: Array) -> tuple[Array, Array]:
+    """Forward of :func:`_gradient_gate`: the identity, ``ok`` kept.
+
+    Parameters
+    ----------
+    acc : Array
+        The accelerations.
+    ok : Array
+        Boolean scalar.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(acc, ok)``.
+    """
+    return acc, ok
+
+
+def _gradient_gate_bwd(ok: Array, cotangent: Array) -> tuple[Array, None]:
+    """Reverse of :func:`_gradient_gate`: the cotangent, or NaN.
+
+    Parameters
+    ----------
+    ok : Array
+        Boolean scalar from the forward.
+    cotangent : Array
+        The accelerations' cotangent.
+
+    Returns
+    -------
+    tuple[Array, None]
+        The cotangent where ``ok``, NaN otherwise; none for ``ok``.
+    """
+    nan = jnp.asarray(jnp.nan, cotangent.dtype)
+    return jnp.where(ok, cotangent, nan), None
+
+
+_gradient_gate.defvjp(_gradient_gate_fwd, _gradient_gate_bwd)
+
+
 # --------------------------------------------------------------------------
 # The provider.
 # --------------------------------------------------------------------------
@@ -211,6 +321,10 @@ class FusedForceProvider:
         :meth:`rebuild` materialises; ``None`` on a lane that reads its carried
         far list (not the static-radix fused lane), where only
         :meth:`_rebuild_like` with a real state works.
+    grad_statics : Optional[LargeNGradStatics]
+        The gradient plan's static fields (:meth:`with_grad_plan`), which
+        :meth:`differentiable_step` needs; ``None`` (default) on a provider made
+        for the forward only.
     """
 
     def __init__(
@@ -222,6 +336,7 @@ class FusedForceProvider:
         theta: Optional[float] = None,
         runtime_overrides: Any = None,
         template: Optional[PreparedShapeTemplate] = None,
+        grad_statics: Optional[LargeNGradStatics] = None,
     ) -> None:
         self.engine = _engine_of(engine)
         self.leaf_size = int(leaf_size)
@@ -229,6 +344,7 @@ class FusedForceProvider:
         self.theta = theta
         self.runtime_overrides = runtime_overrides
         self.template = template
+        self.grad_statics = grad_statics
 
     # ----------------------------------------------------------------------
     # Eager: prepare, freeze, re-plan.
@@ -247,6 +363,7 @@ class FusedForceProvider:
         bounds: Optional[Tuple[Array, Array]] = None,
         runtime_overrides: Any = None,
         caps_only: bool = False,
+        differentiable: bool = False,
     ) -> tuple["FusedForceProvider", FusedTopology]:
         """Prepare the fused lane at ``positions`` and freeze its template.
 
@@ -286,6 +403,10 @@ class FusedForceProvider:
             Already-resolved runtime overrides; ``None`` resolves them for ``N``.
         caps_only : bool
             The caps-only prepare (above).
+        differentiable : bool
+            Also freeze the gradient plan's static fields on the eager topology
+            (:meth:`with_grad_plan`), for :meth:`differentiable_step`. Needs the
+            full prepare (its far list): not with ``caps_only``.
 
         Returns
         -------
@@ -299,7 +420,15 @@ class FusedForceProvider:
             If the profile is not large-N production, the particle count is not in
             ``JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET``, or the prepare did not
             return a ``LargeNPreparedState``.
+        ValueError
+            If ``differentiable`` comes with ``caps_only``.
         """
+        if differentiable and caps_only:
+            raise ValueError(
+                "differentiable=True freezes the gradient plan on the eager "
+                "topology's far list, which a caps-only prepare does not build: "
+                "prepare in full (caps_only=False)"
+            )
         engine = _engine_of(solver)
         positions_arr = jnp.asarray(positions)
         masses_arr = jnp.asarray(masses)
@@ -369,7 +498,10 @@ class FusedForceProvider:
             theta=theta,
             runtime_overrides=runtime_overrides,
         )
-        return provider, FusedTopology.from_prepared(prepared)
+        topology = FusedTopology.from_prepared(prepared)
+        if differentiable:
+            provider = provider.with_grad_plan(topology)
+        return provider, topology
 
     @classmethod
     def freeze_template(
@@ -816,6 +948,7 @@ class FusedForceProvider:
         bounds: Optional[Tuple[Array, Array]] = None,
         num_valid: Optional[Array] = None,
         cross_hook: Optional[Callable[[Any], Any]] = None,
+        keep_far_list: bool = False,
     ) -> FusedTopology:
         """The topology at ``positions``: tree, P2M/M2M, walk, M2L, L2L.
 
@@ -836,6 +969,11 @@ class FusedForceProvider:
             Live row count of a capacity-padded shard (cell leaves only).
         cross_hook : Optional[Callable[[Any], Any]]
             The multi-GPU cross-domain hook (see ``_refresh_large_n_same_topology``).
+        keep_far_list : bool
+            Keep the far list the walk built in the topology
+            (``prepared.compact_far_pairs``) instead of the template's placeholder:
+            the gradient plan (:meth:`grad_plan`) reads it. ``False`` (default):
+            the program as always.
 
         Returns
         -------
@@ -862,6 +1000,7 @@ class FusedForceProvider:
             bounds=bounds,
             num_valid=num_valid,
             cross_hook=cross_hook,
+            keep_far_list=keep_far_list,
         )
 
     def _rebuild_like(
@@ -874,6 +1013,7 @@ class FusedForceProvider:
         bounds: Optional[Tuple[Array, Array]] = None,
         num_valid: Optional[Array] = None,
         cross_hook: Optional[Callable[[Any], Any]] = None,
+        keep_far_list: bool = False,
     ) -> FusedTopology:
         """:meth:`rebuild` from a given prepared state instead of the template.
 
@@ -896,6 +1036,8 @@ class FusedForceProvider:
         num_valid : Optional[Array]
             As in :meth:`rebuild`.
         cross_hook : Optional[Callable[[Any], Any]]
+            As in :meth:`rebuild`.
+        keep_far_list : bool
             As in :meth:`rebuild`.
 
         Returns
@@ -932,6 +1074,7 @@ class FusedForceProvider:
             cross_hook=cross_hook,
             force_scale_particles=force_scale if scale_carry else None,
             strict_fused_lane=True,
+            keep_far_list=bool(keep_far_list),
         )
         if prepared_new is None:
             raise RuntimeError(
@@ -1161,21 +1304,271 @@ class FusedForceProvider:
         bits = topology.overflow_bits(
             extra=0 if params is None else self.params_overflow(params)
         )
-        needs = topology.needs()
-        # A step counts only when it started on the trajectory: every step `aux`
-        # has seen fitted. After a failure the caller's scan steps on a truncated
-        # force, and a retry re-plans from these needs (nornax's
-        # `retry_segment`), as `strict_run_v2`'s scans fold them.
-        on_trajectory = None
-        if bits_in is not None:
-            bits_in = jnp.asarray(bits_in, jnp.uint32)
-            on_trajectory = overflow_ok(bits_in)
-            bits = jnp.where(on_trajectory, bits, jnp.uint32(0)) | bits_in
-        if needs_in is not None:
-            needs_in = jnp.asarray(needs_in, jnp.int32)
-            needs = jnp.maximum(needs_in, needs)
-            if on_trajectory is not None:
-                needs = jnp.where(on_trajectory, needs, needs_in)
+        bits, needs = _fold_verdict(bits, topology.needs(), bits_in, needs_in)
+        return acc, (f_b, bits, needs)
+
+    # ----------------------------------------------------------------------
+    # Differentiable: the gradient plan and the differentiable step (S9).
+    # ----------------------------------------------------------------------
+
+    def with_grad_plan(self, topology: FusedTopology) -> "FusedForceProvider":
+        """This provider with the gradient plan's static fields frozen.
+
+        Eager, once: S8's plan checks (``prepare_large_n_grad_plan``: the radix fast
+        lane, the solidfmm basis, the near field's prepacked layout with no overflow
+        or target-block payload, the near and far lists symmetric) on an eager
+        topology of THIS configuration -- :meth:`prepare`'s, which keeps its far
+        list -- and the plan's static fields (order, leaf capacity, centre mode,
+        chunk sizes, the far list's capacity and layout) kept. Every
+        :meth:`grad_plan` checks a traced topology against them. A re-planned
+        provider (:meth:`replanned`) has none: freeze them again on its eager
+        topology.
+
+        Parameters
+        ----------
+        topology : FusedTopology
+            An eager topology holding a ``LargeNPreparedState`` with its far list
+            (:meth:`prepare`, not ``caps_only``).
+
+        Returns
+        -------
+        FusedForceProvider
+            The same configuration and template, with ``grad_statics``.
+
+        Raises
+        ------
+        ValueError
+            If the topology holds no prepared state with a far list (a caps-only
+            prepare's, or a traced rebuild's).
+        """
+        from ._large_n_grad import freeze_large_n_grad_statics
+
+        prepared = topology.prepared
+        if (
+            not isinstance(prepared, LargeNPreparedState)
+            or getattr(prepared, "compact_far_pairs", None) is None
+        ):
+            raise ValueError(
+                "with_grad_plan needs an eager topology with its far list "
+                "(FusedForceProvider.prepare, caps_only=False); got a "
+                f"{type(prepared).__name__} without one"
+            )
+        provider = type(self)(
+            self.engine,
+            leaf_size=self.leaf_size,
+            max_order=self.max_order,
+            theta=self.theta,
+            runtime_overrides=self.runtime_overrides,
+            template=self.template,
+            grad_statics=freeze_large_n_grad_statics(self.engine, prepared),
+        )
+        return provider
+
+    def grad_plan(self, topology: FusedTopology) -> tuple["LargeNGradPlan", Array]:
+        """The gradient plan of a traced topology, and its lists' symmetry verdict.
+
+        Traced. The static fields are the frozen ones (:meth:`with_grad_plan`),
+        checked against this topology's (a mismatch raises at trace time); the
+        data are the far list its rebuild kept (``rebuild(keep_far_list=True)``).
+        The symmetry the reverses read each pair from both ends by -- the near
+        list always, the far list on the sort-free M2L reverse -- is checked on the
+        device (S8 checked it on the host), so a scan can fold it into its bits.
+
+        Parameters
+        ----------
+        topology : FusedTopology
+            From ``rebuild(..., keep_far_list=True)``.
+
+        Returns
+        -------
+        tuple[LargeNGradPlan, Array]
+            The plan and a boolean scalar (``False``: the gradient on these lists
+            would be wrong; :meth:`differentiable_step` sets
+            ``OVERFLOW_GRAD_LISTS`` and makes it NaN). A provider without frozen
+            statics raises (:meth:`_grad_statics_or_raise`).
+        """
+        from ._large_n_grad import traced_large_n_grad_plan
+
+        return traced_large_n_grad_plan(
+            self.engine, topology.prepared, self._grad_statics_or_raise()
+        )
+
+    def _grad_statics_or_raise(self) -> "LargeNGradStatics":
+        """The frozen gradient-plan statics, or the reason there are none.
+
+        Returns
+        -------
+        LargeNGradStatics
+            :attr:`grad_statics`.
+
+        Raises
+        ------
+        ValueError
+            If the provider was made for the forward only.
+        """
+        if self.grad_statics is None:
+            raise ValueError(
+                "this provider has no gradient plan: make it with "
+                "FusedForceProvider.prepare(..., differentiable=True) or "
+                "provider.with_grad_plan(eager_topology)"
+            )
+        return self.grad_statics
+
+    def differentiable_accelerations(
+        self,
+        topology: FusedTopology,
+        positions: Array,
+        masses: Array,
+        params: Optional[Union[ForceParams, StepParams]] = None,
+        *,
+        plan: "LargeNGradPlan",
+        force_scale: bool = False,
+    ) -> Any:
+        """The self-gravity on ``topology`` at LIVE positions and masses.
+
+        S8's differentiable evaluation (``_differentiable_accelerations_large_n``):
+        P2M, M2M, M2L, L2L and L2P recomputed from ``positions`` and ``masses`` on
+        the topology's lists (``plan``), the near field's direct kernel through its
+        ``custom_vjp`` -- the production kernels, each with its reverse. At the
+        positions and masses the topology was rebuilt from it is
+        :meth:`accelerations` bitwise. Unlike :meth:`accelerations` it reads the
+        positions: the gradient reaches the far field's source side.
+
+        Parameters
+        ----------
+        topology : FusedTopology
+            From ``rebuild(..., keep_far_list=True)``.
+        positions : Array
+            ``[N, 3]`` positions, input order (differentiated).
+        masses : Array
+            ``[N]`` masses, input order (differentiated).
+        params : Optional[Union[ForceParams, StepParams]]
+            As in :meth:`accelerations`; arrays are differentiated.
+        plan : LargeNGradPlan
+            :meth:`grad_plan`'s plan of this topology (fold its verdict too).
+        force_scale : bool
+            Also return eq (16b)'s f_b per particle (input order), as
+            :meth:`accelerations` does: the near kernel's force-scale lane plus the
+            rebuild's far half; not differentiated.
+
+        Returns
+        -------
+        Any
+            ``[N, 3]`` accelerations in the state's input dtype, or ``(acc, f_b)``.
+
+        Raises
+        ------
+        RuntimeError
+            If the topology does not hold a ``LargeNPreparedState``.
+        """
+        from .grad_options import grad_option_overrides, resolve_grad_options
+
+        force = self.resolve_params(params)
+        prepared = topology.prepared
+        if not isinstance(prepared, LargeNPreparedState):
+            raise RuntimeError(
+                "the differentiable fused force needs a LargeNPreparedState, got "
+                f"{type(prepared).__name__}"
+            )
+        options = resolve_grad_options(
+            None,
+            num_particles=int(prepared.positions_sorted.shape[0]),
+            supports_fast_lane=False,
+        )
+        with grad_option_overrides(options):
+            return self.engine._differentiable_accelerations_large_n(
+                prepared,
+                positions,
+                masses,
+                target_indices=None,
+                grad_plan=plan,
+                options=options,
+                force_params=force,
+                return_force_scale=bool(force_scale),
+            )
+
+    def differentiable_step(
+        self,
+        positions: Array,
+        masses: Array,
+        params: Optional[Union[ForceParams, StepParams]] = None,
+        aux: Optional[tuple] = None,
+    ) -> tuple[Any, tuple]:
+        """:meth:`step`, differentiable in ``positions``, ``masses`` and ``params``.
+
+        The same signature, forward and aux. The topology stage runs on the
+        INPUTS' stopped gradients -- ``rebuild(stop_gradient(x), stop_gradient(m),
+        force_scale=stop_gradient(f_b))`` -- so nothing of the tree, the walk or
+        the level loops is linearized (their while loops have no reverse); the
+        rebuild keeps its far list, and the force is S8's differentiable
+        evaluation on that topology at the LIVE ``positions`` and ``masses``
+        (:meth:`differentiable_accelerations`). Differentiating
+        ``accelerations(rebuild(stop_gradient(x)))`` instead gives a gradient of
+        exactly zero (the rebuild ran the far field; ``accelerations`` reads no
+        positions): this API never offers that form.
+
+        * the forward is :meth:`step`'s bitwise: the same rebuild, and S8's
+          evaluation is the production one at the rebuild's own inputs (the far
+          chain runs twice, once in the rebuild and once here: v1, by decision);
+        * ``mac_type='dehnen_error'``: f_b is the production one (the near kernel's
+          force-scale lane in the same call, the rebuild's far half), its
+          gradient stopped -- it sets the next walk's thresholds;
+        * the bits and needs fold as :meth:`step`'s, plus ``OVERFLOW_GRAD_LISTS``
+          when this step's lists are not symmetric (:meth:`grad_plan`'s device
+          verdict). That bit is outside ``overflow_ok`` (the force is right) and
+          inside ``grad_ok``: check ``grad_ok(bits)`` before using a gradient.
+          On such lists the gradient is also made NaN, so it is never a plausible
+          wrong number.
+
+        Needs the gradient plan's statics (:meth:`with_grad_plan`, or
+        ``prepare(..., differentiable=True)``).
+
+        Parameters
+        ----------
+        positions : Array
+            ``[N, 3]`` positions.
+        masses : Array
+            ``[N]`` masses.
+        params : Optional[Union[ForceParams, StepParams]]
+            As in :meth:`step`; array ``G`` and ``eps2`` are differentiated.
+        aux : Optional[tuple]
+            As in :meth:`step`.
+
+        Returns
+        -------
+        tuple[Any, tuple]
+            ``(acc, (f_b, bits, needs))`` as :meth:`step` returns them.
+        """
+        self._grad_statics_or_raise()  # before the rebuild's trace, not after
+        f_b_in, bits_in, needs_in = (None, None, None) if aux is None else aux
+        stop = jax.lax.stop_gradient
+        topology = self.rebuild(
+            stop(positions),
+            stop(masses),
+            force_scale=None if f_b_in is None else stop(f_b_in),
+            keep_far_list=True,
+        )
+        plan, symmetric = self.grad_plan(topology)
+        if self.scale_carry:
+            acc, f_b = self.differentiable_accelerations(
+                topology, positions, masses, params, plan=plan, force_scale=True
+            )
+            f_b = stop(f_b)
+        else:
+            acc = self.differentiable_accelerations(
+                topology, positions, masses, params, plan=plan
+            )
+            f_b = None
+        acc = _gradient_gate(acc, symmetric)
+        # the verdict as `step` computes it: on the template's placeholder far list
+        # (the kept one would add checks of its own to `overflow_bits`)
+        bits = replace(
+            topology, prepared=replace(topology.prepared, compact_far_pairs=None)
+        ).overflow_bits(extra=0 if params is None else self.params_overflow(params))
+        bits = bits | jnp.where(
+            symmetric, jnp.uint32(0), jnp.uint32(OVERFLOW_GRAD_LISTS)
+        )
+        bits, needs = _fold_verdict(bits, topology.needs(), bits_in, needs_in)
         return acc, (f_b, bits, needs)
 
     # ----------------------------------------------------------------------

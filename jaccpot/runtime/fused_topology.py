@@ -31,10 +31,12 @@ from jaxtyping import Array
 from .capacity_guard import WALK_NEEDS_FIELDS
 
 __all__ = [
+    "GRAD_FAIL_MASK",
     "NEEDS_FIELDS",
     "OVERFLOW_CROSS",
     "OVERFLOW_FAIL_MASK",
     "OVERFLOW_FAR_CAP",
+    "OVERFLOW_GRAD_LISTS",
     "OVERFLOW_LEVEL_PLAN",
     "OVERFLOW_NEIGHBOR_ROW",
     "OVERFLOW_PARAMS",
@@ -48,13 +50,15 @@ __all__ = [
     "FusedTopology",
     "StepParams",
     "TREE_NEEDS_FIELDS",
+    "grad_ok",
     "overflow_ok",
 ]
 
 #: Bits of :meth:`FusedTopology.overflow_bits`. Bits 0-2 say WHAT overflowed in the
 #: walk; the flat walk also saturates the fresh far list on each of them (bit 4), so
 #: they inform a re-plan and never decide a verdict on their own. Bits 3-10 are the
-#: verdict: any of them set means the step's force is wrong.
+#: verdict: any of them set means the step's force is wrong. Bit 11 is the
+#: differentiable step's: its force is right, its gradient would not be.
 OVERFLOW_WALK_FAR = 1 << 0
 OVERFLOW_WALK_NEAR = 1 << 1
 OVERFLOW_WALK_QUEUE = 1 << 2
@@ -79,6 +83,13 @@ OVERFLOW_LEVEL_PLAN = 1 << 8
 OVERFLOW_CROSS = 1 << 9
 #: traced force parameters outside what the topology was built for (C4)
 OVERFLOW_PARAMS = 1 << 10
+#: the GRADIENT's verdict, not the force's: a list the differentiable step's
+#: reverses read from both ends (the near list; the far list on the sort-free M2L
+#: reverse) is not symmetric, so the force is right and its gradient would be wrong.
+#: Set by ``FusedForceProvider.differentiable_step`` only; outside
+#: :data:`OVERFLOW_FAIL_MASK` (the force verdict, which every default program folds
+#: as a literal), inside :data:`GRAD_FAIL_MASK`
+OVERFLOW_GRAD_LISTS = 1 << 11
 #: What the cell-leaf template rebuild needed of the three bounds its overflow flag
 #: checks: the live leaf count (exact past an overflow), the depth (levels) and the
 #: widest level's node count -- the TREE re-plan's inputs
@@ -90,6 +101,8 @@ TREE_NEEDS_FIELDS = ("leaf_needed", "depth_needed", "widest_needed")
 NEEDS_FIELDS = (*WALK_NEEDS_FIELDS, "tree_overflow", *TREE_NEEDS_FIELDS)
 #: the verdict bits: ``ok = (bits & OVERFLOW_FAIL_MASK) == 0``
 OVERFLOW_FAIL_MASK = 0x7F8
+#: the gradient's verdict bits: the force's and :data:`OVERFLOW_GRAD_LISTS`
+GRAD_FAIL_MASK = OVERFLOW_FAIL_MASK | OVERFLOW_GRAD_LISTS
 
 
 def overflow_ok(bits: Array) -> Array:
@@ -106,6 +119,28 @@ def overflow_ok(bits: Array) -> Array:
         Boolean scalar, ``True`` when no verdict bit (3-10) is set.
     """
     return (jnp.asarray(bits, jnp.uint32) & jnp.uint32(OVERFLOW_FAIL_MASK)) == 0
+
+
+def grad_ok(bits: Array) -> Array:
+    """The gradient's verdict: :func:`overflow_ok` and the lists symmetric.
+
+    What a caller checks before it uses a gradient through
+    ``FusedForceProvider.differentiable_step``: every step's force fitted its
+    capacities AND every step's lists were ones its reverses can read
+    (:data:`OVERFLOW_GRAD_LISTS` clear). The step also makes the gradient NaN when
+    the second fails, so one that skips this check cannot get a wrong number.
+
+    Parameters
+    ----------
+    bits : Array
+        ``uint32`` overflow bits.
+
+    Returns
+    -------
+    Array
+        Boolean scalar, ``True`` when no bit of :data:`GRAD_FAIL_MASK` is set.
+    """
+    return (jnp.asarray(bits, jnp.uint32) & jnp.uint32(GRAD_FAIL_MASK)) == 0
 
 
 # --------------------------------------------------------------------------
@@ -327,7 +362,8 @@ class FusedTopology:
         The refreshed ``LargeNPreparedState``: tree, local expansions after L2L,
         CSR near list, near-field payload. Its far list is the template's
         placeholder (``None`` on the fused lane): the rebuild built a fresh one,
-        used it for M2L and kept none.
+        used it for M2L and kept none -- unless ``rebuild(keep_far_list=True)``
+        (the differentiable step's gradient plan reads it).
     refresh_ok : Any
         Boolean scalar: the far list THIS rebuild built did not saturate (the flat
         walk saturates it on any walk or tree overflow). ``None`` when no rebuild

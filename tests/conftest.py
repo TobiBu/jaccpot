@@ -524,6 +524,13 @@ _DIFF_FMM_TEST_FILES = frozenset(
         "test_large_n_grad_reverse_path.py",
         "test_large_n_far_chain_grad.py",
         "test_l2p_particle_major_reverse.py",
+        # The differentiable fused step and the rollout over it (S9): reverse
+        # programs of the whole lane, interpret mode, 3-6 GB of RSS per rollout
+        # gradient. Without the clearing one worker held every test's executables
+        # of the rollout file, 23 GB (2026-11-01). Their module caches keep results
+        # as arrays, never compiled programs, so the clearing recompiles nothing.
+        "test_fused_differentiable_step.py",
+        "test_grad_rollout_differentiable.py",
     }
 )
 

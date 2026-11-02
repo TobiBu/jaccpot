@@ -1118,7 +1118,8 @@ class EvaluateMixin(_EngineBase):
         grad_plan: Optional["LargeNGradPlan"],
         options: Any,
         force_params: Optional[ForceParams] = None,
-    ) -> Array:
+        return_force_scale: bool = False,
+    ) -> Any:
         """Differentiable evaluation on the ``large_n_gpu`` production state.
 
         NOT a variant of the radix branch: the large-N state carries no
@@ -1151,11 +1152,16 @@ class EvaluateMixin(_EngineBase):
             ``G`` and the softening squared, or ``None`` for the solver's own
             (:func:`~jaccpot.runtime._large_n_grad.resolve_grad_force_params`,
             which raises ``ValueError`` for others under ``mac_type='dehnen_error'``).
+        return_force_scale : bool
+            Also return eq (16b)'s f_b per particle in the same order, as the
+            production evaluation does (the fused provider's differentiable step,
+            under ``mac_type='dehnen_error'``); not differentiated.
 
         Returns
         -------
-        Array
-            Accelerations ``(N, 3)`` in the caller's original order.
+        Any
+            Accelerations ``(N, 3)`` in the caller's original order; with
+            ``return_force_scale``, ``(accelerations, f_b)``.
 
         Raises
         ------
@@ -1192,6 +1198,24 @@ class EvaluateMixin(_EngineBase):
         )
         force = resolve_grad_force_params(self, force_params)
         positions_sorted, masses_sorted = self._sorted_inputs(state, positions, masses)
+        if return_force_scale:
+            accelerations_sorted, scale_sorted = (
+                evaluate_large_n_state_at_positions_and_masses_sorted(
+                    self,
+                    state,
+                    positions_sorted,
+                    masses_sorted,
+                    plan=plan,
+                    force_params=force,
+                    return_force_scale=True,
+                )
+            )
+            dtype = self._grad_output_dtype(state)
+            inverse = state.inverse_permutation
+            return (
+                jnp.asarray(accelerations_sorted)[inverse].astype(dtype),
+                jnp.asarray(scale_sorted)[inverse].astype(dtype),
+            )
         accelerations_sorted = evaluate_large_n_state_at_positions_and_masses_sorted(
             self,
             state,

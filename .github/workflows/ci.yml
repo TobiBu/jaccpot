@@ -151,13 +151,36 @@ jobs:
           # fused-lane solve on CPU; the provider and production-runner files, the
           # heaviest, in a shard of their own. Caps about twice the job times
           # measured on #417 (2026-10-16): integration 14 min, integration-strict
-          # 10.5 min, integration-strict-runner 32.5 min.
+          # 10.5 min, integration-strict-runner 32.5 min. integration-strict without
+          # the S9 files below, measured as the S9 shards were: 16 min, 9.3 GB
+          # summed (2026-11-01, beside three other such runs on the host).
           - shard: integration-strict
             typecheck: "0"
             timeout: 25
           - shard: integration-strict-runner
             typecheck: "0"
             timeout: 65
+          # The differentiable fused step and the rollout over it (S9, #490): every
+          # Pallas kernel in interpret mode and reverse programs of the whole lane;
+          # with them `integration-strict` was cancelled at its cap. Measured as
+          # these jobs run them (coverage, cold JAX cache, loaded 64-core host,
+          # 2026-11-01): integration-strict-grad at `-n 2` 17.5 min, 8.1 GB summed
+          # over both workers; the rollout file's two shards at `-n 1` (its nested
+          # checkpoint's gradient peaks at 12 GB in one process; two workers summed
+          # 20.5 GB) 29 min / 9.2 GB (-rollout) and 20.5 min / 12.2 GB (-modes). A
+          # checkpoint mode added to the rollout's MODES costs one gradient compile
+          # (~5 min) in -modes and one forward (~2.5 min) in -rollout.
+          - shard: integration-strict-grad
+            typecheck: "0"
+            timeout: 35
+          - shard: integration-strict-grad-rollout
+            typecheck: "0"
+            workers: 1
+            timeout: 60
+          - shard: integration-strict-grad-modes
+            typecheck: "0"
+            workers: 1
+            timeout: 45
           - shard: mutual-static-device
             typecheck: "0"
             timeout: 15
@@ -228,7 +251,8 @@ jobs:
           pip install -e ".[dev]"
       - name: Suite with coverage
         # `-n 2`: the memory-limited runner OOMs with more float64-FMM workers
-        # (overrides pyproject's `-n auto`). All `slow` tests DO run here.
+        # (overrides pyproject's `-n auto`); a shard whose single process needs
+        # half the runner sets `workers: 1`. All `slow` tests DO run here.
         #
         # `--dist loadgroup`: `-n 2` bounds the worker COUNT, not what the two
         # workers hold at once; the block-step tests in test_mutual_fmm.py peak at
@@ -242,7 +266,7 @@ jobs:
         # (`branch = true`); `--cov-branch` here could not override it either way.
         run: |
           mapfile -t selection < <(python .github/scripts/test_shards.py args "${{ matrix.shard }}")
-          pytest -n 2 --dist loadgroup "${selection[@]}" \
+          pytest -n ${{ matrix.workers || 2 }} --dist loadgroup "${selection[@]}" \
             --durations=60 \
             --cov=jaccpot \
             --cov-report=xml --cov-report=term:skip-covered

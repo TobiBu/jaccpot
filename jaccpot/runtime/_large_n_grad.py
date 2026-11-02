@@ -53,11 +53,14 @@ from .kernels.core import (
 
 __all__ = [
     "LargeNGradPlan",
+    "LargeNGradStatics",
     "evaluate_large_n_state_at_positions_and_masses_sorted",
+    "freeze_large_n_grad_statics",
     "large_n_farfield_l2p_at",
     "large_n_farfield_locals_at",
     "prepare_large_n_grad_plan",
     "resolve_grad_force_params",
+    "traced_large_n_grad_plan",
 ]
 
 
@@ -383,42 +386,111 @@ def _far_list_symmetric(sources: Array, row_offsets: Array, total_nodes: int) ->
     return _csr_pairs_symmetric(sources, offsets[:-1], offsets[1:] - offsets[:-1])
 
 
-def prepare_large_n_grad_plan(
-    fmm: Any,
-    state: LargeNPreparedState,
-) -> LargeNGradPlan:
-    """Validate a large-N state for differentiation and freeze its discriminators.
+def _csr_pairs_symmetric_on_device(
+    entries: Array, row_starts: Array, counts: Array, shift: Any = 0
+) -> Array:
+    """:func:`_csr_pairs_symmetric` inside a trace: the verdict as a device bool.
 
-    Every rejection here is loud on purpose. A partially-wired large-N seam does
-    not fail -- it returns an incomplete gradient -- so anything unsupported must
-    raise rather than degrade.
+    The same chunked hash sums (:func:`_csr_pair_hash_sums`, one launch per
+    :data:`_SYMMETRY_CHUNK` entries, no array of the list's length), summed on the
+    device -- the ``uint64`` sums wrap there as they do on the host -- and compared
+    there: no host sync, so a traced step can fold the verdict into its bits.
 
     Parameters
     ----------
-    fmm : Any
-        Facade or runtime engine; normalised by :func:`_engine`.
-    state : LargeNPreparedState
-        Prepared state to freeze. Must carry a retained far-pair list --
-        ``retain_far_pairs_for_grad=True`` at construction -- since the M2L
-        recomputation runs against it.
+    entries : Array
+        ``[E]`` the partner of each entry (same index space as the rows).
+    row_starts : Array
+        ``[R]`` (or ``[R + 1]``) non-decreasing row starts.
+    counts : Array
+        ``[R]`` live entries per row.
+    shift : Any
+        Subtracted from each entry first (a neighbour list's leaf node offset).
 
     Returns
     -------
-    LargeNGradPlan
-        The frozen discriminators, safe to capture as a constant.
-
-    Raises
-    ------
-    RuntimeError
-        If the state is missing the retained far pairs, or its configuration is
-        one this seam cannot differentiate. Loud rather than degraded: a
-        partially-wired seam returns an incomplete gradient, which nothing
-        downstream would notice.
+    Array
+        Boolean scalar: both hash sums agree both ways round.
     """
-    _require(
-        isinstance(state, LargeNPreparedState),
-        "prepare_large_n_grad_plan requires a LargeNPreparedState.",
+    entries = jnp.asarray(entries, INDEX_DTYPE)
+    shift = jnp.asarray(shift, INDEX_DTYPE)
+    cnt = jnp.asarray(counts, INDEX_DTYPE)
+    starts = jnp.asarray(row_starts, INDEX_DTYPE)[: int(cnt.shape[0])]
+    num = int(entries.shape[0])
+    size = min(_SYMMETRY_CHUNK, 1 << max(0, (num - 1).bit_length()))
+    total = jnp.zeros((2, 2), jnp.uint64)
+    for base in range(0, num, size):
+        total = total + _csr_pair_hash_sums(
+            entries, starts, cnt, jnp.asarray(base, INDEX_DTYPE), shift, size=size
+        )
+    return jnp.all(total[:, 0] == total[:, 1])
+
+
+def _near_list_symmetric_on_device(neighbor_list: Any) -> Array:
+    """:func:`_near_list_symmetric` inside a trace.
+
+    Parameters
+    ----------
+    neighbor_list : Any
+        The state's ``neighbor_list``.
+
+    Returns
+    -------
+    Array
+        Boolean scalar.
+    """
+    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, INDEX_DTYPE)
+    return _csr_pairs_symmetric_on_device(
+        neighbor_list.neighbors,
+        neighbor_list.offsets,
+        neighbor_list.counts,
+        shift=leaf_nodes[0],
     )
+
+
+def _far_list_symmetric_on_device(
+    sources: Array, row_offsets: Array, total_nodes: int
+) -> Array:
+    """:func:`_far_list_symmetric` inside a trace.
+
+    Parameters
+    ----------
+    sources : Array
+        ``[P]`` sources in CSR order.
+    row_offsets : Array
+        ``[>= total_nodes + 1]`` row offsets by target.
+    total_nodes : int
+        Rows. Static.
+
+    Returns
+    -------
+    Array
+        Boolean scalar.
+    """
+    offsets = jnp.asarray(row_offsets, INDEX_DTYPE)[: total_nodes + 1]
+    return _csr_pairs_symmetric_on_device(
+        sources, offsets[:-1], offsets[1:] - offsets[:-1]
+    )
+
+
+def _require_differentiable_layout(state: Any) -> None:
+    """Refuse a state whose layout the differentiable evaluation does not cover.
+
+    The checks of :func:`prepare_large_n_grad_plan` that read only static fields and
+    shapes, so they hold on a traced state too (``FusedForceProvider.grad_plan``):
+    the radix fast lane, the solidfmm basis, and the near field's prepacked layout
+    with no overflow or target-block payload.
+
+    Parameters
+    ----------
+    state : Any
+        A ``LargeNPreparedState`` (concrete or traced).
+
+    Returns
+    -------
+    None
+        Returns normally when every check passes.
+    """
     _require(
         bool(getattr(state, "radix_fast_lane", False)),
         "differentiable large-N evaluation requires the radix fast lane "
@@ -461,6 +533,45 @@ def prepare_large_n_grad_plan(
         "non-empty). The pairs lane needs its own analytic reverse; a larger "
         "leaf_target or particle count selects the prepacked layout.",
     )
+
+
+def prepare_large_n_grad_plan(
+    fmm: Any,
+    state: LargeNPreparedState,
+) -> LargeNGradPlan:
+    """Validate a large-N state for differentiation and freeze its discriminators.
+
+    Every rejection here is loud on purpose. A partially-wired large-N seam does
+    not fail -- it returns an incomplete gradient -- so anything unsupported must
+    raise rather than degrade.
+
+    Parameters
+    ----------
+    fmm : Any
+        Facade or runtime engine; normalised by :func:`_engine`.
+    state : LargeNPreparedState
+        Prepared state to freeze. Must carry a retained far-pair list --
+        ``retain_far_pairs_for_grad=True`` at construction -- since the M2L
+        recomputation runs against it.
+
+    Returns
+    -------
+    LargeNGradPlan
+        The frozen discriminators, safe to capture as a constant.
+
+    Raises
+    ------
+    RuntimeError
+        If the state is missing the retained far pairs, or its configuration is
+        one this seam cannot differentiate. Loud rather than degraded: a
+        partially-wired seam returns an incomplete gradient, which nothing
+        downstream would notice.
+    """
+    _require(
+        isinstance(state, LargeNPreparedState),
+        "prepare_large_n_grad_plan requires a LargeNPreparedState.",
+    )
+    _require_differentiable_layout(state)
 
     compact = getattr(state, "compact_far_pairs", None)
     if compact is None:
@@ -525,6 +636,173 @@ def prepare_large_n_grad_plan(
         far_pairs_target_sorted=bool(target_sorted),
         far_pairs_symmetric=far_symmetric,
     )
+
+
+@dataclass(frozen=True)
+class LargeNGradStatics:
+    """The static half of a :class:`LargeNGradPlan`, frozen once for many topologies.
+
+    What :func:`traced_large_n_grad_plan` builds every step's plan with: the plan's
+    meta fields, checked once on an eager state by :func:`prepare_large_n_grad_plan`
+    (:func:`freeze_large_n_grad_statics`) and verified again against each traced
+    topology. Holds no array (a provider holds no device buffer).
+
+    Attributes
+    ----------
+    order : int
+        Expansion order.
+    max_leaf_size : int
+        Leaf slot capacity.
+    center_mode : str
+        How expansion centres are chosen.
+    m2l_chunk_size : Optional[int]
+        M2L chunk size.
+    l2l_chunk_size : Optional[int]
+        L2L chunk size.
+    num_far_pairs : int
+        The far list's capacity.
+    far_pairs_target_sorted : bool
+        The far list is the walk's ``TargetSortedFarPairs`` CSR.
+    far_pairs_symmetric : bool
+        The eager list was symmetric, so every step's plan takes the sort-free M2L
+        reverse -- and checks its own list's symmetry on the device.
+    """
+
+    order: int
+    max_leaf_size: int
+    center_mode: str
+    m2l_chunk_size: Optional[int]
+    l2l_chunk_size: Optional[int]
+    num_far_pairs: int
+    far_pairs_target_sorted: bool
+    far_pairs_symmetric: bool
+
+
+def freeze_large_n_grad_statics(
+    fmm: Any, state: LargeNPreparedState
+) -> LargeNGradStatics:
+    """The static fields of ``state``'s grad plan, with every check of the plan.
+
+    Eager: :func:`prepare_large_n_grad_plan` on ``state`` (the layout, the retained
+    far list, the near and far lists' symmetry on the host), and its arrays dropped.
+
+    Parameters
+    ----------
+    fmm : Any
+        Facade or runtime engine.
+    state : LargeNPreparedState
+        A concrete prepared state with its far list (the fused provider's eager
+        topology).
+
+    Returns
+    -------
+    LargeNGradStatics
+        The plan's meta fields.
+    """
+    plan = prepare_large_n_grad_plan(fmm, state)
+    return LargeNGradStatics(
+        order=plan.order,
+        max_leaf_size=plan.max_leaf_size,
+        center_mode=plan.center_mode,
+        m2l_chunk_size=plan.m2l_chunk_size,
+        l2l_chunk_size=plan.l2l_chunk_size,
+        num_far_pairs=plan.num_far_pairs,
+        far_pairs_target_sorted=plan.far_pairs_target_sorted,
+        far_pairs_symmetric=plan.far_pairs_symmetric,
+    )
+
+
+def traced_large_n_grad_plan(
+    fmm: Any, state: LargeNPreparedState, statics: LargeNGradStatics
+) -> tuple[LargeNGradPlan, Array]:
+    """A grad plan for a TRACED state: frozen statics, the state's own lists.
+
+    :func:`prepare_large_n_grad_plan` refuses tracers: it checks the lists'
+    symmetry on the host and reads shapes with ``int()``. Here the static fields
+    come from ``statics`` and are verified against the traced state's (its
+    template's properties: layout, order, leaf capacity, the far list's type and
+    capacity, the runtime overrides -- a mismatch raises at trace time), the data
+    fields are the state's far list (the walk's, kept by
+    ``rebuild(keep_far_list=True)``), and the symmetry the reverses rely on -- the
+    near list always, the far list when the plan takes the sort-free M2L reverse --
+    is a DEVICE verdict returned beside the plan.
+
+    Parameters
+    ----------
+    fmm : Any
+        Facade or runtime engine.
+    state : LargeNPreparedState
+        A traced (or concrete) prepared state with its far list.
+    statics : LargeNGradStatics
+        From :func:`freeze_large_n_grad_statics`.
+
+    Returns
+    -------
+    tuple[LargeNGradPlan, Array]
+        The plan, and a boolean scalar: the lists are symmetric (``False``: the
+        gradient on them would be wrong).
+
+    Raises
+    ------
+    RuntimeError
+        If the state holds no far list (a rebuild without ``keep_far_list``), or a
+        static field differs from ``statics``.
+    """
+    from ._interaction_cache import TargetSortedFarPairs
+
+    _require(
+        isinstance(state, LargeNPreparedState),
+        "a traced grad plan requires a LargeNPreparedState.",
+    )
+    _require_differentiable_layout(state)
+    compact = getattr(state, "compact_far_pairs", None)
+    if compact is None:
+        raise RuntimeError(
+            "the traced topology holds no far list: rebuild it with "
+            "keep_far_list=True (FusedForceProvider.differentiable_step does)"
+        )
+    engine = _engine(fmm)
+    overrides = engine._resolve_runtime_execution_overrides(
+        num_particles=int(state.positions_sorted.shape[0])
+    )
+    sources = jnp.asarray(compact.sources, dtype=INDEX_DTYPE)
+    got = LargeNGradStatics(
+        order=int(state.local_order),
+        max_leaf_size=int(state.max_leaf_size),
+        center_mode=str(overrides.center_mode),
+        m2l_chunk_size=overrides.m2l_chunk_size,
+        l2l_chunk_size=overrides.l2l_chunk_size,
+        num_far_pairs=int(sources.shape[0]),
+        far_pairs_target_sorted=isinstance(compact, TargetSortedFarPairs),
+        far_pairs_symmetric=statics.far_pairs_symmetric,
+    )
+    if got != statics:
+        raise RuntimeError(
+            "the traced topology's grad-plan statics differ from the frozen ones "
+            f"(traced {got}, frozen {statics}): the provider's template changed "
+            "since they were frozen; freeze them again on the new provider"
+        )
+    targets = jnp.asarray(compact.targets, dtype=INDEX_DTYPE)
+    symmetric = _near_list_symmetric_on_device(state.neighbor_list)
+    if statics.far_pairs_symmetric:
+        num_nodes = int(jnp.asarray(state.tree.node_ranges).shape[0])
+        symmetric = symmetric & _far_list_symmetric_on_device(
+            sources, targets, num_nodes
+        )
+    plan = LargeNGradPlan(
+        far_pair_sources=sources,
+        far_pair_targets=targets,
+        far_pair_active_count=getattr(compact, "far_pair_count", None),
+        order=statics.order,
+        max_leaf_size=statics.max_leaf_size,
+        center_mode=statics.center_mode,
+        m2l_chunk_size=statics.m2l_chunk_size,
+        l2l_chunk_size=statics.l2l_chunk_size,
+        num_far_pairs=statics.num_far_pairs,
+        far_pairs_target_sorted=statics.far_pairs_target_sorted,
+        far_pairs_symmetric=statics.far_pairs_symmetric,
+    )
+    return plan, symmetric
 
 
 def large_n_farfield_locals_at(
@@ -750,7 +1028,8 @@ def evaluate_large_n_state_at_positions_and_masses_sorted(
     include_near: bool = True,
     include_far: bool = True,
     force_params: Any = None,
-) -> Array:
+    return_force_scale: bool = False,
+) -> Any:
     """Fixed-topology large-N re-evaluation at live inputs, in SORTED order.
 
     The production ``evaluate_large_n_state`` fast lane, expression for
@@ -798,13 +1077,21 @@ def evaluate_large_n_state_at_positions_and_masses_sorted(
         is the derivative of the force at the frozen lists (for a compact
         softening kernel, valid up to the softening the walk was built for,
         ``FusedForceProvider.walk_eps2``).
+    return_force_scale : bool
+        Also return eq (16b)'s f_b per sorted particle, as the production
+        evaluation computes it (``evaluate_large_n_state(return_force_scale=True)``):
+        the near kernel's force-scale lane (the same call, through its
+        ``custom_vjp``, whose reverse drops that lane's cotangent) plus the far half
+        the topology's walk stored (``state.force_scale_far_sorted``). A topology
+        input of the next walk, not differentiated: the caller stops its gradient.
 
     Returns
     -------
-    Array
+    Any
         Accelerations in SORTED order -- the caller applies the inverse
         permutation. Returning sorted is deliberate: it keeps this function
-        expression-for-expression comparable with the production fast lane.
+        expression-for-expression comparable with the production fast lane. With
+        ``return_force_scale``, ``(accelerations, f_b)``, both sorted.
 
     Raises
     ------
@@ -835,7 +1122,19 @@ def evaluate_large_n_state_at_positions_and_masses_sorted(
     )
     near_acc = jnp.zeros_like(positions)
     far_acc = jnp.zeros_like(positions)
-    if include_near:
+    near_scale = None
+    if include_near and return_force_scale:
+        near_acc, near_scale = evaluate_large_n_nearfield_fast_lane(
+            engine,
+            state,
+            return_potential=False,
+            positions_sorted=positions,
+            masses_sorted=masses,
+            differentiable=True,
+            return_force_scale=True,
+            **near_kw,
+        )
+    elif include_near:
         near_acc = evaluate_large_n_nearfield_fast_lane(
             engine,
             state,
@@ -850,4 +1149,11 @@ def evaluate_large_n_state_at_positions_and_masses_sorted(
             engine, state, positions, masses, plan=plan
         )
         far_acc = -g_far * large_n_farfield_l2p_at(state, locals_live, positions)
+    if return_force_scale:
+        # as the production evaluation sums them (``evaluate_large_n_state``)
+        if near_scale is None:
+            near_scale = jnp.zeros_like(positions[:, 0])
+        far_scale = getattr(state, "force_scale_far_sorted", None)
+        scale = near_scale if far_scale is None else near_scale + far_scale
+        return near_acc + far_acc, scale
     return near_acc + far_acc
