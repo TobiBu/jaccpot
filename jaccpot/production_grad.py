@@ -556,6 +556,96 @@ class GradientPlan:
             **self.params,
         }
 
+    def arrays(self, device: Any = None) -> dict:
+        """The plan's array data, placed once, for a program to take as ARGUMENTS.
+
+        :meth:`rollout` otherwise reads the plan's own arrays -- the f_b seed of
+        every seeded segment, a restart's restored handle -- and the caller's
+        ``dt`` / force parameters from ``inputs``; inside ``jax.jit`` the plan's
+        arrays are then CONSTANTS of the program (copied into it, its size and
+        compile time growing with N). Pass ``rollout(inputs, arrays=plan.arrays())``
+        (or tracers of it: a jitted function's argument) and they are arguments.
+        The values are the plan's, so the program computes the same numbers.
+
+        Parameters
+        ----------
+        device : Any
+            Where to place them (``jax.device_put``); ``None``: the default
+            device.
+
+        Returns
+        -------
+        dict
+            ``{"params": tuple, "seeds": tuple, "boundary": Optional[dict]}``:
+            ``params`` the leaves of ``(dt, force_params)`` as the runner passed
+            them, each an array or ``None`` where the leaf is a Python number (a
+            literal of the program, which stays the plan's); ``seeds`` one
+            ``[N]`` f_b (or ``None``) per segment, :attr:`GradSegment.seed`;
+            ``boundary`` the restored handle's arrays (:attr:`boundary`) or
+            ``None``.
+        """
+        leaves = jax.tree_util.tree_leaves(self._array_params())
+        host = {
+            "params": tuple(
+                leaf if isinstance(leaf, (jax.Array, np.ndarray)) else None
+                for leaf in leaves
+            ),
+            "seeds": tuple(seg.seed for seg in self.segments),
+            "boundary": self.boundary,
+        }
+        if device is None:
+            return jax.tree_util.tree_map(jnp.asarray, host)
+        return jax.device_put(host, device)
+
+    def _array_params(self) -> dict:
+        """``{"dt", "force_params"}`` as the runner passed them (:meth:`arrays`).
+
+        Returns
+        -------
+        dict
+            The two entries of :attr:`params`.
+        """
+        return {"dt": self.params["dt"], "force_params": self.params["force_params"]}
+
+    def _bound(self, inputs: dict, arrays: dict) -> tuple:
+        """``inputs`` completed from ``arrays``, and the seeds and boundary to read.
+
+        Parameters
+        ----------
+        inputs : dict
+            The caller's inputs; a ``dt`` or ``force_params`` they name wins.
+        arrays : dict
+            What :meth:`arrays` returned (or tracers of it).
+
+        Returns
+        -------
+        tuple
+            ``(inputs, seeds, boundary)``.
+
+        Raises
+        ------
+        ValueError
+            If ``arrays`` do not match this plan (another plan's).
+        """
+        own = self._array_params()
+        leaves, treedef = jax.tree_util.tree_flatten(own)
+        given = tuple(arrays["params"])
+        seeds = tuple(arrays["seeds"])
+        boundary = arrays["boundary"]
+        if (
+            len(given) != len(leaves)
+            or len(seeds) != len(self.segments)
+            or (boundary is None) != (self.boundary is None)
+        ):
+            raise ValueError(
+                "arrays do not match this plan: take them from this plan's "
+                "arrays()"
+            )
+        params = jax.tree_util.tree_unflatten(
+            treedef, [leaf if new is None else new for leaf, new in zip(leaves, given)]
+        )
+        return {**params, **inputs}, seeds, boundary
+
     def rollout(
         self,
         inputs: dict,
@@ -563,6 +653,7 @@ class GradientPlan:
         checkpoint: Optional[str] = "step",
         inner_steps: Optional[int] = None,
         start_force: str = "outside",
+        arrays: Optional[dict] = None,
     ) -> RolloutResult:
         """The gradient run: the segments chained, each on its settled plan. Traced.
 
@@ -575,6 +666,8 @@ class GradientPlan:
         ----------
         inputs : dict
             :data:`GRADIENT_INPUTS` -> value (:meth:`inputs` for the pre-pass's).
+            With ``arrays``, ``dt`` and ``force_params`` may be left out (they
+            come from ``arrays``, the plan's Python numbers kept).
         checkpoint : Optional[str]
             Each segment's ``differentiable_rollout(checkpoint=...)``.
         inner_steps : Optional[int]
@@ -585,6 +678,10 @@ class GradientPlan:
             the forward the runner's bitwise; ``"adjoint"`` inside the rollout's
             hand-written reverse, for less memory (module docstring, "THE START
             FORCE").
+        arrays : Optional[dict]
+            The plan's array data as :meth:`arrays` returned it, or tracers of it
+            (a program's arguments): read in place of the plan's own seeds and
+            restored handle. ``None``: the plan's (constants of a jitted caller).
 
         Returns
         -------
@@ -598,7 +695,8 @@ class GradientPlan:
         ValueError
             If the first segment continues a handle (a plan from ``restart_from``)
             and the plan holds no restored arrays, a segment's start kind is
-            unknown, or ``start_force`` is not one of :data:`START_FORCE_MODES`.
+            unknown, ``start_force`` is not one of :data:`START_FORCE_MODES`, or
+            ``arrays`` come from another plan.
         """
         from jaccpot.production import _trace_state_kept
 
@@ -606,6 +704,10 @@ class GradientPlan:
             raise ValueError(
                 f"start_force must be one of {START_FORCE_MODES}, got {start_force!r}"
             )
+        seeds = tuple(seg.seed for seg in self.segments)
+        boundary = self.boundary
+        if arrays is not None:
+            inputs, seeds, boundary = self._bound(inputs, arrays)
         x = jnp.asarray(inputs["positions"])
         v = jnp.asarray(inputs["velocities"])
         m = jnp.asarray(inputs["masses"])
@@ -684,8 +786,8 @@ class GradientPlan:
                     _carrying_self(base) if carry_self else base,
                     in_chain,
                 )
-                seed = array(seg.seed)
-                restart = self.boundary if k == 0 else None
+                seed = array(seeds[k])
+                restart = boundary if k == 0 else None
                 if prev is None and seg.kind in ("carried", "self"):
                     if restart is None:
                         raise ValueError(
