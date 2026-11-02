@@ -96,11 +96,13 @@ def eager_cached(
     def call(*args: Any, **kwargs: Any) -> Any:
         import jax
 
+        from jaccpot._jax_compat import Tracer
+
         cache = _CACHE.get()
         if cache is None:
             return direct(*args, **kwargs)
         leaves = jax.tree_util.tree_leaves((args, kwargs))
-        if any(isinstance(leaf, jax.core.Tracer) for leaf in leaves):
+        if any(isinstance(leaf, Tracer) for leaf in leaves):
             return direct(*args, **kwargs)
         key = (fn, trailing, tuple(sorted(static.items())), _environment())
         program = cache.get(key)
