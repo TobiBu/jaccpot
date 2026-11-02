@@ -670,7 +670,6 @@ def prepare_real_upward_sweep(
         # pallas_call's generic JVP rule (which dies on program_id).
         from jaccpot._env import env_flag
         from jaccpot.pallas.p2m_real_leaf import p2m_real_leaves_pallas_cvjp
-
         from jaccpot.runtime.eager_cache import eager_cached
 
         node_ranges_arr = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
