@@ -2410,3 +2410,189 @@ The forward-only rollout over `differentiable_step` == the one over `step`, 0 el
 - The tests that count reverse kernels at trace time need `jax.clear_caches()` first: at `-n 8` another module's
   test had traced the inner functions (fixed in both files; CI's `-n auto` does not use `--dist loadgroup`).
 - Timings: HoreKa (local cards are functional / memory only).
+
+## S9 (session 2) — gradients at production N (2026-11-01)
+
+Plan `s9-session2.md`. Session 1 measured r = 16 B/particle per stored step but W = 786-999 B/p, which put one
+rollout step at 1e8 at ~79 GB; W became the first lever. Three tracks, integrated on `s9/session2` (`s9/integration`
++ merge commits): D the workspace (`s9/grad-workspace`), E the runner's gradient mode (`s9/runner-grad-mode`), F host
+offload (`s9/grad-offload-2`, rebuilt on D's design). CPU program identity 36/36 against `s9-base-cpu` on every track
+and on the final merge (tag `s9-s2-final-cpu`). GPU rows on cards 6 / 7: memory and functional only, no timings.
+
+### Why W was large (D; GPU buffer assignment and live ranges at the peak, 8e6, `"step"`, T = 2)
+The peak sat INSIDE the forward scan, not the reverse: one step's forward (271.6 B/p) beside 504.9 B/p of
+operand-free fills -- the `[nodes, 49]` zero tables (177.6), `_flat_walk_lists` (139.1), the tree's `[N, 3]` fills
+(74.9), `_mutual_walk_jit` (54.9), copies (58.4) -- held from the start force's forward to its `jax.checkpoint`
+recompute at the end of the program. Two mechanisms: JAX's reverse of `lax.scan` hoists loop-invariant forward work
+out of the loop (`_scan_partial_eval`), and XLA's CSE merges operand-free instructions across the checkpoint (its
+barrier fences only instructions with operands). 2e6: 999 = 339.7 + 641.9 + 17.4 packing. None of session 1's
+suspects was the cause: the duplicate far chain and the prepared state's cotangents are not at the peak, and the
+near reverse is 51 B/p.
+
+| commit | lever | W at 8e6, `"step"` (B/p) |
+| --- | --- | --- |
+| baef5016 | `"step"` / `"nested"` through a hand-written reverse (`_adjoint_rollout`, a `custom_vjp`) instead of `jax.checkpoint` in a scan: no partial evaluation, no hoisting; the step's constants passed explicitly (`_StepConsts`) | 786 -> 775 |
+| 374228f5 | the start force inside the adjoint, its reverse unit 0 of ONE reverse loop (`lax.cond` / `lax.switch` on the index): every force's reverse its own computation; a one-step rollout keeps a two-unit loop so XLA cannot inline it; the `"nested"` remainder segment in the same loop | 775 -> 450.5 |
+| bc9650d1 | the grad plan's on-device list-symmetry check a `lax.scan` over 2^21-entry chunks (`_SYMMETRY_CHUNK_ON_DEVICE`) instead of unrolled 2^24 chunks (~1 GiB of searchsorted / hash temporaries, the step's peak after the previous lever) | 450.5 -> **330.2** |
+
+`optimization_barrier` between the reverse kernels' zero-init outputs was tried: XLA removes it, W unchanged to the
+byte. What W = 330 still is: the one-step VJP, top of heap at the M2L reverse -- three `[nodes, 49]` tables (44.4
+B/p each), the far list's sources (28.8), position-cotangent pieces (~40), the residual's dynamic-slice copies (16),
+near-reverse lanes (16).
+
+Behaviour of `"step"` / `"nested"` after D (documented in `grad_rollout.py`): the aux is not differentiated (the
+provider's f_b was gradient-stopped already); a `step_fn` must not close over values being differentiated (the
+`custom_vjp` refuses it: pass them through `params`); no `jax.jvp` through these modes. `_checkpointed` is gone.
+D's gradients at 2e6 (T = 3, every mode) are BITWISE the session-1 design's (0 of 6M / 6M / 2M elements).
+
+### Memory after D and F (`memory_analysis()`; `preset="galaxy"`, clipped Plummer, float32, `dehnen_error`)
+| N | mode | W (B/p) | r per step | carry per segment | host per step / segment |
+| --- | --- | --- | --- | --- | --- |
+| 2e6 | `"step"` | 407.5 (was 999) | 16.00 | -- | -- |
+| 2e6 | `"offload"` (T 4-64, inner 2-8) | 440.5, every row identical | 0 | 0 | 16.00 / 40.00 |
+| 8e6 | `"step"` | 330.2 (was 786) | 16.00 | -- | -- |
+| 8e6 | `"nested"` | 363.0 (was 865) | 14 | 40 | -- |
+| 8e6 | `"offload"` (T 4-256, inner 2-3) | 359.0, every row identical | 0 | 0 | 16.00 / 40.00 |
+| 2.5e7 | `"step"` | 283.1 | -- | -- | -- |
+| 1e8 | `"step"` | 263.2 | 13.17 (two-point fit, T = 2, 3; not 16, not investigated) | -- | -- |
+
+Host bytes under `"offload"`: `(T // inner) x 40 + inner x 16` B/p, fit residual 0 B; 8e6 at T = 256 holds 6.84 GB
+on the host. Transfer volume (read off the compiled HLO): 16 + 40 / inner B/p per step each way (26 at inner 4).
+
+### Measured peaks (`peak_bytes_in_use`; the model `resident + temporaries + outputs` holds to < 1 %)
+| N | run | temporaries | peak | notes |
+| --- | --- | --- | --- | --- |
+| 2e6 | `"offload"`, T = 16, inner 4 | 0.881 GB | 1.152 GB | `"nested"` (D) the same: 1.315 / 1.588 GB |
+| 8e6 | `"offload"`, T = 16, inner 4 | 2.872 GB | 3.882 GB | |
+| 2.5e7 | `"step"`, T = 1 | 7.08 GB | 10.29 GB | model 9.56 |
+| 1e8 | `"step"`, T = 1 | 24.32 GiB | 35.16 GiB | model 35.11; a repeat 35.24 |
+| 1e8 | `"offload"`, T = 4, inner 2 | 25.66 GiB (+ 10.43 host) | 36.61 GiB of 37.52 | model exact |
+| 1e8 | `"offload"`, T = 16, inner 4 | 25.86 GiB (+ 20.86 host) | 36.53 GiB | `cuda_async` allocator; BFC ran out (largest free block 26.9 GiB beside the outputs) |
+
+Every 1e8 gradient finite, its forward verdict clean (bits 0, `grad_ok`). At 1e8 the gradient only runs with a clean
+allocator: prepare, clear the solver's `_last_*` side channels, move the provider's template through the host so it
+lands low, ONE compiled program, inputs placed after (`XLA_PYTHON_CLIENT_PREALLOCATE=true`, `MEM_FRACTION=0.95`);
+the bench's `--execute` (after compiling every horizon) fragmented the BFC region and ran out. Returning the aux
+from inside the 1e8 gradient program does not fit (temporaries 25.80 GiB): the verdict comes from a separate
+forward-only rollout (G1: the same trajectory). The forward-only rollout over `differentiable_step` needs MORE than
+the gradient there (27.16 GiB). Offload's device level at 1e8 is not quite flat (25.66 at T = 4 / inner 2, 25.86 at
+T = 16 / inner 4, ~2 B/p); at 2e6 and 8e6 every row was identical to the byte.
+
+### `checkpoint="offload"` (F)
+`"nested"`'s structure with an explicit transfer in `_adjoint_rollout`: `jax.device_put(leaf,
+jax.memory.Space.Host)` to store, `Space.Device` to load, nothing through `jax.checkpoint`. The forward's outer scan
+stacks each segment's start carry `(x, v, a, f_b)` on the host; in the reverse a segment's replay writes each step's
+drifted x and aux to the host, and the reverse loop loads each just before use. With `offload=False` every helper is
+the identity: `"step"` / `"nested"` / `None` lower to D's program text (10 / 10 cases). Gates: forward bitwise
+(`strict_run_v2` on CPU; `"step"`'s on the A100 at 2e6); gradient BITWISE `"nested"`'s (CPU direct sum, CPU fused
+lane, A100 2e6); G4's retrace the same text; device temporaries flat to the byte at 2e6 / 8e6
+(`test_offload_keeps_the_device_temporaries_flat`). On CPU host and device are one memory: the same program,
+nothing moves. Not built: a `"step"`-structured offload (two forces per step, 16 B/p per step on the host).
+
+### The runner's gradient mode (E; `jaccpot/production_grad.py`, `docs/production.md` "Gradient mode")
+`runner.gradient_plan(state, masses, *, dt, num_steps, ...)` is `run()` itself (segments, retries, re-plans,
+callbacks, restart files) with a recorder: per segment the plan the scan traced with, the provider with its
+gradient statics frozen (one jitted rebuild per distinct plan, cached by `provider.key()`), and how the segment
+started. `GradientPlan.rollout(inputs, checkpoint, inner_steps)` is one pure chain of `differentiable_rollout`s,
+each traced under its segment's plan; `GradientPlan.value_and_grad(loss, wrt=...)` (any of positions, velocities,
+masses, dt, force_params, external_params) raises `RolloutVerdictError` on a failed verdict;
+`runner.value_and_grad` runs both passes. Single card (the mesh mode raises).
+
+The runner's segment boundaries are reproduced kind by kind (an opt-in host-side record in
+`_strict_particle_carry_run`, off by default: nothing kept, default memory unchanged):
+
+| kind | when | the next segment starts from |
+| --- | --- | --- |
+| carried | no retry | the previous total acceleration and aux |
+| start | a fresh start, or a retry whose start force overflowed | the start force from the seed; its f_b feeds step 1 |
+| seed_kept | a caps-only retry, no field | the start force from the re-prepare's seed, the same seed for step 1 |
+| self | a retry with a field | the previous segment's last self-gravity + the field (carried in the aux) |
+| eager_self | `JACCPOT_STRICT_CAPS_ONLY_PREPARE=0` | as seed_kept (not gated) |
+
+The chain computes every start force itself and adds the field behind `lax.optimization_barrier` (without it XLA
+contracts the runner's eager add into an FMA). A restart keeps the file's start acceleration as the forward value
+and differentiates the force recomputed at the restart positions (`_keep_value`, a `custom_vjp`).
+
+Integration with D (commit 2940bf0f): `production_grad` imported `_checkpointed` (now
+`jax.checkpoint(..., prevent_cse=True)` directly); D's `custom_vjp` traces each step AGAIN when the reverse is
+built, after the chain's loop, so a segment traced under the last segment's plan and its frozen statics refused
+the rebuild (num_far_pairs 4096 traced vs 2048 frozen) -- `_under_plan` installs the segment's own plan for a trace
+outside the loop; and D does not differentiate the aux, where the segment before a "self" boundary carries its last
+self-gravity, so under `"step"` / `"nested"` that tangent was SILENTLY dropped (FD in the positions -63.40 against
+the gradient's -57.25, Plummer lane; caught by E's FD gate). The carried value is kept bitwise and its tangent is
+the same force recomputed on that segment's plan from the last step's inputs, as the restart path does
+(`_keep_value`); `checkpoint=None` differentiates the aux and is unchanged.
+
+**The aux guard (`s9/aux-guard`).** That bug class is now refused at trace time: `_adjoint_rollout` is
+`defvjp(..., symbolic_zeros=True)`, and its reverse raises `ValueError` (naming the mode and the leaf, pointing at
+`checkpoint=None` or a `_keep_value` recompute) when a floating leaf of the OUTPUT aux receives a cotangent that is
+not a symbolic zero. The input aux gets a symbolic zero back, so a chain of rollouts (E's segments, the provider's
+f_b passed on) does not trip its predecessor's check; `_keep_value` returns a symbolic zero for its value for the
+same reason. With 2940bf0f's third fix reverted, E's FD test raises while `value_and_grad` traces (before any
+compile). The lowered gradient programs are text-identical to the unguarded ones (16 programs: the strict rollout
+gates x 4 modes, the unit direct-sum cases). Not guarded: an aux INPUT that depends on a differentiated value
+upstream -- JAX gives every floating output of a `custom_vjp` a non-symbolic tangent, so a chained aux is
+indistinguishable from a differentiated one; documented on the `aux` parameter.
+
+Gates (CPU interpret, N = 512, float64, p2, 3 segments x 2 steps, total mass ~1; `test_runner_gradient_mode.py`, 9
+tests):
+
+| gate | result |
+| --- | --- |
+| G1 through a re-plan | a callback halves the far cap after segment 1, forcing a retry of segment 2: state, total acceleration and f_b 0 elements differ from the runner's, the primal inside the gradient program too. Plummer + harmonic field + traced G / eps2 (start / self / carried, caps 2048 / 2048 / 4096); `dehnen_error` + field (start / self / carried); `dehnen_error` without (start / seed_kept / carried) |
+| FD, every force's lists identical on both +-h runs | Plummer x0 1.4e-9, v0 1.3e-12, m 7.3e-11, k 8.8e-11, G 2.3e-9, eps2 2.6e-9; `dehnen_error` 3.9e-10 / 2.3e-12 / 2.6e-11 / 9.1e-11 (eps2's +h run sets `OVERFLOW_PARAMS`, the only bit allowed) |
+| A-vs-A | a second call and a fresh compile bitwise |
+| restart | the forward bitwise the runner's (both MACs); the gradient pulled back through the first segment vs the uninterrupted one: geometric MAC 1.8e-16 (gated 1e-12); `dehnen_error` 3.2e-8 (x) / 6.1e-8 (m) / 1.8e-10 (v), probe only: the file holds f_b_k, not the f_b_{k-1} the restart force took its thresholds from (2944 vs 2946 far pairs at the restart positions) |
+| refusal | the gradient at a Plummer sphere overflows the caps: `RolloutVerdictError` |
+
+Not bitwise: a field with more than one multiply (NFW) at the boundaries where the runner adds it eagerly (step 0,
+a retry with a field): 264 of 1536 field components at step 0 by an ulp, at most 5.6e-17 in the state after 4-6
+steps. The G1 tests use the harmonic field (bitwise behind the barrier).
+
+### G3 (session 1's section has the numbers)
+FMM rollout gradient vs the direct sum's at p2 and p4 over T = 1-32: in the force error's class, flat from T = 8 to 32.
+
+### CI
+| shard | what | `-n` / timeout | measured (CI's form: coverage, cold cache, loaded host) |
+| --- | --- | --- | --- |
+| `integration-strict-grad` | the fused differentiable step, the rollout on the provider (+ D's many-chunk symmetry test: 20 tests) | 2 / 35 min | 17.4 min / 8.1 GB (session 1) |
+| `integration-strict-grad-rollout` | the rollout gates (+ the aux guard's chain of two provider rollouts x 3 modes, ~+3 min) | 1 / 60 min | 28.9 min / 9.2 GB (session 1) |
+| `integration-strict-grad-modes` | the checkpoint modes (offload's case back in) | 1 / 45 min | 20.6 min / 12.2 GB (session 1) |
+| `integration-strict-grad-runner` | E's G1 (three lanes); the gradient gates collected and skipped | 1 / 45 min | 22.5 min / 13.4 GB |
+
+E's six gradient gates are MANUAL (`JACCPOT_RUN_MANUAL_TESTS=1`; the user's call, 2026-11-01): one gradient compile
+of the three-segment chain peaks at 18.7 GB (Plummer) / 20.9 GB (`dehnen_error`) of RSS on CPU (16.6 GB before D),
+32.8 / 38.4 GB per test with the second compile. Measured and not taken: the pure-JAX near field is 4-6 GB WORSE
+(and `dehnen_error` needs the CSR lane); the second compile as program text, a two-segment chain and the CPU walk
+together bring the Plummer, restart and refusal tests to 13.0-13.3 GB but leave the two `dehnen_error` ones at 15.7.
+All nine passed on the merge with and without `JACCPOT_RUNTIME_TYPECHECK=1`.
+
+### Open after session 2
+- **Timings (HoreKa):** `bench/slurm/grad_rollout_timing.sbatch` (one card of an exclusive node, one process at a
+  time, resumable, `ROWS=<regex>`; ~4-5 h rough) over `bench/grad_rollout_timing.py` (one configuration per process,
+  the clean-allocator recipe; per (N, T, mode): (a) the production forward rollout over `step`, (b) the forward-only
+  rollout over `differentiable_step` -- b - a is the gradient's forward overhead, the duplicate far chain and the
+  grad lists, bitwise to (a) by `--reference` -- (c) `value_and_grad` in `"step"` / `"nested"` / `"offload"`;
+  `--trace` gives a per-stage kernel table, the near reverse's share). Rows: S8's single-force gradient at 8e6
+  (galaxy, traced), 8e6 / 2.5e7 / 1e8 (S8's G1 point: the gate's `--galaxy` prepare runs out of memory at 2.5e7, and
+  its far list needs 1.51e9 entries at 1e8, past the 1.43e9 index range); rollouts at 8e6 and 2.5e7, T = 1 and 16,
+  every mode; 1e8 T = 1 `"step"`, T = 4 `"offload"` (inner 2), T = 16 `"offload"` (inner 4, `cuda_async`: its time
+  includes the async allocator's cost). Every row kind ran functionally on card 6 at 2e6, and the 1e8 T = 4 offload
+  row (peak 36.44 GiB; the gradient returns only the verdict's bits -- the whole aux's f_b output did not fit).
+  Nothing here is timed.
+- **An exact `dehnen_error` restart tangent** needs f_b_{k-1} in the restart file: the scan would output it, which
+  changes the default program.
+- **The pre-pass at production N** (E, unmeasured): a synchronous host copy of the state per segment, one jitted
+  rebuild per distinct plan, `with_grad_plan`'s host symmetry checks on the full far list (GBs at 1e8). The runner
+  does not yet set up the clean allocator that 1e8 needs.
+- **Reverse rules trace under the plan installed at the time** (`_under_plan` after the loop): correct while plans
+  only grow and no reverse kernel reads walk caps (module docstring).
+- **W levers not done:** zeros written inside the reverse kernels (the forward P2M / reverse L2P zero table XLA
+  merges, 44 B/p held across the step); the far list's capacity; the far-chain reuse `custom_vjp` (not at the peak:
+  time, not memory -- decide after the HoreKa duplicate-chain row).
+- **1e8 per-step residual 13.17 B/p** instead of 16 (two-point fit), and offload's ~2 B/p drift in device level at
+  1e8: not investigated.
+- A `"step"`-structured offload: changes no fit at 1e8 (T = 16 offload fits); it drops the segment replay's forward
+  for 16 B/p per step of pinned host (~1.6 GB per step at 1e8). Worth it only if HoreKa shows the replay is a large
+  share of c / a.
+- The aux guard covers the output side only (above).

@@ -1446,6 +1446,8 @@ class ProductionRunner:
         self._last_restart: Optional[str] = None
         #: the energy programs, by plan (potential_energy)
         self._energy_programs: dict = {}
+        #: the gradient mode's pre-pass recorder (gradient_plan); ``None``: off
+        self._grad_recorder: Any = None
         #: the multi-GPU mode's configuration and backend (``None``: one card)
         self.mesh: Optional[MeshRunConfig] = None
         self._mesh_backend: Any = None
@@ -1712,10 +1714,18 @@ class ProductionRunner:
         self._warn_remainder(lengths)
         external = self.external_acceleration_fn
         ran = False
+        # the gradient mode's pre-pass (gradient_plan): host copies, off by default
+        recorder = self._grad_recorder
+        if recorder is not None and lengths:
+            recorder.begin(
+                state_now, masses_now, handle, step, dt_arg, force_arg, external_arg
+            )
         for index, steps in enumerate(lengths):
             retries_before = int(
                 getattr(self.engine, "_strict_fused_fallback_count", 0)
             )
+            if recorder is not None:
+                recorder.before_segment(state_now, handle)
             begun = time.perf_counter()
             try:
                 state_now, handle, _ = self.solver.strict_run_v2(
@@ -1754,6 +1764,9 @@ class ProductionRunner:
                 int(getattr(self.engine, "_strict_fused_fallback_count", 0))
                 - retries_before
             )
+            if recorder is not None:
+                # before the callbacks: the segment's plan is still installed
+                recorder.after_segment(int(steps), handle, retries)
             due = every > 0 and (segment_done % every == 0 or last)
             if at_edge(edge_at(retries, wall_s, due)):
                 stopped = True
@@ -1776,6 +1789,177 @@ class ProductionRunner:
             time_anchor=anchor,
             # without a segment the state is still the one this call was given
             state_owned=owned or ran,
+        )
+
+    # ------------------------------------------------------------------
+    # The gradient mode (S9 session 2).
+    # ------------------------------------------------------------------
+
+    def gradient_plan(
+        self,
+        state: Any = None,
+        masses: Any = None,
+        *,
+        dt: Union[float, Any],
+        num_steps: int,
+        t0: float = 0.0,
+        force_params: Any = None,
+        external_params: Any = None,
+        restart_from: Any = None,
+    ) -> Any:
+        """The forward pre-pass of a gradient run: :meth:`run`, recorded per segment.
+
+        Runs :meth:`run` with these arguments -- its segments, retries and
+        re-plans, callbacks, diagnostics and restart files as configured -- and
+        keeps, for every segment, the plan its scan traced with, its provider (the
+        gradient plan's statics frozen on a rebuild at the segment's start) and
+        how its start acceleration and first f_b were made. The returned
+        :class:`~jaccpot.production_grad.GradientPlan` differentiates the same
+        rollout: :meth:`GradientPlan.value_and_grad
+        <jaccpot.production_grad.GradientPlan.value_and_grad>`, whose forward is
+        this run's trajectory bit for bit (:mod:`jaccpot.production_grad`).
+
+        The default runner is untouched: the recorder exists only during this
+        call, and what ``strict_run_v2`` records for it is host-side.
+
+        Parameters
+        ----------
+        state : Any
+            As :meth:`run`.
+        masses : Any
+            As :meth:`run`.
+        dt : Union[float, Any]
+            As :meth:`run`.
+        num_steps : int
+            As :meth:`run`.
+        t0 : float
+            As :meth:`run`.
+        force_params : Any
+            As :meth:`run`.
+        external_params : Any
+            As :meth:`run`.
+        restart_from : Any
+            As :meth:`run`: the gradient run then starts from the restart's state,
+            and its first segment from the restored acceleration and f_b.
+
+        Returns
+        -------
+        Any
+            The :class:`~jaccpot.production_grad.GradientPlan`; its ``forward`` is
+            :meth:`run`'s :class:`RunResult`.
+
+        Raises
+        ------
+        ValueError
+            In the multi-GPU mode (single card only), or when the run does no
+            segment.
+        """
+        if self._mesh_backend is not None:
+            raise ValueError(
+                "the gradient mode runs on one card (mesh=None): the multi-GPU "
+                "lane has no differentiable step"
+            )
+        from jaccpot.production_grad import _Recorder
+
+        engine = self.engine
+        recorder = _Recorder(self)
+        had_flag = "_strict_particle_record_start" in vars(engine)
+        flag = getattr(engine, "_strict_particle_record_start", None)
+        self._grad_recorder = recorder
+        engine._strict_particle_record_start = True
+        try:
+            forward = self.run(
+                state,
+                masses,
+                dt=dt,
+                num_steps=num_steps,
+                t0=t0,
+                force_params=force_params,
+                external_params=external_params,
+                restart_from=restart_from,
+            )
+        finally:
+            self._grad_recorder = None
+            if had_flag:
+                engine._strict_particle_record_start = flag
+            else:
+                del engine._strict_particle_record_start
+            vars(engine).pop("_strict_particle_last_start", None)
+        return recorder.plan(forward)
+
+    def value_and_grad(
+        self,
+        loss: Callable[..., Any],
+        state: Any = None,
+        masses: Any = None,
+        *,
+        dt: Union[float, Any],
+        num_steps: int,
+        wrt: Sequence[str] = ("positions", "velocities", "masses"),
+        t0: float = 0.0,
+        force_params: Any = None,
+        external_params: Any = None,
+        restart_from: Any = None,
+        checkpoint: Optional[str] = "step",
+        inner_steps: Optional[int] = None,
+    ) -> Any:
+        """A loss of the run's final state, and its gradient: pre-pass, then gradient run.
+
+        :meth:`gradient_plan` (the forward pre-pass), then
+        :meth:`GradientPlan.value_and_grad
+        <jaccpot.production_grad.GradientPlan.value_and_grad>` at the pre-pass's
+        inputs. Keep ``result.plan`` to evaluate again without a pre-pass.
+
+        Parameters
+        ----------
+        loss : Callable[..., Any]
+            ``loss(result, inputs) -> scalar``: ``result`` the final
+            :class:`~jaccpot.runtime.grad_rollout.RolloutResult`, ``inputs`` the
+            traced inputs by name.
+        state : Any
+            As :meth:`run`.
+        masses : Any
+            As :meth:`run`.
+        dt : Union[float, Any]
+            As :meth:`run`.
+        num_steps : int
+            As :meth:`run`.
+        wrt : Sequence[str]
+            The inputs to differentiate
+            (:data:`~jaccpot.production_grad.GRADIENT_INPUTS`): ``positions``,
+            ``velocities``, ``masses``, ``dt``, ``force_params``,
+            ``external_params``.
+        t0 : float
+            As :meth:`run`.
+        force_params : Any
+            As :meth:`run`.
+        external_params : Any
+            As :meth:`run`.
+        restart_from : Any
+            As :meth:`gradient_plan`.
+        checkpoint : Optional[str]
+            ``differentiable_rollout``'s checkpoint mode, per segment.
+        inner_steps : Optional[int]
+            Its ``inner_steps`` (``"nested"``).
+
+        Returns
+        -------
+        Any
+            :class:`~jaccpot.production_grad.GradientResult` ``(value, grads,
+            result, plan)``.
+        """
+        plan = self.gradient_plan(
+            state,
+            masses,
+            dt=dt,
+            num_steps=num_steps,
+            t0=t0,
+            force_params=force_params,
+            external_params=external_params,
+            restart_from=restart_from,
+        )
+        return plan.value_and_grad(
+            loss, wrt=wrt, checkpoint=checkpoint, inner_steps=inner_steps
         )
 
     # ------------------------------------------------------------------

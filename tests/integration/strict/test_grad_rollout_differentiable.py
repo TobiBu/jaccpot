@@ -7,19 +7,24 @@ float64, order 2, 3 steps:
 
 * G1 -- the forward-only rollout over ``differentiable_step`` IS
   ``strict_run_v2(carry="particles")``, bitwise, under every checkpoint mode
-  (``"nested"`` in segments of 2: one segment and a remainder of 1), Plummer and
-  ``mac_type='dehnen_error'`` (seeded with the runner's own f_b);
+  (``"nested"`` and ``"offload"`` in segments of 2: one segment and a remainder
+  of 1), Plummer and ``mac_type='dehnen_error'`` (seeded with the runner's own f_b);
 * G2 -- central differences of the whole rollout (every step's rebuild included)
   in the start positions, velocities and masses, ``G``, ``eps2`` and an external
   field's parameter, with each step's lists checked identical on the +-h runs
   (#316's rule: the differences then differentiate one map), at measured steps;
-* G4 -- the three checkpoint modes' gradients agree to round-off, and each is
-  bitwise against itself (a second call of the same executable; a second trace
-  lowers to the same program text);
+* G4 -- the four checkpoint modes' gradients agree to round-off, ``"offload"``'s
+  is ``"nested"``'s bit for bit (the same arithmetic, its residuals in host
+  memory), and each is bitwise against itself (a second call of the same
+  executable; a second trace lowers to the same program text);
 * G5 -- every step has far pairs, every reverse kernel of the production layout is
   in the gradient's trace, and zeroing the M2L reverse moves the gradient;
 * G8 -- caps sized on a configuration with fewer pairs give a failed verdict, a
   refused gradient, and after the provider's re-plan a clean rerun.
+* the aux guard -- a chain of two rollouts, the second continuing the first's
+  acceleration and aux (f_b, bits, needs) under ``dehnen_error``, traces its
+  gradient under every hand-written reverse: the f_b passed on is no gradient
+  through the aux (``grad_rollout._refuse_aux_cotangent``).
 
 ``jax.default_backend`` reports ``"gpu"``, as ``tests/characterization/
 test_lane_goldens.py`` does. Interpret-mode reverses compile for minutes, so the
@@ -44,7 +49,7 @@ LEAF, ORDER, THETA, SOFTENING = 16, 2, 0.6, 1e-2
 DT, STEPS = 1e-3, 3
 #: the external field's spring constant (a row-by-row harmonic pull)
 K_EXT = 0.37
-MODES = [(None, None), ("step", None), ("nested", 2)]
+MODES = [(None, None), ("step", None), ("nested", 2), ("offload", 2)]
 
 #: what the strict tests scrub (a shell's JACCPOT_* must not reach the lane)
 _ENV_UNSET = (
@@ -566,12 +571,13 @@ def test_the_rollout_gradient_matches_finite_differences(name):
 
 @_PLUMMER_GRADIENT
 def test_the_checkpoint_modes_agree_and_each_repeats_bitwise():
-    """``None`` / ``"step"`` / ``"nested"``: gradients within 1e-12 of the largest
-    component (round-off: a checkpoint regroups cotangent sums, ``"nested"`` sums
-    the constants' per segment; ``tests/unit/runtime/test_grad_rollout.py``), the
-    gradient verdict passes; each mode's gradient bitwise on a second call of the
-    same executable, and a second trace lowers to the same program text (a recompute
-    that rebuilt other lists would differ).
+    """``None`` / ``"step"`` / ``"nested"`` / ``"offload"``: gradients within 1e-12
+    of the largest component (round-off: a checkpoint regroups cotangent sums,
+    ``"nested"`` sums the constants' per segment;
+    ``tests/unit/runtime/test_grad_rollout.py``), ``"offload"``'s bitwise
+    ``"nested"``'s, the gradient verdict passes; each mode's gradient bitwise on a
+    second call of the same executable, and a second trace lowers to the same
+    program text (a recompute that rebuilt other lists would differ).
 
     The second trace is compared as program text, not compiled and run: the text is
     all a recompile reads, and under CI's persistent compilation cache the old
@@ -584,9 +590,11 @@ def test_the_checkpoint_modes_agree_and_each_repeats_bitwise():
 
     lane = _lane("plummer")
     ref = None
+    by_mode = {}
     for checkpoint, inner in MODES:
         gradient = _gradient("plummer", checkpoint, inner)
         grads = gradient.grads
+        by_mode[checkpoint] = grads
         assert rollout_ok(gradient.out, gradient=True)
         assert all(bool(np.all(np.isfinite(np.asarray(g)))) for g in grads)
         assert gradient.repeat_differ == 0, checkpoint
@@ -601,6 +609,8 @@ def test_the_checkpoint_modes_agree_and_each_repeats_bitwise():
             g, w = np.asarray(g), np.asarray(w)
             scale = float(np.max(np.abs(w)))
             assert float(np.max(np.abs(g - w))) <= 1e-12 * scale, checkpoint
+    for g, w in zip(by_mode["offload"], by_mode["nested"]):
+        assert _bitwise(g, w) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -651,6 +661,51 @@ def test_the_far_field_is_load_bearing_in_the_rollout_gradient():
         g, w = np.asarray(g), np.asarray(w)
         moved = float(np.max(np.abs(g - w))) / float(np.max(np.abs(w)))
         assert moved > 1e-6, (name, moved)
+
+
+# ---------------------------------------------------------------------------
+# The aux guard on the provider: f_b passed on is not a gradient through the aux.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("checkpoint, inner", [m for m in MODES if m[0] is not None])
+def test_a_chain_of_provider_rollouts_passes_the_aux_guard(checkpoint, inner):
+    """1 + 2 steps under ``dehnen_error``, the second rollout started from the
+    first's acceleration and aux: the f_b the first returns seeds the second's
+    first walk, the bits and needs fold on. The gradient in every input TRACES
+    (``make_jaxpr``: the guard acts while the reverse pass is traced, so nothing
+    needs compiling): the aux is read only as a value."""
+    from jaccpot.runtime.grad_rollout import differentiable_rollout
+
+    lane = _lane("dehnen_error")
+    step = lane.provider.differentiable_step
+
+    def loss(x, v, m, k):
+        kw = dict(
+            external_fn=_harmonic,
+            external_args={"k": k},
+            checkpoint=checkpoint,
+            inner_steps=inner,
+        )
+        one = differentiable_rollout(step, x, v, m, DT, 1, aux=lane.aux0, **kw)
+        two = differentiable_rollout(
+            step,
+            one.positions,
+            one.velocities,
+            m,
+            DT,
+            STEPS - 1,
+            aux=one.aux,
+            acceleration=one.acceleration,
+            **kw,
+        )
+        return jnp.sum(lane.weight * two.positions) + jnp.sum(
+            lane.weight * two.velocities
+        )
+
+    args = (lane.positions, lane.velocities, lane.masses, jnp.asarray(K_EXT))
+    jaxpr = jax.make_jaxpr(jax.grad(loss, argnums=(0, 1, 2, 3)))(*args)
+    assert len(jaxpr.out_avals) == 4
 
 
 # ---------------------------------------------------------------------------

@@ -2501,9 +2501,24 @@ class StrictRunMixin(_EngineBase):
         # evaluated by the start program (the first call's start, owned)
         in_scan_force = acc_self_now is None
         donate_state_now = bool(donate_state)
+        # How the attempt about to run makes its scan's start acceleration and its
+        # first f_b, for ProductionRunner's gradient pre-pass (opt-in, host-side:
+        # no program reads it; off, nothing is kept). "start": the start program's
+        # force at the start positions from ``seed``, whose f_b feeds the scan;
+        # "carried": the handle's total and f_b; "self": the handle's self-gravity
+        # plus the field, eagerly, ``seed`` the scan's first f_b; "seed_kept": the
+        # start program's force from ``seed``, ``seed`` also the scan's first f_b;
+        # "eager_self": the full re-prepare's evaluation, ``seed`` the scan's.
+        record_start = bool(getattr(self, "_strict_particle_record_start", False))
+        start_kind = "carried" if start_total is not None else "self"
+        # (a reference only when recording: it would keep the seed alive through
+        # the scan)
+        start_seed: Optional[Array] = scale_now if record_start else None
         while True:
             ran_scan = True
             if in_scan_force:
+                start_kind = "start"
+                start_seed = scale_now if record_start else None
                 acc_self_now, ok_initial, walk_needs, scale_now = _start_force_for(
                     prov_i
                 )(state_now, masses_arr, ok_initial, scale_now, *params_args)
@@ -2547,6 +2562,12 @@ class StrictRunMixin(_EngineBase):
                 np.asarray(jax.device_get(ok_all))
             )
             if self._strict_static_target_block_capacity_ok:
+                if record_start:
+                    self._strict_particle_last_start = {
+                        "kind": start_kind,
+                        "seed": start_seed,
+                        "retries": int(retries),
+                    }
                 handle = StrictParticleCarry(
                     template=prov_i.template,
                     self_acceleration=acc_self_out,
@@ -2603,12 +2624,14 @@ class StrictRunMixin(_EngineBase):
             start_program_force = acc_self_now is None and isinstance(
                 prepared, PreparedCaps
             )
+            evaluated_eagerly = False
             if in_scan_force:
                 acc_self_now = None  # the start program evaluates it again
             elif acc_self_now is None and not start_program_force:
                 # consumed by the failed segment: the same self-gravity
                 # again, from the same positions
                 acc_self_now = evaluate_self(prepared, state_now, step_params)
+                evaluated_eagerly = True
             prov_i.template_or_raise()
             if scale_carry and force_scale_seed is not None:
                 # the re-prepare's own eq (16b) prepass at the segment's start
@@ -2631,6 +2654,14 @@ class StrictRunMixin(_EngineBase):
                     # the start itself overflows: the loop's start program runs
                     # it again and the re-plan sizes from its needs
                     acc_self_now, in_scan_force = None, True
+            if not in_scan_force:
+                # (with it, the loop's start program records the attempt)
+                start_kind = (
+                    "seed_kept"
+                    if start_program_force
+                    else ("eager_self" if evaluated_eagerly else "self")
+                )
+                start_seed = scale_now if record_start else None
             self._topology_reuse_entry = None
             self._prepared_state_cache_value = None
             self._strict_fused_fallback_count += 1

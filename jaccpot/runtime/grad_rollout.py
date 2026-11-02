@@ -21,39 +21,67 @@ WHAT A REVERSE PASS STORES. ``checkpoint`` decides it, and nothing else does:
   -- for the direct sum the ``[N, N]`` pair arrays, for the fused lane the whole
   linearised force -- so it is for small ``N`` and short horizons (and the
   reference the other two are bitwise against).
-* ``"step"``: ``jax.checkpoint`` around the force and the kick of each step, with
-  the DRIFTED positions as its input (track C's placement). The drift and the
-  kick are linear in ``(x, v, a)`` at a fixed ``dt``, so their reverse needs no
-  primal value: the scan saves per step only what the force's recompute reads,
-  the drifted positions and the aux leaves -- 12 B per particle in float32 (24 in
-  float64), plus the fused lane's f_b (4 B under ``dehnen_error``). Measured
+* ``"step"``: each step's force and kick are recomputed in the reverse pass from
+  the DRIFTED positions (track C's placement): the drift and the kick are linear
+  in ``(x, v, a)`` at a fixed ``dt``, so their reverse needs no primal value and
+  the forward saves per step only what the force's recompute reads, the drifted
+  positions and the aux leaves -- 12 B per particle in float32 (24 in float64),
+  plus the fused lane's f_b (4 B under ``dehnen_error``). Measured
   (``bench/grad_rollout_memory.py``, CPU direct sum, N = 4096): 12.00 B/particle
   per step in float32, against 36.00 with the checkpoint around the whole step
   (which stored ``(x, v, a)``). A DIFFERENTIATED ``dt`` makes the drift
   bilinear (``v dt``, ``a dt^2``): its cotangent needs ``v`` and ``a`` of every
-  step, and the residual is the whole carry again (36 B/particle). The masses,
-  the force and field parameters and ``dt`` enter every step unchanged: the
-  scan's partial evaluation hoists them out as loop invariants, so they are
-  stored once (``tests/unit/runtime/test_grad_rollout.py`` reads the residuals
-  off ``print_saved_residuals`` and the temporaries off ``memory_analysis``). The
-  reverse pass recomputes each force once.
-* ``"nested"``: two levels. An outer scan over segments of ``inner_steps`` steps,
-  each segment checkpointed whole and each step's force and kick inside it too:
-  the outer scan stores one carry ``(x, v, a, aux)`` per segment, and the reverse
-  pass of one segment recomputes it storing the per-step residual above. About
+  step, 36 B/particle per step then. The masses, the force and field parameters
+  and ``dt`` enter every step unchanged and are stored once
+  (``tests/unit/runtime/test_grad_rollout.py`` reads the residuals off
+  ``print_saved_residuals`` and the temporaries off ``memory_analysis``). The
+  reverse pass recomputes each force once. The reverse is written by hand
+  (:func:`_adjoint_rollout`, a ``custom_vjp``), not ``jax.checkpoint`` in a
+  ``lax.scan``: reverse mode of a scan hoists every loop-invariant fill of the
+  force (zeros, iotas) out of the forward loop, and on the fused lane that
+  held ~650 B/particle beside the forward step (session 2, track D).
+* ``"nested"``: two levels. The forward stores one carry ``(x, v, a, aux)`` per
+  segment of ``inner_steps`` steps; the reverse pass recomputes one segment,
+  storing the per-step residual above, and reverses it. About
   ``num_steps / inner_steps`` carries plus ``inner_steps`` step residuals, for
   one more forward per step than ``"step"``.
+* ``"offload"``: ``"nested"``'s schedule and residuals, in PINNED HOST memory.
+  The forward's outer scan writes each segment's start carry to the host (a
+  ``jax.device_put`` to ``jax.memory.Space.Host`` in the scan body: the scan
+  stacks it in host memory), and the reverse pass's replay of a segment writes
+  its per-step residuals there too; each comes back to the device
+  (``Space.Device``) when its unit of the reverse loop reads it. The device then
+  holds no per-segment and no per-step state: its temporaries are flat in
+  ``num_steps`` and in ``inner_steps``, and the host holds ``num_steps //
+  inner_steps`` carries plus ``inner_steps`` step residuals (plus a remainder
+  segment's start carry), smallest at the default ``inner_steps =
+  round(sqrt(num_steps))``. Per step that moves the step residual out and back
+  once and a carry per segment each way. The arithmetic is ``"nested"``'s: the
+  forward-only program is ``"nested"``'s text, and the gradient is ``"nested"``'s
+  bit for bit (CPU direct sum and fused lane; A100 fused lane, 2e6). Measured
+  (``bench/grad_rollout_memory.py``, A100, ``preset="galaxy"``, float32,
+  ``dehnen_error``, 2026-11-01): device temporaries 840 MiB (440.5 B/particle) at
+  2e6 for T = 4-64, 2739 MiB (359.0 B/particle) at 8e6 for T = 4-256, every
+  slope 0 to the byte (``"nested"``: 363 B/particle at 8e6 plus 40 per carry and
+  14 per step); host 40.00 B/particle per carry and 16.00 per step residual. At
+  1e8 the gradient of T = 4 (segments of 2) and T = 16 (of 4) RAN on one A100:
+  25.66 / 25.86 GiB of temporaries (the device level moved 2 B/particle there),
+  10.4 / 20.9 GiB of host, measured peaks 36.61 GiB (BFC, preallocated 0.95) /
+  36.53 GiB (``cuda_async``; the BFC arena refused T = 16's 25.86 GiB block beside
+  the outputs), each the resident 8.1-8.3 GiB + temporaries + outputs to the MiB.
 
-The three compute the same forward bit for bit (the same expressions in the
+The four compute the same forward bit for bit (the same expressions in the
 same order). Their gradients agree to round-off, NOT bitwise: a checkpoint
 regroups the cotangent sums of a value used on both sides of it, ``"nested"`` sums
 a scan constant's cotangent per segment and then over segments, and XLA fuses
 the recomputed forward with the reverse differently (on CPU it contracts a
 multiply and an add into one FMA within a fusion). Measured on the direct sum
 (CPU, N = 64, 4-6 steps): 1.5e-15 of the largest component in float64, 2.7e-7 in
-float32. The start force (``acceleration=None``) is checkpointed with them, so
-its residuals -- one whole force's -- are not held through the reverse pass
-either.
+float32. The start force (``acceleration=None``) is recomputed too, as the
+first unit of the reverse loop: its residuals -- one whole force's -- are not
+held through the reverse pass, and its zero / iota fills are not shared with its
+forward (XLA's CSE merges such operand-free instructions across one computation;
+:func:`_adjoint_rollout`).
 
 A ``num_steps`` the inner length does not divide gets a SHORTER LAST SEGMENT
 (``num_steps % inner_steps`` steps, checkpointed the same way) rather than a
@@ -68,9 +96,15 @@ fuses it differently (direct sum, CPU: up to 62 of 192 elements of one array
 moved by an ulp). A bitwise comparison with ``strict_run_v2`` is a claim about
 the jitted forward, not about the primal of a ``value_and_grad``.
 
-HOST OFFLOAD (session 2) changes WHERE the outer carries live, not what is stored:
-:func:`_checkpointed` is the one place a rematerialisation policy is chosen, so an
-offloading policy for the ``"segment"`` level replaces one line.
+HOST OFFLOAD (``"offload"``) changes WHERE ``"nested"``'s residuals live, not what
+is stored: the outer carries are the residual ``starts`` of
+:func:`_adjoint_rollout`'s forward (``rollout_fwd``) and the per-step residuals the
+stack a segment's replay saves in the reverse pass, and both are moved by explicit
+``jax.device_put`` s between ``jax.memory.Space.Device`` and ``Space.Host``. XLA's
+host offloader keeps the stacks in host buffers (``S(5)`` in the GPU program,
+``host_temp_size_in_bytes`` in ``memory_analysis``) and streams one slice per
+iteration. On CPU the two spaces are views of the same RAM: the program and the
+arithmetic are the same, nothing is moved.
 
 THE MASSES are an argument, and must stay one up to the caller's ``jax.jit``: a
 closed-over array is a constant of the compiled program, which XLA compiles
@@ -88,12 +122,14 @@ inside a trace, so it returns the folded aux and the caller checks it on the hos
 from __future__ import annotations
 
 import math
+from numbers import Real
 from typing import Any, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from beartype.typing import Callable
+from jax.custom_derivatives import CustomVJPPrimal, SymbolicZero
 from jaxtyping import Array
 
 from .fused_topology import (
@@ -118,7 +154,7 @@ __all__ = [
 ]
 
 #: what ``differentiable_rollout(checkpoint=...)`` accepts
-CHECKPOINT_MODES = (None, "step", "nested")
+CHECKPOINT_MODES = (None, "step", "nested", "offload")
 
 
 class RolloutResult(NamedTuple):
@@ -149,49 +185,6 @@ class RolloutResult(NamedTuple):
 
 class RolloutVerdictError(RuntimeError):
     """A gradient (or state) computed on a rollout whose capacity verdict failed."""
-
-
-# --------------------------------------------------------------------------
-# The rematerialisation policy: one place.
-# --------------------------------------------------------------------------
-
-
-def _checkpointed(fn: Callable, level: str) -> Callable:
-    """``fn`` under the rollout's checkpoint policy for ``level``.
-
-    Every level saves nothing but the inputs its recompute reads
-    (``jax.checkpoint``'s default policy): a step's force and kick read the
-    drifted positions and the aux (its old velocity and acceleration enter the
-    kick linearly, so they are not saved), a segment's the carry at its start.
-    Session 2's host offload gives the ``"segment"`` level an offloading policy
-    here (the outer carries to pinned host memory) and changes nothing else.
-
-    Parameters
-    ----------
-    fn : Callable
-        The function to checkpoint.
-    level : str
-        ``"step"`` or ``"segment"`` (inside a ``lax.scan`` body), or ``"edge"``
-        (outside any scan: the start force, a tail segment).
-
-    Returns
-    -------
-    Callable
-        The checkpointed function.
-
-    Raises
-    ------
-    ValueError
-        If ``level`` is none of the three.
-    """
-    if level not in ("step", "segment", "edge"):
-        raise ValueError(f"unknown checkpoint level {level!r}")
-    # Inside a scan the reverse pass's recompute sits in another loop than the
-    # forward it repeats, so XLA cannot merge the two and the optimisation
-    # barriers ``prevent_cse`` adds would only constrain fusion. Outside one, the
-    # recompute and the forward are in one computation: without the barrier XLA's
-    # CSE would fold them and keep the forward's residuals alive after all.
-    return jax.checkpoint(fn, prevent_cse=level == "edge")
 
 
 # --------------------------------------------------------------------------
@@ -299,6 +292,467 @@ def _external_acceleration(
     return jnp.asarray(field, dtype=positions.dtype)
 
 
+class _StepConsts:
+    """The step's constants, split into the differentiated and the static.
+
+    A step reads the masses, ``dt``, the force's ``params`` and the field's
+    ``external_args``. The adjoint (:func:`_adjoint_rollout`) is a ``custom_vjp``,
+    which differentiates its explicit inputs only, so the arrays are passed to it
+    (:attr:`dynamic`) and the Python numbers are kept static: a literal of the
+    program, as before (the provider's static-parameter program).
+
+    Parameters
+    ----------
+    static : tuple
+        ``(masses, dt, leaves, treedef, traced)``: the masses, ``dt`` (an array,
+        or ``(value, dtype)`` for a Python number), the flattened
+        ``(params, external_args)`` and which leaves are arrays.
+    """
+
+    def __init__(self, static: tuple) -> None:
+        self._masses, self._dt, self._leaves, self._treedef, self._traced = static
+
+    @classmethod
+    def split(
+        cls, masses: Array, dt: Any, dtype: Any, params: Any, external_args: Any
+    ) -> "_StepConsts":
+        """Split the step's constants.
+
+        Parameters
+        ----------
+        masses : Array
+            ``[N]`` masses (always passed: they are differentiated).
+        dt : Any
+            The timestep as given: a Python number stays a literal, an array is
+            passed (in the state's dtype).
+        dtype : Any
+            The state's dtype.
+        params : Any
+            The force's parameters (a pytree, or ``None``).
+        external_args : Any
+            The field's parameters (a pytree, or ``None``).
+
+        Returns
+        -------
+        _StepConsts
+            The split.
+        """
+        leaves, treedef = jax.tree_util.tree_flatten((params, external_args))
+        traced = tuple(not isinstance(leaf, Real) for leaf in leaves)
+        dt_static = isinstance(dt, Real)
+        return cls(
+            (
+                masses,
+                (float(dt), dtype) if dt_static else jnp.asarray(dt, dtype=dtype),
+                leaves,
+                treedef,
+                traced,
+            )
+        )
+
+    @property
+    def dt_traced(self) -> bool:
+        """Whether ``dt`` is an array (its cotangent needs ``v`` and ``a``)."""
+        return not isinstance(self._dt, tuple)
+
+    @property
+    def dynamic(self) -> tuple:
+        """``(masses, dt or None, array leaves)``: the differentiated inputs."""
+        return (
+            self._masses,
+            self._dt if self.dt_traced else None,
+            tuple(leaf for leaf, t in zip(self._leaves, self._traced) if t),
+        )
+
+    def join(self, dynamic: tuple) -> tuple:
+        """``(masses, dt, params, external_args)`` from :attr:`dynamic`'s values.
+
+        Parameters
+        ----------
+        dynamic : tuple
+            A tuple of :attr:`dynamic`'s structure (the custom_vjp's tracers).
+
+        Returns
+        -------
+        tuple
+            The constants a step reads.
+        """
+        masses, dt, traced_leaves = dynamic
+        it = iter(traced_leaves)
+        leaves = [
+            next(it) if t else leaf for leaf, t in zip(self._leaves, self._traced)
+        ]
+        params, external_args = jax.tree_util.tree_unflatten(self._treedef, leaves)
+        if dt is None:
+            # a Python dt: a literal of the program, cast as strict_run_v2 casts it
+            dt = jnp.asarray(self._dt[0], dtype=self._dt[1])
+        return masses, dt, params, external_args
+
+
+def _adjoint_rollout(
+    force: Callable[..., tuple],
+    drift: Callable[..., Array],
+    force_and_kick: Callable[..., tuple],
+    carry: tuple,
+    consts: tuple,
+    num_steps: int,
+    inner: Optional[int],
+    keep_va: bool,
+    offload: bool = False,
+) -> tuple:
+    """``num_steps`` steps with a hand-written reverse pass (``"step"``, ``"nested"``).
+
+    The forward is a plain ``lax.scan`` of ``drift`` then ``force_and_kick``,
+    after the start force when ``carry``'s acceleration is ``None``. The reverse
+    is a ``custom_vjp``: a reverse loop whose body recomputes one step's force at
+    its stored drifted positions under ``jax.vjp`` and pulls the carry's
+    cotangent through it, the drift transposed by hand (it is linear in
+    ``(x, v, a)``). What is stored is what the checkpointed scan stored -- per
+    step the drifted positions and the aux (plus ``v`` and ``a`` with
+    ``keep_va``); under ``inner`` (``"nested"``) one carry per segment, the
+    segment recomputed in the reverse pass storing its steps.
+
+    WHY NOT ``jax.checkpoint`` IN A SCAN. Reverse mode of a ``lax.scan`` hoists
+    the loop-invariant part of the forward body out of the loop
+    (``_scan_partial_eval``'s "hoist loop-invariant residuals"): everything in a
+    force that depends on no carry -- every ``jnp.zeros`` / ``full`` / ``iota``
+    fill of the tree, the walk, the lists and the expansion tables -- is
+    computed once before the loop and stays alive through the forward scan.
+    Here the forward scan is bound with every input known, so nothing is
+    partially evaluated and nothing hoisted.
+
+    WHY THE START FORCE'S REVERSE IS AN ITERATION OF THE REVERSE LOOP. XLA's CSE
+    merges instructions without operands -- the same ``broadcast`` of a zero,
+    the same ``iota`` -- across one computation, and a ``jax.checkpoint``'s
+    optimisation barrier only fences instructions WITH operands. A start force
+    and its recompute in the same computation (``jax.checkpoint`` at the top
+    level, or a reverse after a forward) therefore share every such fill, which
+    then lives from the forward to the end of the reverse pass, through every
+    loop in between. So the start force's reverse runs in the reverse loop, in a
+    ``lax.cond`` branch (its own computation) selected on the loop index, and a
+    rollout of one step still has a loop of two iterations (XLA inlines a loop
+    of one, and folds a condition on a constant).
+
+    The aux is threaded and returned, not differentiated (the provider's f_b is
+    gradient-stopped, its bits and needs are integers). A step function must not
+    close over values being differentiated (pass them as ``params``): a
+    ``custom_vjp`` rejects that.
+
+    THE AUX GUARD. A loss that reads a floating aux leaf differentiably would get
+    no gradient through it here -- a plausible, wrong number (the production
+    runner's gradient chain did, session 2: the last self-gravity it carried in
+    the aux). So the rule is defined with ``symbolic_zeros=True`` and the reverse
+    REFUSES, when the reverse pass is traced, an aux cotangent that is not a
+    symbolic zero (:func:`_refuse_aux_cotangent`): before anything compiles. It
+    returns symbolic zeros for the aux input, so a rollout continuing another's
+    aux (a chain of segments) gives that one's aux a symbolic zero, not a
+    false alarm. The INPUT side (a floating aux leaf that depends on a
+    differentiated value, whose tangent is dropped) is not refused: JAX gives
+    every floating output of a ``custom_vjp`` a tangent, so a chained rollout's
+    aux input looks the same as a differentiated one at trace time.
+
+    Parameters
+    ----------
+    force : Callable[..., tuple]
+        ``force(x, v, aux, consts) -> (a, aux)``: the start force.
+    drift : Callable[..., Array]
+        ``drift(x, v, a, consts) -> x``.
+    force_and_kick : Callable[..., tuple]
+        ``force_and_kick(x, v, a, aux, consts) -> (v, a, aux)`` at drifted ``x``.
+    carry : tuple
+        ``(x, v, a, aux)`` at the start; ``a = None``: the start force
+        ``force(x, v, aux)`` is computed first (and differentiated).
+    consts : tuple
+        The differentiated constants (:attr:`_StepConsts.dynamic`).
+    num_steps : int
+        Steps, ``>= 1``.
+    inner : Optional[int]
+        ``None`` (``"step"``) or the segment length (``"nested"``).
+    keep_va : bool
+        Store ``v`` and ``a`` per step (a traced ``dt``, a field that reads the
+        velocities).
+    offload : bool
+        With ``inner`` (``"offload"``): keep the segments' start carries and a
+        replayed segment's per-step residuals in host memory, each brought back
+        when the reverse loop reads it.
+
+    Returns
+    -------
+    tuple
+        ``(x, v, a, aux)`` after ``num_steps`` steps.
+    """
+    with_start = carry[2] is None
+
+    def one(carry_in: tuple, c: tuple) -> tuple:
+        x, v, a, aux_in = carry_in
+        x = drift(x, v, a, c)
+        v_new, a_new, aux_out = force_and_kick(x, v, a, aux_in, c)
+        saved = (x, aux_in) + ((v, a) if keep_va else ())
+        return (x, v_new, a_new, aux_out), saved
+
+    def run(carry_in: tuple, c: tuple, length: int) -> tuple:
+        return jax.lax.scan(
+            lambda cr, _: (one(cr, c)[0], None), carry_in, None, length
+        )[0]
+
+    def to_space(tree: Any, space: Any) -> Any:
+        # an explicit transfer between device and host memory ("offload")
+        return jax.tree_util.tree_map(lambda leaf: jax.device_put(leaf, space), tree)
+
+    def stored(tree: Any) -> Any:
+        # what the forward (or a segment's replay) stores: on the host under
+        # "offload", as is otherwise
+        return to_space(tree, jax.memory.Space.Host) if offload else tree
+
+    def loaded(tree: Any) -> Any:
+        # a stored value, back on the device where the reverse reads it
+        return to_space(tree, jax.memory.Space.Device) if offload else tree
+
+    def run_saving(carry_in: tuple, c: tuple, length: int) -> tuple:
+        if not offload:
+            return jax.lax.scan(lambda cr, _: one(cr, c), carry_in, None, length)
+
+        def body(cr: tuple, _: Any) -> tuple:
+            cr, saved = one(cr, c)
+            return cr, stored(saved)
+
+        return jax.lax.scan(body, carry_in, None, length)
+
+    def start(carry_in: tuple, c: tuple) -> tuple:
+        x, v, _, aux_in = carry_in
+        a, aux_out = force(x, v, aux_in, c)
+        return x, v, a, aux_out
+
+    def add(tree_a: Any, tree_b: Any) -> Any:
+        return jax.tree_util.tree_map(jnp.add, tree_a, tree_b)
+
+    def step_back(ct: tuple, saved_k: tuple, c: tuple) -> tuple:
+        # one step's reverse: ct = (x_bar, v_bar, a_bar) after it, returned
+        # before it, with the step's cotangent of the constants
+        x_bar, v_bar, a_bar = ct
+        x, aux_in = saved_k[:2]
+        v, a = saved_k[2:] if keep_va else (jnp.zeros_like(x), jnp.zeros_like(x))
+
+        def kick(x_: Array, v_: Array, a_: Array, c_: tuple) -> tuple:
+            v_new, a_new, _ = force_and_kick(x_, v_, a_, aux_in, c_)
+            return v_new, a_new
+
+        _, pull = jax.vjp(kick, x, v, a, c)
+        gx, gv, ga, gc = pull((v_bar, a_bar))
+        x_bar = x_bar + gx
+        # the drift's transpose: linear in (x, v, a), so x passes through and
+        # (v, a) need no value unless dt is an array (then they are stored)
+        _, pull_drift = jax.vjp(lambda v_, a_, c_: drift(x, v_, a_, c_), v, a, c)
+        dv, da, dc = pull_drift(x_bar)
+        return (x_bar, gv + dv, ga + da), add(gc, dc)
+
+    def start_back(ct: tuple, start_in: tuple, c: tuple) -> tuple:
+        # the start force's reverse: a_bar is consumed, x_bar (and v_bar, for a
+        # field that reads the velocities) get its pull
+        x_bar, v_bar, a_bar = ct
+        x0, v0, aux0 = start_in
+
+        def accel(x_: Array, v_: Array, c_: tuple) -> Array:
+            return force(x_, v_, aux0, c_)[0]
+
+        _, pull = jax.vjp(accel, x0, v0, c)
+        gx, gv, gc = pull(a_bar)
+        return (x_bar + gx, v_bar + gv, jnp.zeros_like(a_bar)), gc
+
+    def steps_back(ct: tuple, saved: tuple, c: tuple, length: int) -> tuple:
+        # the reverse of `length` stored steps, inside one unit's branch
+        def body(state: tuple, saved_k: tuple) -> tuple:
+            ct_k, c_bar = state
+            ct_k, gc = step_back(ct_k, loaded(saved_k), c)
+            return (ct_k, add(c_bar, gc)), None
+
+        zero_c = jax.tree_util.tree_map(jnp.zeros_like, c)
+        (ct, c_bar), _ = jax.lax.scan(
+            body, (ct, zero_c), saved, length=length, reverse=True
+        )
+        return ct, c_bar
+
+    def first_back(ct: tuple, start_in: Optional[tuple], c: tuple) -> tuple:
+        # unit 0 of every reverse loop: the start force's reverse, or nothing
+        if start_in is None:
+            return ct, jax.tree_util.tree_map(jnp.zeros_like, c)
+        return start_back(ct, start_in, c)
+
+    def reverse_loop(ct: tuple, units: int, branch: Callable, c: tuple) -> tuple:
+        # the reverse pass as ONE loop over `units + 1` units, unit 0 last; each
+        # unit's reverse is `branch(ct, u)`, a `lax.cond` / `lax.switch` on the
+        # loop index, so every force's reverse is a computation of its own and a
+        # one-step rollout still has a loop of two iterations (the docstring)
+        zero_c = jax.tree_util.tree_map(jnp.zeros_like, c)
+
+        def body(state: tuple, u: Array) -> tuple:
+            ct_u, c_bar = state
+            ct_u, gc = branch(ct_u, u)
+            return (ct_u, add(c_bar, gc)), None
+
+        (ct, c_bar), _ = jax.lax.scan(
+            body, (ct, zero_c), jnp.arange(units + 1, dtype=jnp.int32), reverse=True
+        )
+        return ct, c_bar
+
+    def index(tree: Any, i: Array) -> Any:
+        return jax.tree_util.tree_map(
+            lambda leaf: jax.lax.dynamic_index_in_dim(leaf, i, keepdims=False), tree
+        )
+
+    outer, tail = (0, 0) if inner is None else divmod(num_steps, inner)
+
+    @jax.custom_vjp
+    def rollout(carry_in: tuple, c: tuple) -> tuple:
+        if with_start:
+            carry_in = start(carry_in, c)
+        return run(carry_in, c, num_steps)
+
+    def rollout_fwd(carry_in: tuple, c: tuple) -> tuple:
+        # symbolic_zeros=True: every input leaf comes as a CustomVJPPrimal
+        carry_in, c = jax.tree_util.tree_map(
+            lambda leaf: leaf.value,
+            (carry_in, c),
+            is_leaf=lambda leaf: isinstance(leaf, CustomVJPPrimal),
+        )
+        x0, v0, _, aux0 = carry_in
+        # the start force's inputs: x0 is an input of the program anyway; v0
+        # only where the field reads it
+        start_in = (x0, v0 if keep_va else None, aux0) if with_start else None
+        if with_start:
+            carry_in = start(carry_in, c)
+        if inner is None:
+            out, saved = run_saving(carry_in, c, num_steps)
+            return out, (saved, start_in, c)
+
+        def segment(cr: tuple, _: Any) -> tuple:
+            return run(cr, c, inner), stored(cr)
+
+        out, starts = jax.lax.scan(segment, carry_in, None, outer)
+        tail_start = None
+        if tail:
+            # the remainder segment's start: one more stored carry
+            tail_start = stored(out)
+            out = run(out, c, tail)
+        return out, (starts, tail_start, start_in, c)
+
+    def rollout_bwd(res: tuple, ct_out: tuple) -> tuple:
+        _refuse_aux_cotangent(ct_out[3], mode)
+        # symbolic_zeros=True: an output the loss does not read comes as a
+        # SymbolicZero; the reverse loop reads all three, instantiated as before
+        ct = tuple(_instantiated(leaf) for leaf in ct_out[:3])
+        if inner is None:
+            saved, start_in, c = res
+            start_in = _start_inputs(start_in)
+
+            def unit(ct_u: tuple, u: Array) -> tuple:
+                # u = 0: the start force (or nothing); u = k + 1: step k
+                saved_k = index(saved, jnp.maximum(u - 1, 0))
+                return jax.lax.cond(
+                    u == 0,
+                    lambda: first_back(ct_u, start_in, c),
+                    lambda: step_back(ct_u, saved_k, c),
+                )
+
+            ct, c_bar = reverse_loop(ct, num_steps, unit, c)
+        else:
+            starts, tail_start, start_in, c = res
+            start_in = _start_inputs(start_in)
+
+            def segment_back(ct_u: tuple, start_s: tuple, length: int) -> tuple:
+                _, saved_s = run_saving(start_s, c, length)
+                return steps_back(ct_u, saved_s, c, length)
+
+            def unit(ct_u: tuple, u: Array) -> tuple:
+                # u = 0: the start force (or nothing); u = j + 1: segment j;
+                # u = outer + 1: the remainder segment
+                start_j = loaded(index(starts, jnp.clip(u - 1, 0, outer - 1)))
+                branches = [
+                    lambda: first_back(ct_u, start_in, c),
+                    lambda: segment_back(ct_u, start_j, inner),
+                ]
+                if tail:
+                    branches.append(
+                        lambda: segment_back(ct_u, loaded(tail_start), tail)
+                    )
+                which = jnp.where(u == 0, 0, jnp.where(u <= outer, 1, 2))
+                return jax.lax.switch(which, branches)
+
+            ct, c_bar = reverse_loop(ct, outer + (1 if tail else 0), unit, c)
+        # the aux carries no gradient; a computed start acceleration is no input
+        return ((ct[0], ct[1], None if with_start else ct[2], None), c_bar)
+
+    def _start_inputs(start_in: Optional[tuple]) -> Optional[tuple]:
+        if start_in is None:
+            return None
+        x0, v0, aux0 = start_in
+        return x0, (jnp.zeros_like(x0) if v0 is None else v0), aux0
+
+    mode = "step" if inner is None else ("offload" if offload else "nested")
+    rollout.defvjp(rollout_fwd, rollout_bwd, symbolic_zeros=True)
+    return rollout(carry, consts)
+
+
+def _instantiated(cotangent: Any) -> Any:
+    """A cotangent as an array: a :class:`SymbolicZero` becomes zeros of its type.
+
+    Parameters
+    ----------
+    cotangent : Any
+        An array or a ``SymbolicZero``.
+
+    Returns
+    -------
+    Any
+        The array, or ``zeros(shape, dtype)``.
+    """
+    if isinstance(cotangent, SymbolicZero):
+        return jnp.zeros(cotangent.shape, cotangent.dtype)
+    return cotangent
+
+
+def _refuse_aux_cotangent(ct_aux: Any, mode: str) -> None:
+    """Raise if the loss reads a floating aux leaf of the rollout differentiably.
+
+    Called by :func:`_adjoint_rollout`'s reverse rule while the reverse pass is
+    TRACED: a leaf whose cotangent is not a symbolic zero has a derivative the
+    hand-written reverse would drop.
+
+    Parameters
+    ----------
+    ct_aux : Any
+        The cotangent of the rollout's output aux (a pytree, ``SymbolicZero``
+        leaves where nothing reads it).
+    mode : str
+        The checkpoint mode, for the message.
+
+    Raises
+    ------
+    ValueError
+        If a floating leaf's cotangent is not a symbolic zero.
+    """
+    leaves = jax.tree_util.tree_leaves_with_path(
+        ct_aux, is_leaf=lambda leaf: isinstance(leaf, SymbolicZero)
+    )
+    read = [
+        jax.tree_util.keystr(path)
+        for path, leaf in leaves
+        if not isinstance(leaf, SymbolicZero)
+        and jnp.issubdtype(getattr(leaf, "dtype", np.int32), jnp.inexact)
+    ]
+    if read:
+        raise ValueError(
+            f"differentiable_rollout(checkpoint={mode!r}): the gradient reads the "
+            f"rollout's aux (leaves aux{', aux'.join(read)} get a cotangent), but "
+            "this mode's reverse does not differentiate the aux, so that part of "
+            "the gradient would be silently zero. Carry a differentiated value in "
+            "the state or in `params`, use checkpoint=None (a plain scan "
+            "differentiates the aux), or keep the aux leaf as a value and take its "
+            "tangent from a recompute outside the rollout "
+            "(`jaccpot.production_grad._keep_value`)."
+        )
+
+
 def differentiable_rollout(
     step_fn: Callable[..., tuple[Any, Any]],
     positions: Array,
@@ -360,7 +814,13 @@ def differentiable_rollout(
         start force's input: ``None``, or the provider's ``(f_b, None, None)``
         seed under ``mac_type='dehnen_error'``. With ``acceleration`` given it is
         the aux that came with it (a previous rollout's ``RolloutResult.aux``),
-        in the structure ``step_fn`` returns.
+        in the structure ``step_fn`` returns. Under ``"step"``, ``"nested"`` and
+        ``"offload"`` the aux is NOT differentiated, in or out: a gradient that
+        reads a floating leaf of the returned aux is refused when it is traced
+        (``ValueError``); a floating leaf passed in that depends on a
+        differentiated value gets no gradient, silently (stop its gradient, or
+        pass the value in the state or ``params``). ``checkpoint=None``
+        differentiates both.
     acceleration : Optional[Array]
         ``[N, 3]`` TOTAL acceleration at the start positions (force plus field).
         ``None``: computed here, ``step_fn`` at ``positions`` plus the field, so
@@ -374,10 +834,11 @@ def differentiable_rollout(
     external_args : Any
         The field's parameters (any pytree; arrays differentiable).
     checkpoint : Optional[str]
-        ``None`` (plain scan), ``"step"`` (default) or ``"nested"``: what the
-        reverse pass stores (module docstring). Static.
+        ``None`` (plain scan), ``"step"`` (default), ``"nested"``, or
+        ``"offload"`` (``"nested"`` with what it stores in pinned host memory):
+        what the reverse pass stores and where (module docstring). Static.
     inner_steps : Optional[int]
-        ``"nested"`` only: steps per segment, ``>= 1``; ``None`` takes
+        ``"nested"`` / ``"offload"`` only: steps per segment, ``>= 1``; ``None`` takes
         ``round(sqrt(num_steps))``. Clamped to ``num_steps``. A remainder runs
         as a shorter last segment. Static.
 
@@ -393,8 +854,8 @@ def differentiable_rollout(
     ValueError
         If ``num_steps`` or ``inner_steps`` is not a positive int, ``checkpoint``
         is not one of :data:`CHECKPOINT_MODES`, ``inner_steps`` comes without
-        ``checkpoint="nested"``, ``external_args`` without ``external_fn``, or the
-        arrays' shapes or the state's dtypes disagree.
+        ``checkpoint="nested"`` or ``"offload"``, ``external_args`` without
+        ``external_fn``, or the arrays' shapes or the state's dtypes disagree.
     """
     if isinstance(num_steps, bool) or not isinstance(num_steps, (int, np.integer)):
         raise ValueError(f"num_steps must be a Python int, got {num_steps!r}")
@@ -406,8 +867,8 @@ def differentiable_rollout(
             f"checkpoint must be one of {CHECKPOINT_MODES}, got {checkpoint!r}"
         )
     if inner_steps is not None:
-        if checkpoint != "nested":
-            raise ValueError("inner_steps needs checkpoint='nested'")
+        if checkpoint not in ("nested", "offload"):
+            raise ValueError("inner_steps needs checkpoint='nested' or 'offload'")
         if isinstance(inner_steps, bool) or not isinstance(
             inner_steps, (int, np.integer)
         ):
@@ -438,80 +899,87 @@ def differentiable_rollout(
         )
 
     dtype = positions.dtype
-    # a Python dt stays a literal of the program, an array a traced argument;
-    # strict_run_v2 casts both to the state's dtype the same way
-    dt_arr = jnp.asarray(dt, dtype=dtype)
-
     # a field that ignores the velocity rows is handed zeros there: the same
     # output, and the checkpointed step's recompute then needs no velocities
     field_velocities = external_fn is not None and _field_reads_velocities(
         external_fn, external_args, positions
     )
 
-    def force(x: Array, v: Array, aux_in: Any) -> tuple[Array, Any]:
+    # What the steps are differentiated in, besides the carry: the masses, an
+    # array dt, and the array leaves of the force and field parameters. Python
+    # numbers stay literals of the program (dt cast to the state's dtype as
+    # strict_run_v2 casts it); the provider tells a static parameter from a
+    # traced one.
+    consts = _StepConsts.split(masses, dt, dtype, params, external_args)
+
+    def force(x: Array, v: Array, aux_in: Any, c: tuple) -> tuple[Array, Any]:
         # the step's total acceleration at x, in the state's dtype, as the
         # particle carry builds it: the force, plus the field at (x, v)
-        acc, aux_out = step_fn(x, masses, params, aux_in)
+        masses_c, _, params_c, field_args_c = consts.join(c)
+        acc, aux_out = step_fn(x, masses_c, params_c, aux_in)
         acc = jnp.asarray(acc, dtype=dtype)
         rows_v = v if field_velocities else jnp.zeros_like(v)
-        field = _external_acceleration(external_fn, external_args, x, rows_v)
+        field = _external_acceleration(external_fn, field_args_c, x, rows_v)
         return (acc if field is None else acc + field), aux_out
 
-    def force_and_kick(x: Array, v: Array, a: Array, aux_in: Any) -> tuple:
+    def force_and_kick(x: Array, v: Array, a: Array, aux_in: Any, c: tuple) -> tuple:
         # the force at the drifted positions and the kick with the mean of the
-        # old and new accelerations: what a checkpointed step recomputes. Its
-        # input is the DRIFTED x; v and a enter linearly (the kick, and the
-        # field's rows only if the field reads velocities), so the reverse pass
-        # saves x and the aux, not the whole carry
-        a_new, aux_out = force(x, v, aux_in)
-        return v + 0.5 * (a + a_new) * dt_arr, a_new, aux_out
+        # old and new accelerations: what a step's reverse recomputes. Its input
+        # is the DRIFTED x; v and a enter linearly (the kick, and the field's rows
+        # only if the field reads velocities), so the reverse pass needs x and
+        # the aux, not the whole carry
+        a_new, aux_out = force(x, v, aux_in, c)
+        return v + 0.5 * (a + a_new) * consts.join(c)[1], a_new, aux_out
 
-    def stepper(force_kick: Callable) -> Callable:
-        def step(carry: tuple) -> tuple:
-            # one velocity-Verlet step (strict_run_v2's `_advance` and
-            # `_velocity_verlet_kick_drifted`): drift, force at the new
-            # positions, kick -- the same expressions, in the same order,
-            # whatever is checkpointed
-            x, v, a, aux_in = carry
-            x = x + v * dt_arr + 0.5 * a * dt_arr**2
-            v, a_new, aux_out = force_kick(x, v, a, aux_in)
-            return x, v, a_new, aux_out
+    def drift(x: Array, v: Array, a: Array, c: tuple) -> Array:
+        # strict_run_v2's `_advance`: the same expression, in the same order
+        dt_c = consts.join(c)[1]
+        return x + v * dt_c + 0.5 * a * dt_c**2
 
-        return step
-
-    if acceleration is None:
-        # the start force: checkpointed with the steps, so its residuals (one
-        # whole force's) are not held through the reverse pass
-        start = force if checkpoint is None else _checkpointed(force, "edge")
-        acceleration, aux = start(positions, velocities, aux)
-    else:
+    c0 = consts.dynamic
+    if acceleration is not None:
         acceleration = jnp.asarray(acceleration, dtype=dtype)
+    elif checkpoint is None:
+        acceleration, aux = force(positions, velocities, aux, c0)
+    # else: the start force is the adjoint's (acceleration None), so its reverse
+    # runs in the reverse loop, not beside its forward
     carry = (positions, velocities, acceleration, aux)
 
-    def scan_steps(carry_in: tuple, length: int, body: Callable) -> tuple:
-        return jax.lax.scan(lambda c, _: (body(c), None), carry_in, None, length)[0]
-
     if checkpoint is None:
-        carry = scan_steps(carry, num_steps, stepper(force_and_kick))
-    elif checkpoint == "step":
-        step_c = stepper(_checkpointed(force_and_kick, "step"))
-        carry = scan_steps(carry, num_steps, step_c)
+
+        def step(carry_in: tuple, _: Any) -> tuple:
+            # one velocity-Verlet step (strict_run_v2's `_advance` and
+            # `_velocity_verlet_kick_drifted`): drift, force, kick
+            x, v, a, aux_in = carry_in
+            x = drift(x, v, a, c0)
+            v, a_new, aux_out = force_and_kick(x, v, a, aux_in, c0)
+            return (x, v, a_new, aux_out), None
+
+        carry = jax.lax.scan(step, carry, None, num_steps)[0]
     else:
-        inner = (
-            max(1, round(math.sqrt(num_steps)))
-            if inner_steps is None
-            else int(inner_steps)
+        inner = None
+        if checkpoint in ("nested", "offload"):
+            inner = (
+                max(1, round(math.sqrt(num_steps)))
+                if inner_steps is None
+                else int(inner_steps)
+            )
+            inner = min(inner, num_steps)
+        # the velocities and accelerations of every step are kept only where the
+        # reverse reads them: a traced dt (the drift and the kick are bilinear in
+        # it) or a field that reads the velocity rows
+        keep_va = consts.dt_traced or field_velocities
+        carry = _adjoint_rollout(
+            force,
+            drift,
+            force_and_kick,
+            carry,
+            c0,
+            num_steps,
+            inner,
+            keep_va,
+            offload=checkpoint == "offload",
         )
-        inner = min(inner, num_steps)
-        outer, tail = divmod(num_steps, inner)
-        step_c = stepper(_checkpointed(force_and_kick, "step"))
-
-        def segment(length: int) -> Callable:
-            return lambda c: scan_steps(c, length, step_c)
-
-        carry = scan_steps(carry, outer, _checkpointed(segment(inner), "segment"))
-        if tail:
-            carry = _checkpointed(segment(tail), "edge")(carry)
     return RolloutResult(*carry)
 
 

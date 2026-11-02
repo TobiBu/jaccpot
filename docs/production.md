@@ -346,6 +346,65 @@ external field with traced parameters, traced force parameters). Not equal, the 
 warns, records the mismatches in `RunResult.restored`, and continues: correct, not
 bitwise.
 
+## Gradient mode (S9 session 2)
+
+A gradient of a production rollout, segments, re-plans and all, in two passes
+(`jaccpot/production_grad.py`):
+
+```python
+plan = runner.gradient_plan(state, masses, dt=dt, num_steps=T,
+                            external_params=halo)   # 1. the forward pre-pass
+res = plan.value_and_grad(lambda out, inputs: loss(out.positions, out.velocities),
+                          wrt=("positions", "velocities", "masses", "external_params"))
+res.value, res.grads["positions"], res.result        # 2. the gradient run
+# or both at once: runner.value_and_grad(loss, state, masses, dt=..., num_steps=..., wrt=...)
+```
+
+1. **The pre-pass is `run()` itself** -- its segments, segment retries and re-plans,
+   callbacks and restart files -- with a recorder that keeps, per segment, the plan
+   its scan traced with (leaf capacity, walk caps, level registry, depth bound), its
+   provider, and how its start acceleration and first f_b were made (`strict_run_v2`
+   records the successful attempt's start, host-side, only while the recorder is on).
+   Each segment's provider gets the gradient plan's statics frozen on a rebuild at its
+   start. Cost: one host copy of the state per segment, one rebuild program per plan.
+2. **The gradient run is one jitted program**: a chain of `differentiable_rollout`
+   calls over each segment's `differentiable_step`, each segment traced under its own
+   plan. Only statics change between segments, so the chain is one pure function of
+   `(positions, velocities, masses, dt, force_params, external_params)`.
+   `GradientPlan.value_and_grad` compiles it once per `(loss, wrt, checkpoint)` and
+   refuses (`RolloutVerdictError`) a run whose verdict failed -- e.g. inputs moved so
+   far from the pre-pass's that its caps no longer hold: make a new plan there.
+
+**The boundaries are the runner's.** A segment that was not retried continues the
+previous one's total acceleration and f_b; a retried one starts the way
+`strict_run_v2`'s retry started it (the start force from the re-prepare's seed, the
+same seed for the first step; with a field, the previous segment's last self-gravity
+plus the field). So the gradient run's forward is the runner's trajectory, bitwise,
+re-planned segments included (CPU, N = 512, float64). One exception: the runner adds
+the field to a start force EAGERLY, op by op, and XLA contracts multiply-adds inside a
+jitted field, so a field with more than one multiply (the NFW halo) moves a few
+elements by an ulp at step 0 and after a retry with a field (9-26 of 3072, 5.6e-17).
+
+**From a restart.** `gradient_plan(restart_from=path)` (or a `RunResult`) starts the
+gradient run at the restart's state. The restored start acceleration is data, so the
+chain keeps its VALUE (the forward stays the runner's) and differentiates the force
+RECOMPUTED at the restart positions in its place: the gradient with respect to the
+restart state is the one the uninterrupted run carries across that edge -- to
+round-off with the geometric MAC (1.8e-16 of the largest component, CPU, N = 512,
+float64); under `dehnen_error` to 3e-8 / 6e-8 (positions / masses), because a restart
+file holds the f_b of the restart state's own force, not the one its thresholds came
+from, so the recompute linearises the edge's force on neighbouring lists.
+
+Single card only. Checkpointing per segment as `differentiable_rollout`'s
+(`checkpoint="step"` by default; memory: `docs/production_2026-10.md`, "S9").
+
+**Tests.** `tests/integration/strict/test_runner_gradient_mode.py`: CI runs its G1 (the
+gradient run's forward against the runner). Its gradient gates -- finite and A-vs-A, FD,
+restart, refusal -- are manual: one gradient compile of the three-segment chain takes
+19-21 GB of RSS on CPU, more than a hosted runner holds. Run them on a large host after
+changing `production_grad.py` or the rollout's reverse:
+`JACCPOT_RUN_MANUAL_TESTS=1 pytest -n 2 --dist loadgroup tests/integration/strict/test_runner_gradient_mode.py`.
+
 ## Multi-GPU mode
 
 `ProductionRunner(solver, ..., mesh=...)` runs the same loop -- segments, edges,
