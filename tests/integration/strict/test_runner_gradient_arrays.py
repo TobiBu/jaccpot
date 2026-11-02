@@ -9,7 +9,8 @@ system (CPU, interpret, N = 512, float64, p2):
   in two segments): the forward with the arrays as arguments is the runner's
   trajectory bitwise, its program holds fewer ``[N]`` constants; MANUAL
   (``JACCPOT_RUN_MANUAL_TESTS=1``, ~20 GB of RSS per gradient compile on CPU):
-  the gradient with the arrays as arguments is the one without, bitwise;
+  the gradient with the arrays as arguments is the one without to round-off (the
+  value bitwise);
 * a restart's plan (its boundary from the file): the forward through
   ``arrays`` is the runner's, bitwise.
 """
@@ -21,6 +22,7 @@ from typing import Any, Iterator
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from tests.integration.strict import test_grad_rollout_differentiable as g
@@ -119,7 +121,8 @@ def test_a_restarts_boundary_through_arrays_is_the_runners(tmp_path):
 @pytest.mark.xdist_group("runner_arrays")
 def test_the_gradient_with_the_arrays_as_arguments_is_the_same():
     """``jax.value_and_grad`` of the chain with the arrays as arguments against
-    the plan's own (constants): value and gradients bitwise."""
+    the plan's own (constants): the value bitwise, the gradients to round-off (XLA
+    folds what depends on constant seeds alone at compile time)."""
     from jaccpot.production import _trace_state_kept
     from jaccpot.production_grad import _install_plan
 
@@ -145,5 +148,16 @@ def test_the_gradient_with_the_arrays_as_arguments_is_the_same():
             grads[name] = program(diff, arrays)
     (v0, g0), (v1, g1) = grads["constants"], grads["arguments"]
     assert r._bitwise(v1, v0) == 0
-    pairs = zip(jax.tree_util.tree_leaves(g1), jax.tree_util.tree_leaves(g0))
-    assert sum(r._bitwise(a, b) for a, b in pairs) == 0
+    rows = []
+    for (path, b), a in zip(
+        jax.tree_util.tree_leaves_with_path(g0), jax.tree_util.tree_leaves(g1)
+    ):
+        a, b = np.asarray(a), np.asarray(b)
+        rel = float(np.max(np.abs(a - b))) / float(np.max(np.abs(b)))
+        rows.append((jax.tree_util.keystr(path), r._bitwise(a, b), rel))
+    print(f"\narguments vs constants: (leaf, bytes differing, rel) {rows}")
+    # not bitwise: with the seeds as constants XLA folds what depends on them
+    # alone at compile time (the f_b thresholds), evaluated otherwise than at run
+    # time; round-off of the largest component
+    for key, _, rel in rows:
+        assert rel <= 1e-12, (key, rel)
