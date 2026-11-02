@@ -158,9 +158,14 @@ class TreeConfig:
         up to a multiple of 1024. It then stays fixed, so the compiled programs
         keep their shapes; a run whose particles cluster past it raises the
         capacity error like an explicit value.
-    cell_min_level : Optional[int]
+    cell_min_level : Optional[Union[int, Literal["auto"]]]
         ``leaf_partition="cells"`` only: no leaf coarser than this Morton level
-        (``None``/``0``: unconstrained). Leaves are the coarsest cells holding at
+        (``None``/``0``: unconstrained). ``"auto"`` (opt-in, S10 follow-ups) picks
+        it at the solver's first eager prepare, as ``leaf_capacity="auto"`` sizes
+        the capacity (before it): the finest level at most 8 whose occupied cells
+        hold at least ``leaf_target`` particles on average
+        (:func:`jaccpot.runtime.capacity_plan.auto_cell_min_level`), 8 at
+        production N; it then stays fixed. Single card only. Leaves are the coarsest cells holding at
         most ``leaf_target`` particles, so a sparse outskirt cell with a few
         far-apart outliers stays ONE leaf whose bounding sphere spans much of the
         box -- it fails the MAC against nearly everything, gets a near list of
@@ -193,7 +198,7 @@ class TreeConfig:
     aspect_threshold: Optional[float] = None
     leaf_partition: Optional[str] = None
     leaf_capacity: Optional[Union[int, Literal["auto"]]] = None
-    cell_min_level: Optional[int] = None
+    cell_min_level: Optional[Union[int, Literal["auto"]]] = None
     leaf_headroom: Optional[float] = None
     cubic_bounds: Optional[bool] = None
 

@@ -141,8 +141,13 @@ class GalaxySettings:
         (``mac_force_scale_prepass_theta``). Theta 0.3, 0.5 and 0.8 gave the same
         lists and the same states bit for bit (CPU, N = 2048). It stays 0.8, the
         value the bench passes; it is still part of the compile keys.
-    cell_min_level : int
+    cell_min_level : Union[int, Literal["auto"]]
         No leaf coarser than this Morton level (``TreeConfig.cell_min_level``).
+        ``"auto"`` (opt-in; the default stays 8): picked at the first eager
+        prepare, the finest level at most 8 whose occupied cells hold a leaf's
+        worth of particles on average -- 8 at production N, coarser at small N,
+        where 8 cuts 1-3 particles per leaf (``docs/production_2026-10.md``, "S10
+        follow-ups"). Single card.
     leaf_capacity : Union[int, Literal["auto"]]
         ``TreeConfig.leaf_capacity``; ``"auto"`` sizes it at the first eager
         prepare.
@@ -185,7 +190,7 @@ class GalaxySettings:
     leaf_size: int = 64
     max_order: int = 6
     theta: float = 0.8
-    cell_min_level: int = 8
+    cell_min_level: Union[int, Literal["auto"]] = 8
     leaf_capacity: Union[int, Literal["auto"]] = "auto"
     leaf_headroom: float = 1.15
     cubic_bounds: bool = True

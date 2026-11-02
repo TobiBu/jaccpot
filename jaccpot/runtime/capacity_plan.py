@@ -48,6 +48,8 @@ from typing import Any, Iterable, Iterator, Optional
 
 __all__ = [
     "FusedCapacityPlan",
+    "AUTO_CELL_MIN_LEVEL_MAX",
+    "auto_cell_min_level",
     "auto_leaf_capacity",
     "eager_live_rows",
     "fused_capacity_plan",
@@ -55,6 +57,7 @@ __all__ = [
     "install_walk_caps",
     "list_widths",
     "live_cell_leaves",
+    "occupied_cells",
     "measure_shard_plan",
     "merge_plans",
     "merge_walk_caps",
@@ -738,6 +741,139 @@ def live_cell_leaves(
             codes, jnp.asarray(rows, jnp.int64)
         )
     )
+
+
+#: ``TreeConfig(cell_min_level="auto")``'s ceiling: the galaxy preset's level 8
+AUTO_CELL_MIN_LEVEL_MAX = 8
+
+
+@functools.lru_cache(maxsize=None)
+def _occupied_cell_counter(max_level: int) -> Any:
+    """The jitted sort + per-level count of occupied Morton cells, levels 0..max.
+
+    Parameters
+    ----------
+    max_level : int
+        The finest level counted.
+
+    Returns
+    -------
+    Any
+        ``codes (N,) uint64, num_valid -> (max_level + 1,) int64``.
+    """
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+
+    def occupied(codes: Any, num_valid: Any) -> Any:
+        rows = jnp.arange(codes.shape[0])
+        live = rows < num_valid
+        codes = jnp.sort(
+            jnp.where(live, codes, jnp.asarray(np.uint64(2**63 - 1), jnp.uint64))
+        )
+        # the live rows sort first; a cell starts where the shifted code changes
+        starts = rows[1:] < num_valid
+        counts = []
+        for level in range(max_level + 1):
+            cell = codes >> jnp.uint64(3 * (21 - level))
+            new = (cell[1:] != cell[:-1]) & starts
+            counts.append(jnp.sum(new, dtype=jnp.int64) + (num_valid > 0))
+        return jnp.stack(counts)
+
+    return jax.jit(occupied)
+
+
+def occupied_cells(
+    positions: Any,
+    *,
+    bounds: Any,
+    max_level: int = AUTO_CELL_MIN_LEVEL_MAX,
+    num_valid: Optional[int] = None,
+) -> Any:
+    """How many Morton cells of each level ``0..max_level`` hold a particle.
+
+    Counted on device from the same jitted yggdrax ``morton_encode`` in the same box
+    as :func:`live_cell_leaves`.
+
+    Parameters
+    ----------
+    positions : Any
+        Particle positions ``(N, 3)``, at the dtype the tree is built from.
+    bounds : Any
+        ``(lower, upper)``: the Morton box the tree is built in.
+    max_level : int
+        The finest level counted, ``0..21``.
+    num_valid : Optional[int]
+        Leading live rows (``None``: every row).
+
+    Returns
+    -------
+    Any
+        ``(max_level + 1,)`` int64 numpy array: occupied cells per level.
+    """
+    import jax.numpy as jnp
+    import numpy as np
+    from yggdrax.morton import morton_encode
+
+    lower, upper = bounds
+    pos = jnp.asarray(positions)
+    codes = morton_encode(
+        pos, (jnp.asarray(lower, pos.dtype), jnp.asarray(upper, pos.dtype))
+    )
+    rows = int(codes.shape[0]) if num_valid is None else int(num_valid)
+    return np.asarray(
+        _occupied_cell_counter(int(max_level))(codes, jnp.asarray(rows, jnp.int64))
+    )
+
+
+def auto_cell_min_level(
+    positions: Any,
+    *,
+    leaf_size: int,
+    bounds: Any,
+    num_valid: Optional[int] = None,
+    max_level: int = AUTO_CELL_MIN_LEVEL_MAX,
+) -> int:
+    """``TreeConfig(cell_min_level="auto")``: the floor for these particles.
+
+    The finest level ``L <= max_level`` whose OCCUPIED cells hold, on average, at
+    least ``leaf_size`` particles (``N / occupied_cells(L) >= leaf_size``; ``0``
+    if none does). The floor's purpose is to split the sparse outskirt cells that
+    would otherwise be one leaf spanning much of the box; a floor finer than this
+    level also splits the bulk into leaves well below the leaf target (the galaxy
+    preset's level 8 gives 1-3 particles per leaf on a 1e5-1e6 disc, S10 session
+    2), which multiplies the leaves, the far pairs and the gradient's workspace.
+    At production N (and any N whose level-8 cells already hold a leaf's worth)
+    it is ``max_level``: the preset's 8.
+
+    Parameters
+    ----------
+    positions : Any
+        Particle positions ``(N, 3)``, at the dtype the tree is built from.
+    leaf_size : int
+        The build's leaf size (the leaf target).
+    bounds : Any
+        ``(lower, upper)``: the Morton box the tree is built in.
+    num_valid : Optional[int]
+        Leading live rows (``None``: every row).
+    max_level : int
+        The ceiling.
+
+    Returns
+    -------
+    int
+        The level, ``0..max_level``.
+    """
+    import numpy as np
+
+    counts = occupied_cells(
+        positions, bounds=bounds, max_level=max_level, num_valid=num_valid
+    )
+    rows = int(np.shape(positions)[0]) if num_valid is None else int(num_valid)
+    for level in range(int(max_level), -1, -1):
+        if counts[level] > 0 and rows >= int(leaf_size) * int(counts[level]):
+            return level
+    return 0
 
 
 def auto_leaf_capacity(

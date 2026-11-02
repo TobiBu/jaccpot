@@ -492,8 +492,27 @@ class FMMEngine(
                     "TreeConfig(leaf_partition='cells') needs leaf_capacity "
                     "(an int, or 'auto')"
                 )
+        # cell_min_level="auto": picked at the first eager prepare
+        # (PrepareMixin._resolve_auto_cell_min_level); until then the level is the
+        # ceiling and the ceiling marks that the pick is still to come
+        self._tree_cell_min_level_auto: Optional[int] = None
+        if isinstance(_tree.cell_min_level, str):
+            if _tree.cell_min_level.strip().lower() != "auto":
+                raise ValueError(
+                    "TreeConfig.cell_min_level must be an int or 'auto', got "
+                    f"{_tree.cell_min_level!r}"
+                )
+            from .capacity_plan import AUTO_CELL_MIN_LEVEL_MAX
+
+            self._tree_cell_min_level_auto = AUTO_CELL_MIN_LEVEL_MAX
         self._tree_cell_min_level: int = (
-            0 if _tree.cell_min_level is None else int(_tree.cell_min_level)
+            0
+            if _tree.cell_min_level is None
+            else (
+                int(self._tree_cell_min_level_auto)
+                if self._tree_cell_min_level_auto is not None
+                else int(_tree.cell_min_level)
+            )
         )
         if self._tree_cell_min_level and self._tree_leaf_partition != "cells":
             raise ValueError("TreeConfig.cell_min_level needs leaf_partition='cells'")
