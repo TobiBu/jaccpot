@@ -12,7 +12,7 @@ system (CPU, interpret, N = 512, float64, p2, 3 segments x 2 steps, the second
 re-planned):
 
 * the forward of the ``"adjoint"`` chain against the runner's trajectory, in
-  every lane: Plummer + harmonic field (start / self / carried),
+  every lane (CI runs the first and the third; the others are MANUAL): Plummer + harmonic field (start / self / carried),
   ``dehnen_error`` + field (start / self / carried), ``dehnen_error`` without
   (start / seed_kept / carried), and ``dehnen_error`` without under
   ``JACCPOT_STRICT_CAPS_ONLY_PREPARE=0`` (start / eager_self / carried);
@@ -76,9 +76,18 @@ def _lane_on_cpu() -> Iterator[None]:
     _GRADS.clear()
 
 
-def _lanes(*names: str) -> list:
+#: the forward lanes CI runs (start + self, start + seed_kept); the other two are
+#: manual like the gradients (a CI shard's time: ~7 min per lane on a large host)
+CI_LANES = ("plummer", "dehnen_error_nofield")
+
+
+def _lanes(*names: str, manual: tuple = ()) -> list:
     return [
-        pytest.param(name, marks=pytest.mark.xdist_group(f"runner_start_force_{name}"))
+        pytest.param(
+            name,
+            marks=[pytest.mark.xdist_group(f"runner_start_force_{name}")]
+            + ([_MANUAL] if name in manual else []),
+        )
         for name in names
     ]
 
@@ -127,7 +136,10 @@ def _rel(got: Any, want: Any) -> float:
     return float(np.max(np.abs(got - want))) / (scale if scale else 1.0)
 
 
-@pytest.mark.parametrize("name", _lanes(*LANES))
+@pytest.mark.parametrize(
+    "name",
+    _lanes(*LANES, manual=tuple(lane for lane in LANES if lane not in CI_LANES)),
+)
 def test_the_adjoint_start_forces_forward_is_the_runners_to_round_off(name):
     """The ``"adjoint"`` chain's jitted forward against the runner: the verdict
     clean, the f_b bitwise, the state and the total acceleration to round-off
