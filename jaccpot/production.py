@@ -1911,6 +1911,7 @@ class ProductionRunner:
         restart_from: Any = None,
         checkpoint: Optional[str] = "step",
         inner_steps: Optional[int] = None,
+        start_force: str = "outside",
     ) -> Any:
         """A loss of the run's final state, and its gradient: pre-pass, then gradient run.
 
@@ -1950,6 +1951,12 @@ class ProductionRunner:
             ``differentiable_rollout``'s checkpoint mode, per segment.
         inner_steps : Optional[int]
             Its ``inner_steps`` (``"nested"``).
+        start_force : str
+            Where a seeded segment's start force runs
+            (:meth:`GradientPlan.rollout
+            <jaccpot.production_grad.GradientPlan.rollout>`): ``"outside"``
+            (default) or ``"adjoint"`` (less memory; step 0 bitwise the runner's
+            only for a one-multiply field).
 
         Returns
         -------
@@ -1968,7 +1975,11 @@ class ProductionRunner:
             restart_from=restart_from,
         )
         return plan.value_and_grad(
-            loss, wrt=wrt, checkpoint=checkpoint, inner_steps=inner_steps
+            loss,
+            wrt=wrt,
+            checkpoint=checkpoint,
+            inner_steps=inner_steps,
+            start_force=start_force,
         )
 
     # ------------------------------------------------------------------

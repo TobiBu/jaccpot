@@ -768,6 +768,7 @@ def differentiable_rollout(
     external_args: Any = None,
     checkpoint: Optional[str] = "step",
     inner_steps: Optional[int] = None,
+    start_aux: Optional[Callable[[Any, Any], Any]] = None,
 ) -> RolloutResult:
     """``num_steps`` velocity-Verlet steps over ``step_fn``, differentiably.
 
@@ -841,6 +842,16 @@ def differentiable_rollout(
         ``"nested"`` / ``"offload"`` only: steps per segment, ``>= 1``; ``None`` takes
         ``round(sqrt(num_steps))``. Clamped to ``num_steps``. A remainder runs
         as a shorter last segment. Static.
+    start_aux : Optional[Callable[[Any, Any], Any]]
+        With ``acceleration=None`` only: ``start_aux(aux_in, aux_out) -> aux``,
+        the aux the FIRST step gets, from the start force's input aux (``aux``)
+        and the aux it returned; in ``step_fn``'s output structure. The
+        production runner's caps-only retry (``"seed_kept"``) starts its first
+        step from the start force's seed again, not from its f_b
+        (:meth:`GradientPlan.rollout <jaccpot.production_grad.GradientPlan.rollout>`
+        with ``start_force="adjoint"``). Not differentiated (the aux never is
+        under ``"step"`` / ``"nested"`` / ``"offload"``). ``None``: the start
+        force's own aux (the program is the one without the argument).
 
     Returns
     -------
@@ -855,7 +866,8 @@ def differentiable_rollout(
         If ``num_steps`` or ``inner_steps`` is not a positive int, ``checkpoint``
         is not one of :data:`CHECKPOINT_MODES`, ``inner_steps`` comes without
         ``checkpoint="nested"`` or ``"offload"``, ``external_args`` without
-        ``external_fn``, or the arrays' shapes or the state's dtypes disagree.
+        ``external_fn``, ``start_aux`` with an ``acceleration``, or the arrays'
+        shapes or the state's dtypes disagree.
     """
     if isinstance(num_steps, bool) or not isinstance(num_steps, (int, np.integer)):
         raise ValueError(f"num_steps must be a Python int, got {num_steps!r}")
@@ -877,6 +889,10 @@ def differentiable_rollout(
             raise ValueError(f"inner_steps must be >= 1, got {inner_steps}")
     if external_args is not None and external_fn is None:
         raise ValueError("external_args needs an external_fn(state, external_args)")
+    if start_aux is not None and acceleration is not None:
+        raise ValueError(
+            "start_aux needs acceleration=None (it maps the start force's aux)"
+        )
     positions = jnp.asarray(positions)
     velocities = jnp.asarray(velocities)
     masses = jnp.asarray(masses)
@@ -936,11 +952,19 @@ def differentiable_rollout(
         dt_c = consts.join(c)[1]
         return x + v * dt_c + 0.5 * a * dt_c**2
 
+    start_force = force
+    if start_aux is not None:
+
+        def start_force(x: Array, v: Array, aux_in: Any, c: tuple) -> tuple:
+            # the start force, its aux mapped for the first step
+            acc, aux_out = force(x, v, aux_in, c)
+            return acc, start_aux(aux_in, aux_out)
+
     c0 = consts.dynamic
     if acceleration is not None:
         acceleration = jnp.asarray(acceleration, dtype=dtype)
     elif checkpoint is None:
-        acceleration, aux = force(positions, velocities, aux, c0)
+        acceleration, aux = start_force(positions, velocities, aux, c0)
     # else: the start force is the adjoint's (acceleration None), so its reverse
     # runs in the reverse loop, not beside its forward
     carry = (positions, velocities, acceleration, aux)
@@ -970,7 +994,7 @@ def differentiable_rollout(
         # it) or a field that reads the velocity rows
         keep_va = consts.dt_traced or field_velocities
         carry = _adjoint_rollout(
-            force,
+            start_force,
             drift,
             force_and_kick,
             carry,
