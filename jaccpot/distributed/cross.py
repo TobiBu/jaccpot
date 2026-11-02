@@ -2137,8 +2137,8 @@ class CrossCapacities:
         run whose ``overflow`` bit is CLEAR: a lower-bound need sizes a buffer that
         overflows again (:func:`plan_cross_capacities` re-plans first). Whatever a
         need says, the structural bounds hold (:func:`_structural_bounds`): the leaf
-        width at most a finest-level cell's (``_FINEST_CELL_WIDTH_FACTOR x
-        leaf_size``), the particle buffers at most their rows x the leaf width.
+        width at most ``leaf_size``, the particle buffers at most their rows x the
+        leaf width.
 
         Parameters
         ----------
@@ -2155,9 +2155,8 @@ class CrossCapacities:
             The tree's leaf slots: the summary is clamped to what a tree of them can
             hold (``max_cells`` to it, ``max_summary_nodes`` to ``2 x it - 1``).
         leaf_size : Optional[int]
-            The template's leaf size; the leaf width stays within the structural
-            bound it sets (:func:`_structural_bounds`). ``None``: no bound on the
-            width.
+            The most particles a leaf of the template holds (its leaf size); the
+            leaf width never exceeds it. ``None``: no bound on the width.
 
         Returns
         -------
@@ -2205,7 +2204,7 @@ class CrossCapacities:
         leaf_capacity : Optional[int]
             As :meth:`from_needs`; pass the GROWN one when the tree was re-planned.
         leaf_size : Optional[int]
-            As :meth:`from_needs`: the leaf width stays within its structural bound.
+            As :meth:`from_needs`: the leaf width never grows past it.
 
         Returns
         -------
@@ -2240,24 +2239,17 @@ class CrossCapacities:
         )
 
 
-#: How much wider than the leaf size a cell leaf may be (``_structural_bounds``): a
-#: leaf past ``leaf_size`` is a cell at the finest Morton level, which yggdrax keeps
-#: as a leaf whatever it holds -- 121 particles in one such cell measured on the
-#: Plummer sphere of 8e7 (its outliers make the box 35,148 wide), 144 in one shipped
-#: near row on four cards -- while a degenerate tree's "leaf" is a whole shard.
-_FINEST_CELL_WIDTH_FACTOR = 64
-
-
 def _structural_bounds(caps: dict, leaf_size: Optional[int]) -> dict:
     """Clamp proposed capacities to what the exchange can structurally need.
 
-    * ``leaf_width`` <= ``_FINEST_CELL_WIDTH_FACTOR x leaf_size``: a near row is one
-      summary cell holding one live cell leaf. A cell leaf holds at most the leaf
-      size the template was built with, except a cell at the finest Morton level,
-      a leaf whatever it holds: in the dense core of a large, wide-boxed system
-      such cells hold a few leaf sizes (Plummer 8e7: 121 particles in one). A need
-      past the bound is not a leaf (a degenerate tree: measured, the root of a NaN
-      state as one summary cell of 4,002,489 particles) and no width serves it.
+    * ``leaf_width`` <= ``leaf_size``: a near row is one summary cell holding one live
+      cell leaf, and a cell leaf holds at most the leaf size the template was built
+      with -- the local lane's own leaf tiles are that wide. That includes a cell at
+      the finest Morton level, which yggdrax cuts into leaf-size chunks (yggdrax
+      #104; before it such a cell was one leaf whatever it held: 144 particles in
+      one near row of Plummer 8e7 on four cards). A wider "need" is not a leaf (a
+      degenerate tree: measured, the root of a NaN state as one summary cell of
+      4,002,489 particles) and no width serves it.
     * ``send_particle_cap`` <= ``send_node_cap x leaf_width``, ``recv_particle_cap``
       <= ``recv_node_cap x leaf_width``: every near row ships at most ``leaf_width``
       particles (the sender clips to it and flags the rest).
@@ -2267,8 +2259,7 @@ def _structural_bounds(caps: dict, leaf_size: Optional[int]) -> dict:
     caps : dict
         Proposed values of the :data:`CROSS_NEEDS_FIELDS` capacities.
     leaf_size : Optional[int]
-        The template's leaf size (the width's bound is
-        ``_FINEST_CELL_WIDTH_FACTOR`` times it); ``None`` leaves the width alone.
+        The template's leaf size; ``None`` leaves the width alone.
 
     Returns
     -------
@@ -2277,8 +2268,7 @@ def _structural_bounds(caps: dict, leaf_size: Optional[int]) -> dict:
     """
     out = dict(caps)
     if leaf_size is not None:
-        bound = _FINEST_CELL_WIDTH_FACTOR * int(leaf_size)
-        out["leaf_width"] = min(int(out["leaf_width"]), bound)
+        out["leaf_width"] = min(int(out["leaf_width"]), int(leaf_size))
     width = int(out["leaf_width"])
     for particles, rows in (
         ("send_particle_cap", "send_node_cap"),
@@ -2377,10 +2367,18 @@ def plan_cross_capacities(
             needs, headroom=headroom, leaf_capacity=leaf_capacity, leaf_size=leaf_size
         )
         if vars(grown) == vars(caps):
+            wide = ""
+            if leaf_size is not None and need["leaf_width"] > int(leaf_size):
+                wide = (
+                    f" A near row held {need['leaf_width']} particles, more than "
+                    f"the leaf size {int(leaf_size)}: no cell leaf does (a "
+                    "degenerate tree, or a yggdrax older than #104, which kept a "
+                    "finest-level Morton cell as one leaf whatever it held)."
+                )
             raise RuntimeError(
                 "plan_cross_capacities: the cross flag fired and no capacity needed "
                 f"more ({need}); a mismatch between the two ends of an exchange is "
-                "not a capacity."
+                f"not a capacity.{wide}"
             )
         caps = grown
     raise RuntimeError(
