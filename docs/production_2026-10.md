@@ -2356,6 +2356,22 @@ basedpyright 0 errors; jaccpot distributed tier 96 passed / 7 skipped (two devic
 ownership-invariance gate `tests/unit/distributed/test_fused_rollout.py` and the four-device cross-capacity cases
 again at four: 11 passed), segment 10, segment-criterion 4, segment-migration 2, segment-runner 5 passed,
 criterion 8 passed.
+**Resolved 2026-10-30 (yggdrax #104, jaccpot #483 / #485, and the bound back at the leaf size).** Both findings
+were the same defect: the finest-level cells over 64 were leaves the local lane's leaf tables (64 wide) silently
+truncated -- particles past the 64th in such a leaf got no near field on one card as on four. yggdrax #104 cuts
+a finest-level cell into leaf-size chunks, so no cell leaf is wider than the leaf size, and `_structural_bounds`
+is back at fix 8's `leaf_width <= leaf_size` (`_FINEST_CELL_WIDTH_FACTOR` removed; a wider need now names a
+degenerate tree or a yggdrax older than #104 in the "re-plan grew nothing" message). The one-card 8e7 force on
+the same particles: 4.60e-3 / 3.90e-3 -> 1.72e-4 / 1.45e-4. The four-card rows again (cards 3, 5, 6, 7, shared
+with an idle context only; same command):
+
+| Plummer | per card | peak per device | retries | widest row | rel-L2 start / end |
+| --- | --- | --- | --- | --- | --- |
+| 4e7 | 1e7 | 481-492 B/p (4.8-4.9 GB) | 0 | 64 | 9.97e-5 / 1.85e-4 |
+| 8e7 | 2e7 | 424-427 B/p (8.5 GB) | 0 | 64 | 1.04e-4 / 1.69e-4 |
+| 1.2e8 | 3e7 | 416-420 B/p (12.5-12.6 GB) | 0 | 64 | 9.71e-5 / 1.83e-4 |
+
+Every segment flag-clean with no retry; the accuracy no longer falls with N.
 
 ### Open after S11 session 2
 - `MeshRunConfig.migrate` is `True` by default after T's A/B (the stack's last PR); `MeshSegmentRunner`'s own

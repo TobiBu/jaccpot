@@ -2048,7 +2048,11 @@ def _evaluate_local_expansions_particle_major(
         particle per lane, the gradient by the Cartesian recurrence of the solid
         harmonics -- the same to float rounding; differentiable through
         :func:`~jaccpot.pallas.l2p_real.l2p_real_particles_pallas_cvjp`, whose
-        reverse never forms a per-particle coefficient cotangent). Static.
+        reverse never forms a per-particle coefficient cotangent). Opt-in, the
+        Mosaic GPU port of that forward (:mod:`jaccpot.pallas.l2p_real_mosaic`,
+        spike S1b): ``"mosaic"`` (per-thread gathers in inline Mosaic GPU IR),
+        ``"mosaic_select"`` (pure Pallas) or ``"mosaic_interpret"`` (the latter in
+        interpret mode). Static.
 
     Returns
     -------
@@ -2081,6 +2085,23 @@ def _evaluate_local_expansions_particle_major(
             kernel == "interpret",
             "triton",
             4,
+        )
+        return grads.astype(dtype)
+    if kernel in ("mosaic", "mosaic_select", "mosaic_interpret"):
+        from jaccpot.pallas.l2p_real_mosaic import l2p_real_particles_mosaic_cvjp
+
+        # the Mosaic GPU port of the same forward (spike S1b, opt-in); its reverse
+        # is the Triton one
+        grads = l2p_real_particles_mosaic_cvjp(
+            local_data.coefficients,
+            local_data.centers,
+            positions,
+            jnp.asarray(leaf_nodes, INDEX_DTYPE),
+            jnp.asarray(leaf_ranges[:, 0], INDEX_DTYPE),
+            jnp.asarray(counts, INDEX_DTYPE),
+            int(order),
+            "inline" if kernel == "mosaic" else "select",
+            kernel == "mosaic_interpret",
         )
         return grads.astype(dtype)
     leaf_of = jnp.repeat(
