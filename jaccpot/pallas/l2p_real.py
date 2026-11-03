@@ -890,10 +890,503 @@ def _l2p_cvjp_bwd(order, block, interpret, backend, num_warps, residual, grad_ba
 l2p_real_particles_pallas_cvjp.defvjp(_l2p_cvjp_fwd, _l2p_cvjp_bwd)
 
 
+# ------------------------------------------------------------------ forward mode
+# The tangent op of the particle-major L2P (forward mode, ``ad_mode="forward"``;
+# :mod:`jaccpot.pallas._tangent`). Below the reverse for the same reason the
+# reverse is below the forward: nothing above moves, so neither the forward's
+# nor the reverse's Triton IR locations change.
+
+
+def _l2p_lane_tangents(
+    coeff: list,
+    x: Array,
+    y: Array,
+    z: Array,
+    t_coeff: list[list] | None,
+    t_delta: list[tuple] | None,
+    *,
+    order: int,
+) -> list[tuple]:
+    """One lane's ``K`` tangents of :func:`l2p_real_grad_cartesian`.
+
+    The gradient is linear in the coefficients and polynomial in ``delta``, so its
+    tangent is the recurrence applied to the coefficient tangent plus the Hessian
+    applied to the ``delta`` tangent. Both come from ONE
+    :func:`~jaccpot.pallas._tangent.linearize_lanes` of the forward's lane body:
+    the harmonics (the primal intermediates) are built once and shared by the
+    ``K`` tangents.
+
+    Parameters
+    ----------
+    coeff : list
+        The lane's ``(p+1)^2`` coefficients, packed order.
+    x : Array
+        ``delta_x``.
+    y : Array
+        ``delta_y``.
+    z : Array
+        ``delta_z``.
+    t_coeff : list[list] | None
+        ``K`` coefficient tangents (each ``(p+1)^2`` arrays), or ``None`` when the
+        coefficients' tangent is known zero.
+    t_delta : list[tuple] | None
+        ``K`` ``(dx, dy, dz)`` tangents of ``delta``, or ``None`` when known zero.
+    order : int
+        Expansion order. Static.
+
+    Returns
+    -------
+    list[tuple]
+        ``K`` ``(gx, gy, gz)`` tangents.
+
+    Raises
+    ------
+    ValueError
+        If both tangents are ``None``.
+    """
+    from jaccpot.pallas._tangent import linearize_lanes
+
+    if t_coeff is None and t_delta is None:
+        raise ValueError("at least one live tangent is needed")
+    if t_delta is None:
+        # linear in the coefficients: the tangent IS the forward on the tangent
+        assert t_coeff is not None
+        return [
+            tuple(l2p_real_grad_cartesian(tc, x, y, z, order=order)) for tc in t_coeff
+        ]
+    if t_coeff is None:
+        _, lin = linearize_lanes(
+            lambda a, b, c: tuple(l2p_real_grad_cartesian(coeff, a, b, c, order=order)),
+            (x, y, z),
+        )
+        return [tuple(lin(*td)) for td in t_delta]
+    _, lin = linearize_lanes(
+        lambda f, a, b, c: tuple(l2p_real_grad_cartesian(f, a, b, c, order=order)),
+        (list(coeff), x, y, z),
+    )
+    return [tuple(lin(list(tc), *td)) for tc, td in zip(t_coeff, t_delta)]
+
+
+def _l2p_particle_tangent_kernel(
+    pos_ref: KernelRef,
+    cent_ref: KernelRef,
+    coef_ref: KernelRef,
+    leaf_node_ref: KernelRef,
+    leaf_end_ref: KernelRef,
+    first_ref: KernelRef,
+    live_ref: KernelRef,
+    t_coef_ref: KernelRef,
+    t_cent_ref: KernelRef,
+    t_pos_ref: KernelRef,
+    out_in: KernelRef,
+    out_ref: KernelRef,
+    *,
+    order: int,
+    block: int,
+    rows: int,
+    num_leaves: int,
+    k: int,
+    live_coef: bool,
+    live_delta: bool,
+) -> None:
+    """The forward's grid and lanes (:func:`_l2p_particle_kernel`), ``K`` tangents each.
+
+    Each lane finds its leaf by the forward's bisection, loads its primals once and
+    its ``K`` tangents, and stores ``K`` tangent rows
+    (:func:`_l2p_lane_tangents`).
+
+    Parameters
+    ----------
+    pos_ref : KernelRef
+        Whole sorted positions ``[N, 3]``.
+    cent_ref : KernelRef
+        Whole expansion centres ``[nodes, 3]``.
+    coef_ref : KernelRef
+        Whole local coefficients ``[nodes, (p+1)^2]``.
+    leaf_node_ref : KernelRef
+        Whole ``[L]`` node id of each leaf.
+    leaf_end_ref : KernelRef
+        Whole ``[L]`` one past each leaf's last particle (non-decreasing).
+    first_ref : KernelRef
+        Whole ``[blocks]`` leaf of each block's first particle.
+    live_ref : KernelRef
+        ``[1]`` particles in the leaves (a prefix of the rows).
+    t_coef_ref : KernelRef
+        Whole ``[K, nodes, (p+1)^2]`` coefficient tangents.
+    t_cent_ref : KernelRef
+        Whole ``[K, nodes, 3]`` centre tangents.
+    t_pos_ref : KernelRef
+        Whole ``[K, N, 3]`` position tangents.
+    out_in : KernelRef
+        The zeroed ``[K, N, 3]`` tangent, aliased to ``out_ref`` (not read).
+    out_ref : KernelRef
+        **Output** the tangent rows.
+    order : int
+        Expansion order. Static.
+    block : int
+        ``P`` (a multiple of 32). Static.
+    rows : int
+        ``N``. Static.
+    num_leaves : int
+        ``L``. Static.
+    k : int
+        ``K``, the tangents per lane. Static.
+    live_coef : bool
+        Whether the coefficient tangent can be nonzero. Static.
+    live_delta : bool
+        Whether the centre or position tangent can be nonzero. Static.
+
+    Returns
+    -------
+    None
+        Writes the block's ``K`` tangent rows.
+    """
+    del out_in
+    assert pl is not None and plgpu is not None
+    b = pl.program_id(0)
+    lane = lax.broadcasted_iota(jnp.int32, (block,), 0)
+    i = b * block + lane
+    first = first_ref[b]
+    lo = jnp.full((block,), first, jnp.int32)
+    hi = jnp.full((block,), first + block, jnp.int32)
+    for _ in range(int(block).bit_length()):
+        mid = (lo + hi) // 2
+        end_mid = leaf_end_ref[jnp.minimum(mid, num_leaves - 1)]
+        past = (end_mid <= i) & (mid < num_leaves)
+        lo = jnp.where(past, mid + 1, lo)
+        hi = jnp.where(past, hi, mid)
+    leaf = lo
+    live = (i < live_ref[0]) & (leaf < num_leaves)
+    nd = jnp.where(live, leaf_node_ref[jnp.where(live, leaf, 0)], 0)
+    ii = jnp.where(live, i, 0)
+    x = cent_ref[nd, 0] - pos_ref[ii, 0]
+    y = cent_ref[nd, 1] - pos_ref[ii, 1]
+    z = cent_ref[nd, 2] - pos_ref[ii, 2]
+    C = (int(order) + 1) ** 2
+    coeff = [coef_ref[nd, c] for c in range(C)]
+    t_coeff = None
+    if live_coef:
+        t_coeff = [[t_coef_ref[j, nd, c] for c in range(C)] for j in range(k)]
+    t_delta = None
+    if live_delta:
+        t_delta = [
+            tuple(
+                (t_cent_ref[j, nd, a] - t_pos_ref[j, ii, a]).astype(x.dtype)
+                for a in range(3)
+            )
+            for j in range(k)
+        ]
+    tangents = _l2p_lane_tangents(coeff, x, y, z, t_coeff, t_delta, order=order)
+    dest = jnp.where(live, i, rows + lane)
+    for j, g in enumerate(tangents):
+        for a in range(3):
+            plgpu.store(out_ref.at[j, dest, a], g[a].astype(out_ref.dtype), mask=live)
+
+
+def _l2p_tangent_impl(
+    coefficients: Array,
+    centers: Array,
+    positions_sorted: Array,
+    leaf_nodes: Array,
+    leaf_start: Array,
+    leaf_count: Array,
+    t_coefficients: Array,
+    t_centers: Array,
+    t_positions: Array,
+    *,
+    order: int,
+    block: int,
+    interpret: bool,
+    backend: str,
+    num_warps: int,
+    live: tuple[bool, ...],
+) -> list[Array]:
+    """The ``K``-tangent L2P launch (``K`` from the buckets; see the op).
+
+    Parameters
+    ----------
+    coefficients : Array
+        ``[nodes, (p+1)^2]`` real local coefficients.
+    centers : Array
+        ``[nodes, 3]`` expansion centres.
+    positions_sorted : Array
+        ``[N, 3]`` positions in tree order.
+    leaf_nodes : Array
+        ``[L]`` node id of each leaf, in particle order.
+    leaf_start : Array
+        ``[L]`` first particle of each leaf.
+    leaf_count : Array
+        ``[L]`` particles of each leaf.
+    t_coefficients : Array
+        ``[K, nodes, (p+1)^2]`` coefficient tangents.
+    t_centers : Array
+        ``[K, nodes, 3]`` centre tangents.
+    t_positions : Array
+        ``[K, N, 3]`` position tangents.
+    order : int
+        Expansion order. Static.
+    block : int
+        Particles per program (the forward's). Static.
+    interpret : bool
+        Pallas interpret mode.
+    backend : str
+        Pallas GPU lowering.
+    num_warps : int
+        Warps per program.
+    live : tuple[bool, ...]
+        Which of the three tangents can be nonzero.
+
+    Returns
+    -------
+    list[Array]
+        ``[K, N, 3]`` tangent of the gradient, in the positions' dtype.
+
+    Raises
+    ------
+    RuntimeError
+        If Pallas is not available.
+    """
+    if pl is None:
+        raise RuntimeError("jax.experimental.pallas is not available")
+    n = int(positions_sorted.shape[0])
+    L = int(leaf_nodes.shape[0])
+    k = int(t_positions.shape[0])
+    pos = jnp.asarray(positions_sorted)
+    coef = jnp.asarray(coefficients)
+    cent = jnp.asarray(centers, coef.dtype)
+    out0 = jnp.zeros((k, n, 3), pos.dtype)
+    live_coef = bool(live[0])
+    live_delta = bool(live[1]) or bool(live[2])
+    if n == 0 or L == 0 or not (live_coef or live_delta):
+        return [out0]
+    P = max(32, _next_pow2(block))
+    blocks = -(-n // P)
+    idx = jnp.asarray(leaf_nodes).dtype
+    count = jnp.asarray(leaf_count, idx)
+    end = jnp.asarray(leaf_start, idx) + count
+    first = jnp.searchsorted(
+        end, jnp.arange(blocks, dtype=idx) * P, side="right", method="scan_unrolled"
+    ).astype(idx)
+    n_live = jnp.reshape(jnp.sum(count).astype(idx), (1,))
+    t_coef = jnp.asarray(t_coefficients, coef.dtype)
+    t_cent = jnp.asarray(t_centers, coef.dtype)
+    t_pos = jnp.asarray(t_positions, pos.dtype)
+    backend_kwargs = pallas_backend_kwargs(backend, interpret)
+    if "compiler_params" in backend_kwargs:
+        backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
+            num_warps=int(num_warps)
+        )
+
+    def _full(arr: Array) -> Any:
+        assert pl is not None
+        shp = tuple(arr.shape)
+        return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
+
+    leaf_nodes = jnp.asarray(leaf_nodes, idx)
+    operands = [pos, cent, coef, leaf_nodes, end, first, n_live, t_coef, t_cent, t_pos]
+    out = pl.pallas_call(
+        functools.partial(
+            _l2p_particle_tangent_kernel,
+            order=int(order),
+            block=P,
+            rows=n,
+            num_leaves=L,
+            k=k,
+            live_coef=live_coef,
+            live_delta=live_delta,
+        ),
+        grid=(blocks,),
+        in_specs=[_full(o) for o in operands + [out0]],
+        out_specs=_full(out0),
+        out_shape=jax.ShapeDtypeStruct(out0.shape, out0.dtype),
+        input_output_aliases={len(operands): 0},
+        interpret=bool(interpret),
+        name=f"l2p_tan_real_particle_p{int(order)}_b{P}_k{k}",
+        **backend_kwargs,
+    )(*operands, out0)
+    return [out]
+
+
+def _l2p_tangent_shapes(*specs: Any, **params: Any) -> list[jax.ShapeDtypeStruct]:
+    """Closed-form output shape of the L2P tangent op.
+
+    Parameters
+    ----------
+    *specs : Any
+        The operands' shape/dtype structs (the op's operand order).
+    **params : Any
+        The op's static parameters (unused).
+
+    Returns
+    -------
+    list[jax.ShapeDtypeStruct]
+        ``[K, N, 3]`` in the positions' dtype.
+    """
+    del params
+    pos, t_pos = specs[2], specs[8]
+    return [jax.ShapeDtypeStruct((t_pos.shape[0], pos.shape[0], 3), pos.dtype)]
+
+
+def _make_l2p_tangent_op() -> Any:
+    from jaccpot.pallas._tangent import make_tangent_op
+
+    return make_tangent_op(
+        "l2p_real_particles",
+        _l2p_tangent_impl,
+        num_primals=6,
+        abstract_eval=_l2p_tangent_shapes,
+    )
+
+
+#: Forward-mode tangent op of :func:`l2p_real_particles_pallas_cvjp` (the seam
+#: table in :mod:`jaccpot.pallas._tangent`'s users): operands ``(coefficients,
+#: centers, positions_sorted, leaf_nodes, leaf_start, leaf_count, t_coefficients,
+#: t_centers, t_positions)``, the tangents ``K``-stacked; params ``order, block,
+#: interpret, backend, num_warps, live``; returns ``([K, N, 3],)``.
+l2p_real_particles_pallas_tangent = _make_l2p_tangent_op()
+
+
+def l2p_real_particles_jnp(
+    coefficients: Array,
+    centers: Array,
+    positions_sorted: Array,
+    leaf_nodes: Array,
+    leaf_start: Array,
+    leaf_count: Array,
+    *,
+    order: int,
+) -> Array:
+    """Pure-``jnp`` twin of :func:`l2p_real_particles_pallas` (the same values).
+
+    Each row's leaf is found as the kernel finds it (the first leaf ending past
+    the row), its leaf's expansion evaluated by the same Cartesian recurrence; rows
+    past the leaves' particles are zero.
+
+    Parameters
+    ----------
+    coefficients : Array
+        ``[nodes, (p+1)^2]`` real local coefficients.
+    centers : Array
+        ``[nodes, 3]`` expansion centres.
+    positions_sorted : Array
+        ``[N, 3]`` positions in tree order.
+    leaf_nodes : Array
+        ``[L]`` node id of each leaf, in particle order.
+    leaf_start : Array
+        ``[L]`` first particle of each leaf.
+    leaf_count : Array
+        ``[L]`` particles of each leaf.
+    order : int
+        Expansion order. Static.
+
+    Returns
+    -------
+    Array
+        ``[N, 3]`` gradient with respect to ``delta``, in the positions' dtype.
+    """
+    pos = jnp.asarray(positions_sorted)
+    n = int(pos.shape[0])
+    L = int(leaf_nodes.shape[0])
+    if n == 0 or L == 0:
+        return jnp.zeros((n, 3), pos.dtype)
+    coef = jnp.asarray(coefficients)
+    cent = jnp.asarray(centers, coef.dtype)
+    idx = jnp.asarray(leaf_nodes).dtype
+    count = jnp.asarray(leaf_count, idx)
+    end = jnp.asarray(leaf_start, idx) + count
+    rows = jnp.arange(n, dtype=idx)
+    leaf = jnp.searchsorted(end, rows, side="right").astype(idx)
+    live = (rows < jnp.sum(count)) & (leaf < L)
+    node = jnp.where(live, jnp.asarray(leaf_nodes, idx)[jnp.where(live, leaf, 0)], 0)
+    delta = cent[node] - pos
+    coeff = [coef[node, c] for c in range((int(order) + 1) ** 2)]
+    g = l2p_real_grad_cartesian(
+        coeff, delta[:, 0], delta[:, 1], delta[:, 2], order=order
+    )
+    return jnp.where(live[:, None], jnp.stack(g, axis=1), 0).astype(pos.dtype)
+
+
+def l2p_real_particles_pallas_tangent_jnp(
+    coefficients: Array,
+    centers: Array,
+    positions_sorted: Array,
+    leaf_nodes: Array,
+    leaf_start: Array,
+    leaf_count: Array,
+    t_coefficients: Array,
+    t_centers: Array,
+    t_positions: Array,
+    *,
+    order: int,
+    block: int = 128,
+    interpret: bool = False,
+    backend: str = "triton",
+    num_warps: int = 4,
+    live: tuple[bool, ...] = (True, True, True),
+) -> tuple[Array]:
+    """Reference of :data:`l2p_real_particles_pallas_tangent`: ``jax.jvp`` of the twin.
+
+    The same operands and parameters as the op (the kernel parameters are
+    ignored), ``vmap``-ped over ``K``.
+
+    Parameters
+    ----------
+    coefficients : Array
+        ``[nodes, (p+1)^2]`` real local coefficients.
+    centers : Array
+        ``[nodes, 3]`` expansion centres.
+    positions_sorted : Array
+        ``[N, 3]`` positions in tree order.
+    leaf_nodes : Array
+        ``[L]`` node id of each leaf, in particle order.
+    leaf_start : Array
+        ``[L]`` first particle of each leaf.
+    leaf_count : Array
+        ``[L]`` particles of each leaf.
+    t_coefficients : Array
+        ``[K, nodes, (p+1)^2]`` coefficient tangents.
+    t_centers : Array
+        ``[K, nodes, 3]`` centre tangents.
+    t_positions : Array
+        ``[K, N, 3]`` position tangents.
+    order : int
+        Expansion order. Static.
+    block : int
+        Ignored (the kernel's).
+    interpret : bool
+        Ignored.
+    backend : str
+        Ignored.
+    num_warps : int
+        Ignored.
+    live : tuple[bool, ...]
+        Ignored (a dead tangent is zero anyway).
+
+    Returns
+    -------
+    tuple[Array]
+        ``([K, N, 3],)``.
+    """
+    del block, interpret, backend, num_warps, live
+
+    def f(c: Array, x: Array, q: Array) -> Array:
+        return l2p_real_particles_jnp(
+            c, x, q, leaf_nodes, leaf_start, leaf_count, order=order
+        )
+
+    def one(tc: Array, tx: Array, tq: Array) -> Array:
+        return jax.jvp(f, (coefficients, centers, positions_sorted), (tc, tx, tq))[1]
+
+    return (jax.vmap(one)(t_coefficients, t_centers, t_positions),)
+
+
 __all__ = [
     "l2p_real_grad_cartesian",
     "l2p_real_grad_cartesian_transpose",
     "l2p_real_particles_pallas",
+    "l2p_real_particles_jnp",
     "l2p_real_particles_pallas_cvjp",
+    "l2p_real_particles_pallas_tangent",
+    "l2p_real_particles_pallas_tangent_jnp",
     "l2p_real_particles_reverse_pallas",
 ]
