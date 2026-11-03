@@ -179,3 +179,8 @@ tests/unit/runtime/test_large_n_grad_reverse_path.py::TestSofteningKernelsOnTheC
 tests/unit/runtime/test_large_n_grad_reverse_path.py::TestSofteningKernelsOnTheCsrLane::test_the_reverse_runs_the_solvers_kernel
 tests/unit/test_gradient_correctness.py::test_fd_vs_ad_along_a_transverse_direction_at_rho_zero[real]
 tests/unit/test_large_n_config_thresholds.py::test_fp32_farfield_gradient_is_finite
+tests/unit/operators/test_cascade_real_level_jvp.py::test_tangent_op_equals_the_jvp_of_the_level_loop[m2m-4-8-float32]
+tests/unit/operators/test_cascade_real_level_jvp.py::test_tangent_op_equals_the_jvp_of_the_level_loop[m2m-4-8-float64]
+tests/unit/operators/test_cascade_real_level_jvp.py::test_tangent_op_equals_the_jvp_of_the_level_loop[l2l-4-8-float64]
+tests/unit/operators/test_cascade_real_level_jvp.py::test_tangent_op_equals_the_jvp_of_the_level_loop[l2l-4-8-float32]
+tests/unit/operators/test_cascade_real_level_jvp.py::test_jacfwd_through_a_forward_seam[m2m-11]
