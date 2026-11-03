@@ -227,6 +227,13 @@ def _args() -> argparse.Namespace:
         help="eq (16)'s relative force-accuracy target (mandatory with dehnen_error)",
     )
     ap.add_argument(
+        "--mac-force-scale-floor",
+        type=float,
+        default=None,
+        help="with dehnen_error: floor eq (16a)'s min_b f_b at this fraction of the "
+        "certified bound (mac_force_scale_floor, #487); default off",
+    )
+    ap.add_argument(
         "--mac-force-scale-mode",
         default="paper_fb",
         help="per-node force scale of eq (16): paper_fb = eq (16b)'s f_b prepass "
@@ -784,6 +791,11 @@ def _solver(leaf_cap: int, soft: float) -> FastMultipoleMethod:
                 adaptive_eps=float(ARGS.adaptive_eps),
                 adaptive_error_model="dehnen_paper",
                 mac_force_scale_mode=str(ARGS.mac_force_scale_mode),
+                **(
+                    {}
+                    if ARGS.mac_force_scale_floor is None
+                    else {"mac_force_scale_floor": float(ARGS.mac_force_scale_floor)}
+                ),
             )
             if ARGS.mac_type == "dehnen_error"
             else {}
