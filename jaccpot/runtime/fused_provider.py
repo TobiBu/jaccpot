@@ -1539,6 +1539,8 @@ class FusedForceProvider:
         tuple[Any, tuple]
             ``(acc, (f_b, bits, needs))`` as :meth:`step` returns them.
         """
+        from .grad_options import forward_mode_enabled
+
         self._grad_statics_or_raise()  # before the rebuild's trace, not after
         f_b_in, bits_in, needs_in = (None, None, None) if aux is None else aux
         stop = jax.lax.stop_gradient
@@ -1559,6 +1561,8 @@ class FusedForceProvider:
                 topology, positions, masses, params, plan=plan
             )
             f_b = None
+        if forward_mode_enabled():
+            return self._forward_gated(acc, f_b, topology, params, bits_in, needs_in)
         acc = _gradient_gate(acc, symmetric)
         # the verdict as `step` computes it: on the template's placeholder far list
         # (the kept one would add checks of its own to `overflow_bits`)
@@ -1568,6 +1572,53 @@ class FusedForceProvider:
         bits = bits | jnp.where(
             symmetric, jnp.uint32(0), jnp.uint32(OVERFLOW_GRAD_LISTS)
         )
+        bits, needs = _fold_verdict(bits, topology.needs(), bits_in, needs_in)
+        return acc, (f_b, bits, needs)
+
+    def _forward_gated(
+        self,
+        acc: Array,
+        f_b: Any,
+        topology: FusedTopology,
+        params: Optional[Union[ForceParams, StepParams]],
+        bits_in: Any,
+        needs_in: Any,
+    ) -> tuple[Any, tuple]:
+        """:meth:`differentiable_step`'s verdict and gate in forward mode.
+
+        ``ad_mode="forward"``: the tangent kernels are target-driven and read no
+        list from both ends, so the symmetry verdict (``OVERFLOW_GRAD_LISTS``) is
+        neither needed nor set -- the bits are :meth:`step`'s. The tangent is made
+        NaN when THIS step's capacity verdict fails
+        (:func:`~jaccpot.runtime._forward_seams.tangent_gate`): a truncated list's
+        derivative is never a plausible wrong number.
+
+        Parameters
+        ----------
+        acc : Array
+            The step's accelerations.
+        f_b : Any
+            Its f_b (gradient stopped), or ``None``.
+        topology : FusedTopology
+            The step's rebuilt topology.
+        params : Optional[Union[ForceParams, StepParams]]
+            As in :meth:`step`.
+        bits_in : Any
+            The bits ``aux`` carried, or ``None``.
+        needs_in : Any
+            The needs ``aux`` carried, or ``None``.
+
+        Returns
+        -------
+        tuple[Any, tuple]
+            ``(acc, (f_b, bits, needs))``.
+        """
+        from ._forward_seams import tangent_gate
+
+        bits = replace(
+            topology, prepared=replace(topology.prepared, compact_far_pairs=None)
+        ).overflow_bits(extra=0 if params is None else self.params_overflow(params))
+        acc = tangent_gate(acc, overflow_ok(bits))
         bits, needs = _fold_verdict(bits, topology.needs(), bits_in, needs_in)
         return acc, (f_b, bits, needs)
 
