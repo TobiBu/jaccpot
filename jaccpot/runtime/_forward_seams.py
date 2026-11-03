@@ -36,7 +36,10 @@ known zeros. :func:`resolve_tangent` picks the op by name, per
 1. ``"auto"``: the Pallas op ``<name>`` in the kernel module if it exists, else
    ``<name>_jnp`` there, else this module's reference;
 2. ``"pallas"``: the Pallas op, or an error at trace time;
-3. ``"jnp"``: ``<name>_jnp`` if it exists, else this module's reference.
+3. ``"jnp"``: this module's reference. (Not the kernel track's ``<name>_jnp``: the
+   cascades' ``_jnp`` differentiate the J1 rotations, whose edge derivative is zero
+   at a zero-length edge where the true one -- the Pallas kernels', the reference's
+   ladder -- is not; the kernel tracks' ``_jnp`` are their parity references.)
 
 THE REFERENCES (``_reference_*``) are ``jax.vmap`` over ``K`` of ``jax.jvp`` of a
 pure-``jnp`` twin of the seam's primal, at test scale: the jnp lane's own level
@@ -122,8 +125,8 @@ def resolve_tangent(seam: str, choice: Optional[str] = None) -> tuple[Callable, 
     -------
     tuple[Callable, str]
         ``(op, source)``, ``source`` one of ``"pallas"`` (the kernel module's
-        tangent op), ``"jnp"`` (its ``<name>_jnp``) or ``"reference"`` (this
-        module's).
+        tangent op), ``"jnp"`` (its ``<name>_jnp``, an ``"auto"`` fallback only)
+        or ``"reference"`` (this module's; always for ``"jnp"``).
 
     Raises
     ------
@@ -144,9 +147,10 @@ def resolve_tangent(seam: str, choice: Optional[str] = None) -> tuple[Callable, 
                 f"forward_tangent_kernels='pallas': {module_name} has no "
                 f"{op_name} yet; use 'auto' or 'jnp' (the jnp reference)"
             )
-    jnp_op = getattr(module, op_name + "_jnp", None)
-    if jnp_op is not None:
-        return jnp_op, "jnp"
+    if kind == "auto":
+        jnp_op = getattr(module, op_name + "_jnp", None)
+        if jnp_op is not None:
+            return jnp_op, "jnp"
     return _REFERENCES[seam], "reference"
 
 

@@ -580,7 +580,8 @@ class GradConfig:
         Which tangent kernels forward mode runs. ``"auto"`` (the default): a
         seam's Pallas tangent kernel where one exists (it lowers wherever the
         seam's primal Pallas kernel does), else its pure-``jnp`` reference.
-        ``"jnp"``: the references everywhere (slow; the parity oracle).
+        ``"jnp"``: the jnp references everywhere (slow, test scale; the parity
+        oracle).
         ``"pallas"``: the Pallas tangent kernels, raising at trace time where a
         seam has none. ``None`` defers as ``ad_mode`` does, to
         ``JACCPOT_GRAD_FORWARD_TANGENT_KERNELS``, then to ``"auto"``. Ignored in

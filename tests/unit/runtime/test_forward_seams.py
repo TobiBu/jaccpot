@@ -379,19 +379,16 @@ def test_the_seam_tangent_is_the_reverse_kernels_transpose(seam):
 
 
 def test_the_tangent_resolution_order(monkeypatch):
-    """``"jnp"`` takes the kernel track's ``<op>_jnp`` if it exists, else the
-    reference here; ``"pallas"`` refuses a seam without a Pallas op."""
+    """``"jnp"`` takes the reference here; ``"auto"`` the Pallas op, else the
+    kernel track's ``<op>_jnp``, else the reference; ``"pallas"`` refuses a seam
+    without a Pallas op."""
     import importlib
 
     from jaccpot.runtime import _forward_seams as fs
 
     for seam, (module_name, op_name) in fs.SEAM_TANGENT_OPS.items():
         module = importlib.import_module(module_name)
-        op, source = fs.resolve_tangent(seam, "jnp")
-        if hasattr(module, op_name + "_jnp"):
-            assert source == "jnp" and op is getattr(module, op_name + "_jnp")
-        else:
-            assert source == "reference"
+        assert fs.resolve_tangent(seam, "jnp")[1] == "reference"
         if hasattr(module, op_name):
             assert fs.resolve_tangent(seam, "pallas") == (
                 getattr(module, op_name),
@@ -401,7 +398,8 @@ def test_the_tangent_resolution_order(monkeypatch):
         else:
             with pytest.raises(NotImplementedError, match=op_name):
                 fs.resolve_tangent(seam, "pallas")
-            assert fs.resolve_tangent(seam, "auto")[1] == source
+            want = "jnp" if hasattr(module, op_name + "_jnp") else "reference"
+            assert fs.resolve_tangent(seam, "auto")[1] == want
 
 
 def test_the_solvers_step_fn_honours_grad_config_ad_mode():
