@@ -125,6 +125,7 @@ __all__ = [
     "GRADIENT_INPUTS",
     "START_FORCE_MODES",
     "START_KINDS",
+    "ForwardResult",
     "GradSegment",
     "GradientPlan",
     "GradientResult",
@@ -424,6 +425,22 @@ def _seed_for_first_step(aux_in: Any, aux_out: Any, *, wrapped: bool) -> Any:
     return (aux_in[0], *aux_out[1:])
 
 
+def _start_aux_kw(start_aux: Optional[Callable[[Any, Any], Any]]) -> dict[str, Any]:
+    """``differentiable_rollout``'s ``start_aux`` keyword, only when it is given.
+
+    Parameters
+    ----------
+    start_aux : Optional[Callable[[Any, Any], Any]]
+        The first step's aux map, or ``None`` (the program without the argument).
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{}`` or ``{"start_aux": start_aux}``.
+    """
+    return {} if start_aux is None else {"start_aux": start_aux}
+
+
 def _under_plan(
     engine: Any, plan: dict, step_fn: Callable[..., tuple], in_chain: list
 ) -> Callable[..., tuple]:
@@ -698,6 +715,7 @@ class GradientPlan:
             ``arrays`` come from another plan.
         """
         from jaccpot.production import _trace_state_kept
+        from jaccpot.runtime.grad_options import forward_mode_enabled
 
         if start_force not in START_FORCE_MODES:
             raise ValueError(
@@ -748,6 +766,13 @@ class GradientPlan:
             extra = _field_at(field, args, x_in, v_in)
             return acc if extra is None else acc + jax.lax.optimization_barrier(extra)
 
+        # a restart's start values: the file's value, the recomputed force's
+        # derivative (its custom_jvp sibling in forward mode)
+        keep_value = _keep_value
+        if forward_mode_enabled():
+            from jaccpot.runtime._forward_seams import keep_value_forward
+
+            keep_value = keep_value_forward
         prev: Optional[RolloutResult] = None
         prev_self: Any = None
         bits: Any = None
@@ -819,7 +844,7 @@ class GradientPlan:
                     if prev is not None:
                         acc0, aux0 = prev.acceleration, (f_b, bits, needs)
                     else:
-                        acc0 = _keep_value(
+                        acc0 = keep_value(
                             jnp.asarray(restart["acceleration"], dtype),
                             plus_field(acc_r, x, v),
                         )
@@ -838,7 +863,7 @@ class GradientPlan:
                     acc_self = (
                         prev_self
                         if prev is not None
-                        else _keep_value(
+                        else keep_value(
                             jnp.asarray(restart["self_acceleration"], dtype), acc_r
                         )
                     )
@@ -858,7 +883,7 @@ class GradientPlan:
                     aux=aux0,
                     acceleration=acc0,
                     **rollout_kw,
-                    **({} if start_aux is None else {"start_aux": start_aux}),
+                    **_start_aux_kw(start_aux),
                 )
                 inner = out.aux
                 if carry_self:
@@ -873,7 +898,7 @@ class GradientPlan:
                     prev_self = (
                         last_self
                         if checkpoint is None
-                        else _keep_value(
+                        else keep_value(
                             jnp.asarray(last_self, dtype),
                             self_force(out.positions, m, last_in)[0],
                         )
@@ -978,6 +1003,341 @@ class GradientPlan:
             (value, result), grads = program(diff, dynamic)
         check_rollout(result, gradient=True)
         return GradientResult(value, grads, result, self)
+
+    # ------------------------------------------------------------------
+    # Forward mode (ad_mode="forward"): jvp, linearize, jacfwd.
+    # ------------------------------------------------------------------
+
+    def _forward_split(self, inputs: Optional[dict], wrt: Sequence[str]) -> tuple:
+        """``(diff, static, dynamic)``: the inputs as :meth:`value_and_grad` splits them.
+
+        Parameters
+        ----------
+        inputs : Optional[dict]
+            Inputs replacing the pre-pass's, or ``None``.
+        wrt : Sequence[str]
+            The inputs to differentiate.
+
+        Returns
+        -------
+        tuple
+            ``(diff, static, dynamic)`` dicts: the differentiated inputs, the
+            Python-number ones (literals of the program) and the array ones.
+
+        Raises
+        ------
+        ValueError
+            For an unknown input name.
+        """
+        given = {} if inputs is None else dict(inputs)
+        unknown = sorted((set(wrt) | set(given)) - set(GRADIENT_INPUTS))
+        if unknown:
+            raise ValueError(
+                f"unknown gradient inputs {unknown}; known: {list(GRADIENT_INPUTS)}"
+            )
+        merged = {**self.inputs(), **given}
+        diff = {name: merged[name] for name in wrt}
+
+        def is_static(value: Any) -> bool:
+            leaves = jax.tree_util.tree_leaves(value)
+            return all(isinstance(leaf, (bool, int, float)) for leaf in leaves)
+
+        rest = {k: val for k, val in merged.items() if k not in diff}
+        static = {k: val for k, val in rest.items() if is_static(val)}
+        dynamic = {k: val for k, val in rest.items() if k not in static}
+        return diff, static, dynamic
+
+    def _forward_objective(
+        self,
+        fn: Optional[Callable[[RolloutResult, dict], Any]],
+        static: dict,
+        start_force: str,
+    ) -> Callable[[dict, dict], tuple]:
+        """``objective(diff, dynamic) -> (output, result)`` in forward mode.
+
+        The gradient run on the ``checkpoint=None`` branches (a plain scan per
+        segment, the start forces beside it), traced with the forward-mode seams
+        installed.
+
+        Parameters
+        ----------
+        fn : Optional[Callable[[RolloutResult, dict], Any]]
+            ``fn(result, inputs)``: the output; ``None``, the final state
+            ``(positions, velocities, acceleration)``.
+        static : dict
+            The static inputs.
+        start_force : str
+            As :meth:`rollout`.
+
+        Returns
+        -------
+        Callable[[dict, dict], tuple]
+            The objective.
+        """
+        from jaccpot.runtime.grad_options import ad_mode_override
+
+        def objective(diff_in: dict, dynamic_in: dict) -> tuple:
+            every = {**static, **dynamic_in, **diff_in}
+            with ad_mode_override("forward"):
+                result = self.rollout(every, checkpoint=None, start_force=start_force)
+            if fn is None:
+                out = (result.positions, result.velocities, result.acceleration)
+            else:
+                out = fn(result, every)
+            return out, result
+
+        return objective
+
+    def _forward_program(
+        self,
+        kind: str,
+        fn: Optional[Callable[[RolloutResult, dict], Any]],
+        wrt: tuple,
+        static: dict,
+        start_force: str,
+    ) -> Callable[..., Any]:
+        """The jitted forward-mode program of ``kind``, compiled once per key.
+
+        Parameters
+        ----------
+        kind : str
+            ``"jvp"`` or ``"jacfwd"``.
+        fn : Optional[Callable[[RolloutResult, dict], Any]]
+            As :meth:`_forward_objective`.
+        wrt : tuple
+            The differentiated inputs.
+        static : dict
+            The static inputs.
+        start_force : str
+            As :meth:`rollout`.
+
+        Returns
+        -------
+        Callable[..., Any]
+            ``jvp``: ``program(diff, dynamic, tangents) -> (out, t_out,
+            result)``; ``jacfwd``: ``program(diff, dynamic) -> (jacobian,
+            (out, result))``.
+        """
+        key = (kind, fn, wrt, repr(sorted(static.items())), start_force)
+        program = self._programs.get(key)
+        if program is None:
+            objective = self._forward_objective(fn, static, start_force)
+            if kind == "jvp":
+
+                def run(diff: dict, dynamic: dict, tangents: dict) -> tuple:
+                    out, t_out, result = jax.jvp(
+                        lambda d: objective(d, dynamic),
+                        (diff,),
+                        (tangents,),
+                        has_aux=True,
+                    )
+                    return out, t_out, result
+
+                program = jax.jit(run)
+            else:
+
+                def jac(diff: dict, dynamic: dict) -> tuple:
+                    def with_value(d: dict) -> tuple:
+                        out, result = objective(d, dynamic)
+                        return out, (out, result)
+
+                    return jax.jacfwd(with_value, has_aux=True)(diff)
+
+                program = jax.jit(jac)
+            self._programs[key] = program
+        return program
+
+    def jvp(
+        self,
+        inputs: Optional[dict],
+        tangents: dict,
+        *,
+        wrt: Optional[Sequence[str]] = None,
+        fn: Optional[Callable[[RolloutResult, dict], Any]] = None,
+        start_force: str = "outside",
+    ) -> "ForwardResult":
+        """The gradient run's output and its directional derivative (forward mode).
+
+        The forward twin of :meth:`value_and_grad`: ONE jitted ``jax.jvp`` of
+        ``fn(rollout(inputs), inputs)`` under ``ad_mode="forward"`` -- every
+        segment a plain scan (``checkpoint=None``) whose forces run the
+        production kernels' ``custom_jvp`` siblings, so the output is the
+        pre-pass's trajectory bitwise and the device memory is flat in the
+        number of steps (nothing is stored for a reverse pass). First order
+        only. Compiled once per ``(fn, wrt, start_force)`` and the static
+        inputs.
+
+        Parameters
+        ----------
+        inputs : Optional[dict]
+            Inputs replacing the pre-pass's (:meth:`inputs`), or ``None``.
+        tangents : dict
+            One tangent per differentiated input, by name, each the input's
+            structure (a ``force_params`` / ``external_params`` pytree gets a
+            pytree tangent).
+        wrt : Optional[Sequence[str]]
+            The differentiated inputs (:data:`GRADIENT_INPUTS`); ``None``: the
+            keys of ``tangents``. A differentiated ``dt`` must be an array.
+        fn : Optional[Callable[[RolloutResult, dict], Any]]
+            ``fn(result, inputs)``, the output whose tangent is returned;
+            ``None``: the final ``(positions, velocities, acceleration)``.
+        start_force : str
+            As :meth:`rollout`.
+
+        Returns
+        -------
+        ForwardResult
+            ``(value, tangent, result, plan)``. A run whose verdict failed is
+            REFUSED (``check_rollout(result, gradient=True)`` raises
+            :class:`~jaccpot.runtime.grad_rollout.RolloutVerdictError`); its
+            tangent would be NaN anyway.
+
+        Raises
+        ------
+        ValueError
+            For unknown input names, or tangents that do not match ``wrt``.
+        """
+        from jaccpot.production import _trace_state_kept
+
+        wrt = tuple(tangents) if wrt is None else tuple(wrt)
+        if set(wrt) != set(tangents):
+            raise ValueError(
+                f"tangents {sorted(tangents)} do not match wrt {sorted(wrt)}"
+            )
+        diff, static, dynamic = self._forward_split(inputs, wrt)
+        program = self._forward_program("jvp", fn, wrt, static, start_force)
+        tangent_in = {name: tangents[name] for name in wrt}
+        with _trace_state_kept(self.engine):
+            _install_plan(self.engine, self.segments[-1].plan)
+            value, tangent, result = program(diff, dynamic, tangent_in)
+        check_rollout(result, gradient=True)
+        return ForwardResult(value, tangent, result, self)
+
+    def jacfwd(
+        self,
+        fn: Optional[Callable[[RolloutResult, dict], Any]] = None,
+        *,
+        wrt: Sequence[str] = ("dt", "force_params", "external_params"),
+        inputs: Optional[dict] = None,
+        start_force: str = "outside",
+    ) -> "ForwardResult":
+        """The Jacobian of ``fn(rollout(inputs), inputs)`` by forward mode.
+
+        ``jax.jacfwd`` of :meth:`jvp`'s function: one tangent per element of the
+        differentiated inputs, batched (the tangent kernels carry them on a
+        tangent axis, up to 8 per launch), in ONE jitted program. For a few
+        parameters (an orbit, a halo, a mass scale) through a long rollout:
+        the memory is :meth:`jvp`'s times the tangent count, flat in the steps.
+
+        Parameters
+        ----------
+        fn : Optional[Callable[[RolloutResult, dict], Any]]
+            As :meth:`jvp`.
+        wrt : Sequence[str]
+            The differentiated inputs; default the parameters (``dt`` must then be
+            an array, the parameters array leaves).
+        inputs : Optional[dict]
+            As :meth:`jvp`.
+        start_force : str
+            As :meth:`rollout`.
+
+        Returns
+        -------
+        ForwardResult
+            ``(value, jacobian, result, plan)``: the jacobian is
+            ``jax.jacfwd``'s, the output's structure over each input's (a dict by
+            name). Refused on a failed verdict, as :meth:`jvp`.
+        """
+        from jaccpot.production import _trace_state_kept
+
+        wrt = tuple(wrt)
+        diff, static, dynamic = self._forward_split(inputs, wrt)
+        program = self._forward_program("jacfwd", fn, wrt, static, start_force)
+        with _trace_state_kept(self.engine):
+            _install_plan(self.engine, self.segments[-1].plan)
+            jacobian, (value, result) = program(diff, dynamic)
+        check_rollout(result, gradient=True)
+        return ForwardResult(value, jacobian, result, self)
+
+    def linearize(
+        self,
+        inputs: Optional[dict] = None,
+        *,
+        wrt: Sequence[str] = ("positions", "velocities", "masses"),
+        fn: Optional[Callable[[RolloutResult, dict], Any]] = None,
+        start_force: str = "outside",
+    ) -> "ForwardResult":
+        """The gradient run's output and its linear map (``jax.linearize``).
+
+        The primal runs once (jitted) and the returned map applies only the
+        tangent part to each direction -- for a Gauss-Newton solver or several
+        directions at one point. Unlike :meth:`jvp` it KEEPS the linearization
+        point's intermediates (every step's), so its memory grows with the
+        number of steps like a reverse pass's without checkpoints.
+
+        Parameters
+        ----------
+        inputs : Optional[dict]
+            As :meth:`jvp`.
+        wrt : Sequence[str]
+            The differentiated inputs.
+        fn : Optional[Callable[[RolloutResult, dict], Any]]
+            As :meth:`jvp`.
+        start_force : str
+            As :meth:`rollout`.
+
+        Returns
+        -------
+        ForwardResult
+            ``(value, linear, result, plan)``: ``linear(tangents: dict) ->
+            output tangent``, the tangents by name over ``wrt``. Refused on a
+            failed verdict, as :meth:`jvp`.
+        """
+        from jaccpot.production import _trace_state_kept
+
+        wrt = tuple(wrt)
+        diff, static, dynamic = self._forward_split(inputs, wrt)
+        objective = jax.jit(self._forward_objective(fn, static, start_force))
+        with _trace_state_kept(self.engine):
+            _install_plan(self.engine, self.segments[-1].plan)
+            (value, result), f_lin = jax.linearize(
+                lambda d: objective(d, dynamic), diff
+            )
+        check_rollout(result, gradient=True)
+
+        def linear(tangents: dict) -> Any:
+            if set(tangents) != set(wrt):
+                raise ValueError(
+                    f"tangents {sorted(tangents)} do not match wrt {sorted(wrt)}"
+                )
+            return f_lin({name: tangents[name] for name in wrt})[0]
+
+        return ForwardResult(value, linear, result, self)
+
+
+class ForwardResult(NamedTuple):
+    """What :meth:`GradientPlan.jvp`, ``jacfwd`` and ``linearize`` return.
+
+    Attributes
+    ----------
+    value : Any
+        The output (``fn``'s, or the final ``(positions, velocities,
+        acceleration)``), the pre-pass's bitwise at its inputs.
+    tangent : Any
+        :meth:`~GradientPlan.jvp`: the output's tangent;
+        :meth:`~GradientPlan.jacfwd`: the Jacobian, a dict by input name;
+        :meth:`~GradientPlan.linearize`: the linear map ``tangents -> output
+        tangent``.
+    result : RolloutResult
+        The gradient run's final state; ``aux`` is ``(f_b, bits, needs)``.
+    plan : Any
+        The :class:`GradientPlan` (reuse it: its programs are compiled).
+    """
+
+    value: Any
+    tangent: Any
+    result: RolloutResult
+    plan: Any
 
 
 # --------------------------------------------------------------------------
