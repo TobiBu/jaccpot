@@ -655,6 +655,12 @@ class FastMultipoleMethod:
     mac_force_scale_fb_inflation : float
         Inflates the far-field source-to-target distance so the eq (16b) scale
         stays a strict lower bound.
+    mac_force_scale_floor : Optional[float]
+        ``mac_type="dehnen_error"`` on the fused lane: floor each node's
+        ``min_b f_b`` in eq (16a)'s threshold at this fraction, in ``(0, 1]``, of a
+        certified lower bound that a correct f_b estimate always meets. It binds
+        only where the carried estimate is wrong (#487). ``None`` (default): no
+        floor.
     adaptive_error_model : Optional[str]
         Error estimator for adaptive acceptance: ``"tail_proxy"``,
         ``"dehnen_degree"``, or ``"dehnen_paper"`` -- the last being the eq (15)
@@ -747,6 +753,7 @@ class FastMultipoleMethod:
         mac_force_scale_mode: Optional[str] = None,
         mac_force_scale_prepass_theta: Optional[float] = None,
         mac_force_scale_fb_inflation: float = 1.0,
+        mac_force_scale_floor: Optional[float] = None,
         adaptive_error_model: Optional[str] = None,
         adaptive_eps: Optional[float] = None,
         dehnen_geometry_mode: str = "com",
@@ -846,6 +853,7 @@ class FastMultipoleMethod:
             mac_force_scale_mode=mac_force_scale_mode,
             mac_force_scale_prepass_theta=mac_force_scale_prepass_theta,
             mac_force_scale_fb_inflation=mac_force_scale_fb_inflation,
+            mac_force_scale_floor=mac_force_scale_floor,
             adaptive_error_model=adaptive_error_model,
             adaptive_eps=adaptive_eps,
             dehnen_geometry_mode=dehnen_geometry_mode,

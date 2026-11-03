@@ -55,6 +55,7 @@ from ._force_scale_levels import (
     cross_far_force_scale_own,
     far_force_scale_from_node_totals,
     far_force_scale_sorted,
+    force_scale_floor_nodes,
     node_force_scale_min_sorted,
 )
 from ._interaction_cache import (
@@ -3197,7 +3198,7 @@ class PrepareMixin(_EngineBase):
         walk_criterion = None
         if walk_criterion_active:
             walk_criterion = self._flat_walk_criterion(
-                tree_artifacts.upward, force_scale_nodes
+                tree_artifacts.upward, force_scale_nodes, tree_artifacts
             )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
@@ -3372,7 +3373,10 @@ class PrepareMixin(_EngineBase):
         )
 
     def _flat_walk_criterion(
-        self, upward: Any, force_scale_nodes: Optional[Array]
+        self,
+        upward: Any,
+        force_scale_nodes: Optional[Array],
+        tree_artifacts: Optional[_PrepareStateTreeUpwardArtifacts] = None,
     ) -> FlatWalkCriterion:
         """Eq (16a)'s per-node inputs for the flat walk, at this step's thresholds.
 
@@ -3389,6 +3393,10 @@ class PrepareMixin(_EngineBase):
             moments).
         force_scale_nodes : Optional[Array]
             ``[nodes]`` ``min_b f_b`` over each node's particles (eq 16b).
+        tree_artifacts : Optional[_PrepareStateTreeUpwardArtifacts]
+            The step's tree: with ``mac_force_scale_floor`` set, the floor's
+            masses, radii and level tables
+            (:meth:`_force_scale_floor_nodes`). Unused without it.
 
         Returns
         -------
@@ -3399,7 +3407,8 @@ class PrepareMixin(_EngineBase):
         ------
         RuntimeError
             If ``force_scale_nodes`` is ``None``: ``eps * 1`` is another criterion,
-            one that accepts far more pairs (the policy's trap 14).
+            one that accepts far more pairs (the policy's trap 14); or the floor
+            is on and no tree was given.
         """
         if force_scale_nodes is None:
             # eps * 1 is a different criterion that accepts far more: refuse
@@ -3409,6 +3418,16 @@ class PrepareMixin(_EngineBase):
                 "per-node force scale of eq (16a); none was resolved"
             )
         mult_dtype = jnp.asarray(upward.multipoles.packed).dtype
+        if getattr(self, "mac_force_scale_floor", None) is not None:
+            if tree_artifacts is None:
+                raise RuntimeError(
+                    "mac_force_scale_floor needs the step's tree to form eq (16a)'s "
+                    "thresholds"
+                )
+            force_scale_nodes = jnp.maximum(
+                jnp.asarray(force_scale_nodes, mult_dtype),
+                self._force_scale_floor_nodes(tree_artifacts).astype(mult_dtype),
+            )
         return FlatWalkCriterion(
             multipole_packed=upward.multipoles.packed,
             mass=upward.mass_moments.mass,
@@ -3422,6 +3441,42 @@ class PrepareMixin(_EngineBase):
             order=int(upward.multipoles.order),
             theta_max=float(self.mac_theta_max),
             gravitational_constant=float(self.G),
+        )
+
+    def _force_scale_floor_nodes(
+        self, tree_artifacts: _PrepareStateTreeUpwardArtifacts
+    ) -> Array:
+        """The floor under eq (16a)'s ``min_b f_b``: ``mac_force_scale_floor`` x a bound.
+
+        :func:`~jaccpot.runtime._force_scale_levels.force_scale_floor_nodes` on the
+        step's tree: the node masses of the upward pass, the walk geometry's radii
+        (those eq (16b)'s far half reads) and the largest particle mass.
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            The step's tree and upward pass.
+
+        Returns
+        -------
+        Array
+            ``[nodes]`` the floor.
+        """
+        tree = tree_artifacts.tree
+        walk_geometry, _ = self._walk_geometry(tree_artifacts)
+        radii = jnp.asarray(walk_geometry.radius)
+        num_levels = self._resolve_upward_num_levels(tree)
+        if num_levels is None:
+            num_levels = int(get_level_offsets(tree).shape[0] - 1)
+        return force_scale_floor_nodes(
+            tree=tree,
+            node_mass=jnp.asarray(tree_artifacts.upward.mass_moments.mass, radii.dtype),
+            node_radii=radii,
+            max_particle_mass=jnp.max(jnp.abs(tree_artifacts.masses_sorted)),
+            gravitational_constant=float(self.G),
+            softening_sq=jnp.asarray(float(self.softening) ** 2, radii.dtype),
+            factor=float(self.mac_force_scale_floor),
+            num_levels=int(num_levels),
         )
 
     def _far_force_scale_inputs(

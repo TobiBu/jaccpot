@@ -2498,6 +2498,9 @@ class ProductionRunner:
                     "theta": float(engine.theta),
                     "mac_type": str(getattr(engine, "mac_type", None)),
                     "adaptive_eps": getattr(engine, "adaptive_eps", None),
+                    "mac_force_scale_floor": getattr(
+                        engine, "mac_force_scale_floor", None
+                    ),
                     "working_dtype": jnp.dtype(engine.working_dtype).name,
                     "use_pallas": bool(getattr(engine, "use_pallas", False)),
                     "leaf_partition": str(
