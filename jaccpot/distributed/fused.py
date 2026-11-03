@@ -294,13 +294,55 @@ def host_mesh_bounds(
     tuple[Array, Array]
         ``(min_corner, max_corner)``, the same box the mesh reduction gives.
     """
-    los, his = [], []
-    for pos, n in zip(positions, num_valid):
-        live = jnp.asarray(pos)[: int(n)]
-        if int(live.shape[0]) == 0:
-            continue
-        los.append(jnp.min(live, axis=0))
-        his.append(jnp.max(live, axis=0))
+    extents = [live_extent(pos, n) for pos, n in zip(positions, num_valid)]
+    return bounds_from_extents(extents, pad=pad, cubic=cubic)
+
+
+def live_extent(positions: Any, num_valid: int) -> Optional[tuple[Array, Array]]:
+    """One device's ``(min, max)`` corner over its live rows, or ``None`` if empty.
+
+    Parameters
+    ----------
+    positions : Any
+        ``(cap, 3)`` padded positions.
+    num_valid : int
+        Live rows.
+
+    Returns
+    -------
+    Optional[tuple[Array, Array]]
+        The corners, or ``None``.
+    """
+    live = jnp.asarray(positions)[: int(num_valid)]
+    if int(live.shape[0]) == 0:
+        return None
+    return jnp.min(live, axis=0), jnp.max(live, axis=0)
+
+
+def bounds_from_extents(
+    extents: list, *, pad: float = 1e-6, cubic: Optional[bool] = None
+) -> tuple[Array, Array]:
+    """:func:`host_mesh_bounds` from the devices' :func:`live_extent` (mesh order).
+
+    Min and max are exact, so the box does not depend on which process measured
+    which device (the multi-process prepare gathers the extents).
+
+    Parameters
+    ----------
+    extents : list
+        Per device ``(min, max)`` or ``None`` (no live row).
+    pad : float
+        As :func:`global_mesh_bounds`.
+    cubic : Optional[bool]
+        As :func:`global_mesh_bounds`.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(min_corner, max_corner)``.
+    """
+    los = [jnp.asarray(e[0]) for e in extents if e is not None]
+    his = [jnp.asarray(e[1]) for e in extents if e is not None]
     lo = jnp.min(jnp.stack(los), axis=0)
     hi = jnp.max(jnp.stack(his), axis=0)
     return cube_bounds(lo, hi, pad=pad, cubic=cubic)
