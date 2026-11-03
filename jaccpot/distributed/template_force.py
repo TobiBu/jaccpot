@@ -339,6 +339,11 @@ def prepare_mesh_force(
     box = host_mesh_bounds([np.asarray(p) for p in pos_d], counts_host, cubic=cubic)
     runtime_overrides = engine._resolve_runtime_execution_overrides(num_particles=cap)
 
+    if getattr(engine, "_tree_cell_min_level_auto", None) is not None:
+        raise ValueError(
+            "TreeConfig(cell_min_level='auto') is single-card only: pass an "
+            "explicit cell_min_level on the mesh"
+        )
     headroom = getattr(engine, "_tree_leaf_capacity_auto", None)
     if headroom is not None and getattr(engine, "_tree_leaf_capacity", None) is None:
         # leaf_capacity="auto", sized ONCE for every device: the eager prepare would

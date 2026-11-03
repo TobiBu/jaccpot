@@ -40,8 +40,8 @@ trajectory bit for bit (``tests/integration/strict/test_runner_gradient_mode.py`
 * ``"eager_self"`` (``JACCPOT_STRICT_CAPS_ONLY_PREPARE=0``: a full re-prepare's
   evaluation) is chained as ``"seed_kept"`` and not gated bitwise.
 
-The chain evaluates every start force itself (under ``jax.checkpoint``, outside
-the rollouts' hand-written reverse) and adds the field as the runner does, EAGERLY: behind an
+The chain evaluates every start force itself (by default under ``jax.checkpoint``,
+outside the rollouts' hand-written reverse) and adds the field as the runner does, EAGERLY: behind an
 ``optimization_barrier``, so XLA cannot contract the field's last multiply into the
 add (an FMA). That makes a one-multiply field (the tests' harmonic pull) bitwise at
 a ``"self"`` boundary. A field with more arithmetic is not always bitwise there or
@@ -49,6 +49,24 @@ at step 0: XLA contracts multiply-adds INSIDE the field in a program and not op 
 op, so the runner's eager field and any jitted one differ by an ulp (the NFW halo,
 CPU float64, N = 512: 264 of 1536 components at step 0; after 4-6 steps 9-26 of
 3072 state elements, 5.6e-17). Inside the scans the field is jitted on both sides.
+
+THE START FORCE (``rollout(start_force=...)``). ``"outside"`` (the default) is the
+above: a seeded segment's start force -- ``"start"``, ``"seed_kept"``,
+``"eager_self"`` -- runs under ``jax.checkpoint`` BESIDE the rollout, its field
+added eagerly, and the rollout gets it as ``acceleration=``. Its forward and its
+recompute then sit in one computation, which shares their operand-free fills (the
+zero tables, the walk's iotas) from the forward to the end of the reverse pass:
+S9 session 2's mechanism, which ``differentiable_rollout`` avoids for its OWN start
+force by running that force's reverse as unit 0 of its one reverse loop.
+``"adjoint"`` (opt-in, S10 follow-ups) hands those segments' start force to the
+rollout (``acceleration=None``, the seed as the start force's aux; a
+``"seed_kept"`` segment's first step gets the seed again through ``start_aux``),
+so it takes that lever: W at the S9 2e6 Plummer calibration 883 -> ~406 B/p
+(``docs/production_2026-10.md``, "S10 follow-ups"). The cost: the start total's
+field is then added INSIDE the program (jitted), so with a field of more than one
+multiply step 0 is no longer guaranteed bitwise to the runner (an ulp; the NFW
+note above); the gradient is the same function's. ``"carried"`` and ``"self"``
+segments are the same in both modes.
 
 A failed verdict inside the gradient run -- the pre-pass's caps did not hold, e.g.
 for inputs moved away from the pre-pass's -- is refused
@@ -87,6 +105,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import functools
 from dataclasses import dataclass
 from typing import Any, NamedTuple, Optional, Sequence
 
@@ -104,6 +123,7 @@ from jaccpot.runtime.grad_rollout import (
 
 __all__ = [
     "GRADIENT_INPUTS",
+    "START_FORCE_MODES",
     "START_KINDS",
     "GradSegment",
     "GradientPlan",
@@ -122,6 +142,13 @@ GRADIENT_INPUTS = (
 
 #: how a segment's start acceleration and first f_b are made (module docstring)
 START_KINDS = ("start", "carried", "seed_kept", "self", "eager_self")
+
+#: where :meth:`GradientPlan.rollout` evaluates the start force of a segment that
+#: starts from a seed (module docstring, "THE START FORCE")
+START_FORCE_MODES = ("outside", "adjoint")
+
+#: the start kinds whose start force ``start_force="adjoint"`` moves into the rollout
+_SEEDED_KINDS = ("start", "seed_kept", "eager_self")
 
 
 # --------------------------------------------------------------------------
@@ -370,6 +397,33 @@ def _carrying_self(step_fn: Callable[..., tuple]) -> Callable[..., tuple]:
     return step
 
 
+def _seed_for_first_step(aux_in: Any, aux_out: Any, *, wrapped: bool) -> Any:
+    """A ``"seed_kept"`` segment's first-step aux under ``start_force="adjoint"``.
+
+    The runner's caps-only retry discards its start force's f_b and starts the
+    first step from the re-prepare's seed again, with the start force's verdict:
+    ``differentiable_rollout(start_aux=...)``.
+
+    Parameters
+    ----------
+    aux_in : Any
+        The start force's input aux: ``(seed, bits, needs)``, or with ``wrapped``
+        :func:`_carrying_self`'s ``((seed, bits, needs), acc, aux)``.
+    aux_out : Any
+        The aux the start force returned, in the same structure.
+    wrapped : bool
+        The step is :func:`_carrying_self`'s.
+
+    Returns
+    -------
+    Any
+        ``aux_out`` with its f_b replaced by the seed.
+    """
+    if wrapped:
+        return ((aux_in[0][0], *aux_out[0][1:]), *aux_out[1:])
+    return (aux_in[0], *aux_out[1:])
+
+
 def _under_plan(
     engine: Any, plan: dict, step_fn: Callable[..., tuple], in_chain: list
 ) -> Callable[..., tuple]:
@@ -502,12 +556,103 @@ class GradientPlan:
             **self.params,
         }
 
+    def arrays(self, device: Any = None) -> dict:
+        """The plan's array data, placed once, for a program to take as ARGUMENTS.
+
+        :meth:`rollout` otherwise reads the plan's own arrays -- the f_b seed of
+        every seeded segment, a restart's restored handle -- and the caller's
+        ``dt`` / force parameters from ``inputs``; inside ``jax.jit`` the plan's
+        arrays are then CONSTANTS of the program (copied into it, its size and
+        compile time growing with N). Pass ``rollout(inputs, arrays=plan.arrays())``
+        (or tracers of it: a jitted function's argument) and they are arguments.
+        The values are the plan's, so the program computes the same numbers.
+
+        Parameters
+        ----------
+        device : Any
+            Where to place them (``jax.device_put``); ``None``: the default
+            device.
+
+        Returns
+        -------
+        dict
+            ``{"params": tuple, "seeds": tuple, "boundary": Optional[dict]}``:
+            ``params`` the leaves of ``(dt, force_params)`` as the runner passed
+            them, each an array or ``None`` where the leaf is a Python number (a
+            literal of the program, which stays the plan's); ``seeds`` one
+            ``[N]`` f_b (or ``None``) per segment, :attr:`GradSegment.seed`;
+            ``boundary`` the restored handle's arrays (:attr:`boundary`) or
+            ``None``.
+        """
+        leaves = jax.tree_util.tree_leaves(self._array_params())
+        host = {
+            "params": tuple(
+                leaf if isinstance(leaf, (jax.Array, np.ndarray)) else None
+                for leaf in leaves
+            ),
+            "seeds": tuple(seg.seed for seg in self.segments),
+            "boundary": self.boundary,
+        }
+        if device is None:
+            return jax.tree_util.tree_map(jnp.asarray, host)
+        return jax.device_put(host, device)
+
+    def _array_params(self) -> dict:
+        """``{"dt", "force_params"}`` as the runner passed them (:meth:`arrays`).
+
+        Returns
+        -------
+        dict
+            The two entries of :attr:`params`.
+        """
+        return {"dt": self.params["dt"], "force_params": self.params["force_params"]}
+
+    def _bound(self, inputs: dict, arrays: dict) -> tuple:
+        """``inputs`` completed from ``arrays``, and the seeds and boundary to read.
+
+        Parameters
+        ----------
+        inputs : dict
+            The caller's inputs; a ``dt`` or ``force_params`` they name wins.
+        arrays : dict
+            What :meth:`arrays` returned (or tracers of it).
+
+        Returns
+        -------
+        tuple
+            ``(inputs, seeds, boundary)``.
+
+        Raises
+        ------
+        ValueError
+            If ``arrays`` do not match this plan (another plan's).
+        """
+        own = self._array_params()
+        leaves, treedef = jax.tree_util.tree_flatten(own)
+        given = tuple(arrays["params"])
+        seeds = tuple(arrays["seeds"])
+        boundary = arrays["boundary"]
+        if (
+            len(given) != len(leaves)
+            or len(seeds) != len(self.segments)
+            or (boundary is None) != (self.boundary is None)
+        ):
+            raise ValueError(
+                "arrays do not match this plan: take them from its arrays()"
+            )
+        params = jax.tree_util.tree_unflatten(
+            treedef, [leaf if new is None else new for leaf, new in zip(leaves, given)]
+        )
+        return {**params, **inputs}, seeds, boundary
+
     def rollout(
         self,
         inputs: dict,
         *,
         checkpoint: Optional[str] = "step",
         inner_steps: Optional[int] = None,
+        start_force: str = "outside",
+        arrays: Optional[dict] = None,
     ) -> RolloutResult:
         """The gradient run: the segments chained, each on its settled plan. Traced.
 
@@ -520,10 +665,22 @@ class GradientPlan:
         ----------
         inputs : dict
             :data:`GRADIENT_INPUTS` -> value (:meth:`inputs` for the pre-pass's).
+            With ``arrays``, ``dt`` and ``force_params`` may be left out (they
+            come from ``arrays``, the plan's Python numbers kept).
         checkpoint : Optional[str]
             Each segment's ``differentiable_rollout(checkpoint=...)``.
         inner_steps : Optional[int]
             Each segment's ``inner_steps`` (``"nested"`` only).
+        start_force : str
+            Where a seeded segment's start force runs, one of
+            :data:`START_FORCE_MODES`: ``"outside"`` (default) beside the rollout,
+            the forward the runner's bitwise; ``"adjoint"`` inside the rollout's
+            hand-written reverse, for less memory (module docstring, "THE START
+            FORCE").
+        arrays : Optional[dict]
+            The plan's array data as :meth:`arrays` returned it, or tracers of it
+            (a program's arguments): read in place of the plan's own seeds and
+            restored handle. ``None``: the plan's (constants of a jitted caller).
 
         Returns
         -------
@@ -536,11 +693,20 @@ class GradientPlan:
         ------
         ValueError
             If the first segment continues a handle (a plan from ``restart_from``)
-            and the plan holds no restored arrays, or a segment's start kind is
-            unknown.
+            and the plan holds no restored arrays, a segment's start kind is
+            unknown, ``start_force`` is not one of :data:`START_FORCE_MODES`, or
+            ``arrays`` come from another plan.
         """
         from jaccpot.production import _trace_state_kept
 
+        if start_force not in START_FORCE_MODES:
+            raise ValueError(
+                f"start_force must be one of {START_FORCE_MODES}, got {start_force!r}"
+            )
+        seeds = tuple(seg.seed for seg in self.segments)
+        boundary = self.boundary
+        if arrays is not None:
+            inputs, seeds, boundary = self._bound(inputs, arrays)
         x = jnp.asarray(inputs["positions"])
         v = jnp.asarray(inputs["velocities"])
         m = jnp.asarray(inputs["masses"])
@@ -619,8 +785,8 @@ class GradientPlan:
                     _carrying_self(base) if carry_self else base,
                     in_chain,
                 )
-                seed = array(seg.seed)
-                restart = self.boundary if k == 0 else None
+                seed = array(seeds[k])
+                restart = boundary if k == 0 else None
                 if prev is None and seg.kind in ("carried", "self"):
                     if restart is None:
                         raise ValueError(
@@ -635,7 +801,21 @@ class GradientPlan:
                     acc_r, inner_r = self_force(x, m, (f_b_r, None, None))
                     bits, needs = inner_r[1], inner_r[2]
                 acc0: Any
-                if seg.kind == "carried":
+                # "adjoint": the rollout computes this segment's start force
+                # (acceleration=None), its reverse unit 0 of the rollout's reverse
+                # loop; the first step's aux from `start_aux`
+                in_adjoint = start_force == "adjoint" and seg.kind in _SEEDED_KINDS
+                start_aux: Optional[Callable[[Any, Any], Any]] = None
+                if in_adjoint:
+                    acc0, aux0 = None, (seed, bits, needs)
+                    if carry_self and bits is None:
+                        # the carried aux_in has the steps' structure from step 1 on
+                        aux0 = (seed, *verdict(bits, needs))
+                    if seg.kind != "start":
+                        start_aux = functools.partial(
+                            _seed_for_first_step, wrapped=carry_self
+                        )
+                elif seg.kind == "carried":
                     if prev is not None:
                         acc0, aux0 = prev.acceleration, (f_b, bits, needs)
                     else:
@@ -678,6 +858,7 @@ class GradientPlan:
                     aux=aux0,
                     acceleration=acc0,
                     **rollout_kw,
+                    **({} if start_aux is None else {"start_aux": start_aux}),
                 )
                 inner = out.aux
                 if carry_self:
@@ -711,6 +892,7 @@ class GradientPlan:
         inputs: Optional[dict] = None,
         checkpoint: Optional[str] = "step",
         inner_steps: Optional[int] = None,
+        start_force: str = "outside",
     ) -> GradientResult:
         """The loss of the gradient run and its gradient; a failed verdict raises.
 
@@ -735,6 +917,8 @@ class GradientPlan:
         checkpoint : Optional[str]
             As :meth:`rollout`.
         inner_steps : Optional[int]
+            As :meth:`rollout`.
+        start_force : str
             As :meth:`rollout`.
 
         Returns
@@ -771,13 +955,18 @@ class GradientPlan:
         static = {k: val for k, val in rest.items() if is_static(val)}
         dynamic = {k: val for k, val in rest.items() if k not in static}
         key = (loss, wrt, checkpoint, inner_steps, repr(sorted(static.items())))
+        if start_force != "outside":
+            key += (start_force,)
         program = self._programs.get(key)
         if program is None:
 
             def objective(diff_in: dict, dynamic_in: dict) -> tuple:
                 every = {**static, **dynamic_in, **diff_in}
                 result = self.rollout(
-                    every, checkpoint=checkpoint, inner_steps=inner_steps
+                    every,
+                    checkpoint=checkpoint,
+                    inner_steps=inner_steps,
+                    start_force=start_force,
                 )
                 return loss(result, every), result
 

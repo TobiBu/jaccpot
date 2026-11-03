@@ -2761,6 +2761,10 @@ multiple-shooting cell; every multiple-shooting fit stopped at a wall-time cap b
 and cost read from its theta history (favours multiple shooting); success is `max |theta - theta*| <= 1e-3`. The cost
 is the inner solver: L-BFGS on 43,008 node variables at 15.5 Lyapunov times.
 
+**Superseded by the K = 10 rerun** ("The long-horizon study, K = 10" below): the conclusion stands, the cost does
+not -- run to the driver's own stop, every multiple-shooting fit spends its whole budget (43k-68k passes), and
+single shooting at 11.6 Lyapunov times is 1/10.
+
 ### The fused lane on GPU (F): float32, disc in MN + NFW, galaxy preset
 Disc mass 1e-2 at R 0.5-3, softening 0.015 (N/1e5)^(-1/3), dt 0.01, 2 segments of 50 steps. jaccpot 5385b164,
 nornax 48479ae, fusion autotuner off, cards 6/7 (contended; no timings).
@@ -2809,3 +2813,171 @@ mode on 1, 2 and 4 cards. Every row kind ran locally at 1e5 (rc 0, clean verdict
   (projected positions, line-of-sight velocities), where nodes cannot start from the data; a Gauss-Newton or
   condensing inner solver needs per-segment Jacobians the checkpointed rollouts do not provide.
 - The HoreKa timings (S9's job, S1b's job, this one).
+
+### S10 follow-ups (2026-11-02)
+
+Track FU of `s10c` (a background session; the user approved the four items). jaccpot `s10/followups` on 3363d8c0
+(PR #495), mimirax `s10/followups` on 9cccda4 (PR #11); both rebased onto main once those merged (jaccpot f3c6ac01, mimirax 47fcfb8, 2026-11-03). Every item is opt-in. CPU program identity 36/36 against
+`s9-base-cpu` (tag `fu-final-cpu`, jaccpot 9ba4615f). GPU rows on cards 6 / 7 (shared with a second session):
+memory and functional only, no timings; track F's disc and bench (`bench/s10_fused_shooting.py`, galaxy preset,
+float32, fusion autotuner off), nornax 48479ae.
+
+| item | API | default |
+| --- | --- | --- |
+| the start force inside the adjoint | `GradientPlan.rollout(..., start_force="adjoint")` (also `value_and_grad`, `runner.value_and_grad`); `differentiable_rollout(start_aux=)` | `"outside"` |
+| the plan's arrays as arguments | `GradientPlan.arrays(device)`, `rollout(inputs, arrays=)` | the plan's own |
+| a scale-aware level floor | `TreeConfig(cell_min_level="auto")`, `GalaxySettings(cell_min_level="auto")`; `capacity_plan.auto_cell_min_level` | 8 |
+| the prepare's eager compiles | `jaccpot/runtime/eager_cache.py`, on under `gradient_plan(freeze_cache=...)` | off |
+
+**1. The start force inside the adjoint.** For the start kinds `"start"`, `"seed_kept"`, `"eager_self"` the chain
+passes `acceleration=None` and the seed `(f_b, bits, needs)` to `differentiable_rollout`, so S9 session 2's lever
+(374228f5: the start force's reverse as unit 0 of the one reverse loop) reaches them; `"seed_kept"` / `"eager_self"`
+start their first step from the seed again through the new `start_aux(aux_in, aux_out)` hook (`None`: the program
+without it). A segment before a `"self"` boundary carries `(aux, acc, aux_in)`; its first-segment input verdict is
+then arrays, not `None`, so the scan carry keeps one structure. `"carried"` and `"self"` segments are unchanged.
+
+CPU gates (`tests/integration/strict/test_runner_gradient_start_force.py`, `test_runner_gradient_mode`'s system:
+N = 512, float64, interpret, 3 segments x 2 steps, the second re-planned):
+
+| lane (start kinds) | forward vs the runner | value | gradients vs `"outside"` (max diff / max) |
+| --- | --- | --- | --- |
+| Plummer + harmonic field (start / self / carried) | bitwise | bitwise | bitwise; masses 1.19e-16 |
+| `dehnen_error` + field (start / self / carried) | 1 byte (6.9e-18) | bitwise | bitwise; masses 1.19e-16 |
+| `dehnen_error` (start / seed_kept / carried) | bitwise | bitwise | bitwise; masses 1.19e-16 |
+| `dehnen_error`, `JACCPOT_STRICT_CAPS_ONLY_PREPARE=0` (start / eager_self / carried) | bitwise | bitwise | bitwise; masses 1.19e-16 |
+
+A restart's plan (no seeded segment) lowers to the same program text in both modes. GPU, the disc in MN + NFW (a
+multi-term field), 2e4, one 10-step segment: the `"adjoint"` forward is the runner's bitwise (0 of 120,000), theta
+gradients equal. The ulp the module docstring warns of (the field added inside the program) showed only in the CPU
+lane above and in mimirax's G1 (4 bytes, below).
+
+W (GPU, `--task memory`, two L, `W + L r`; F's rows: jaccpot 5385b164):
+
+| N, system | cml | W `"outside"` (F) | W `"adjoint"` | r |
+| --- | --- | --- | --- | --- |
+| 2e6 clipped Plummer (S9 calibration, L 2 / 4) | 8 | 882.8 | **406.4** (S9's direct rollout 407.5) | 16.0 |
+| 1e5 disc (L 25 / 50) | 8 | 5087.7 | **2119.6** (= F's direct variant to the byte) | 15.1 |
+| 1e5 disc | 4 | 910.5 | **423.7** | 16.0 |
+| 1e6 disc | 8 | 2382.4 | **1069.8** | 15.9 |
+| 1e6 disc | 5 | 687.0 | **299.5** | 16.0 |
+| 2.5e7 disc (one segment, L 10, preallocated BFC) | 8 | temporaries 776.0, peak 966 B/p = 24.1 GB | temporaries **446.9** (W ~287 at r 16; S9's structure: 283 for Plummer), peak **633 B/p = 15.8 GB** | -- |
+
+At 2.5e7 the segment now fits with ~22 GB to spare on a 40 GB card (F's run needed the preallocated BFC to fit at all).
+
+theta gradients equal to every printed float32 digit in every row.
+
+mimirax (`FusedSegmentEngine(start_force=)`): with `"adjoint"` as the engine's default, session 1's fused CPU gates
+(`tests/integration/test_fused_segment_engine.py`) pass single-vs-multiple, FD, compile-once / re-plan and the aux
+guard with session 1's numbers, but G1 -- each segment's forward is the runner's from its node, bitwise, the defect
+exactly 0 -- fails by 4 bytes in both lanes (the field added inside the program under mimirax's input barriers).
+P's two-card GPU gates (`tests/integration/test_parallel_segments.py -k gpu`, cards 6 + 7, galaxy preset, float32)
+pass with `"adjoint"` as the default too (3 / 3: two cards == one card == the one program, bitwise; the driver; a
+failed verdict re-plans one segment).
+So the engine's default stays `"outside"`; `--start-force adjoint` in the bench and the sbatch rows.
+
+**2. `GradientPlan.arrays()`.** `arrays(device)` places the array leaves of `(dt, force_params)` (`None` for a Python
+number: it stays a literal), every segment's seed and a restart's boundary once; `rollout(inputs, arrays=)` reads
+them (dt / force params filled where `inputs` leave them out). CPU: the forward with them as arguments is the
+runner's bitwise and its program holds 0 `[N]` constants (2 with the plan's own); the value bitwise, the gradients
+to round-off against the plan's constants (masses 1.2e-16, positions 2.2e-16, velocities 1.5e-17: with the seeds
+constant XLA folds what depends on them alone at compile time); a restart's boundary through `arrays` bitwise.
+mimirax's engine uses it where jaccpot has it (`segment_arrays` = `plan.arrays(device)`, the call hands them to
+`rollout(arrays=)`, dt / force params behind the barrier; an older jaccpot keeps the `dataclasses.replace`).
+P's two-card GPU gates pass on it (3 / 3, `"outside"`): two cards == one card == the one program bitwise (value,
+theta, nodes), the largest constant in a segment program 4 elements (20,000 with the plan's own arrays), the driver
+2 traces / no redo, a failed verdict re-planning segment 1 alone.
+
+**3. `cell_min_level="auto"`.** Picked at the first eager prepare, before `leaf_capacity="auto"`: the level `L <= 8`
+whose occupied Morton cells' mean occupancy `N / occupied(L)` is nearest the leaf target in log (the finer on a
+tie). A first rule (the finest level holding at least a leaf's worth) gave 7 on the 2.5e7 disc (47 per level-8
+cell) and was replaced. The level it picks (cubic box, leaf 64):
+
+| system | N | auto | mean per occupied cell at levels 5 / 6 / 7 / 8 |
+| --- | --- | --- | --- |
+| F's disc | 1e4 / 3e4 / 1e5 / 3e5 | 3 / 4 / 5 / 6 | 1e5: 70 / 12.5 / 2.7 / 1.2 |
+| F's disc | 1e6 / 3e6 / 1e7 | 6 / 7 / 7 | 1e6: 681 / 93 / 16.5 / 3.2 |
+| F's disc | 2.5e7 / 1e8 | **8 / 8** | 2.5e7: 12037 / 2130 / 303 / 47 |
+| the 25M disc + bulge production IC (`disk_bulge_25m.npz`) | 25,165,824 | **8** | 2187 / 654 / 290 / 150 |
+| S9's clipped Plummer | 1e5 / 2e6 / 8e6 / 2.5e7 | 4 / 6 / 7 / 7 | 2.5e7: 1679 / 269 / 75 / 29 |
+
+So it equals 8 on the disc from N ~ 2.5e7 (between 1e7 and 2.5e7) and on the production IC; S9's Plummer
+calibration rows (8e6, 2.5e7) would change to 7.
+
+Force error (GPU, float32 fused lane self-gravity after one step, against a float64 direct sum with the preset's
+ferrers3 kernel at 4096 sampled particles; F's disc, eps 0.015 (N / 1e5)^(-1/3)):
+
+| N | floor | level | leaf capacity | far pairs | rel-L2 | median | p99 | max |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1e5 | 8 | 8 | 95,232 | 5.51M | 4.75e-4 | 3.08e-4 | 1.78e-3 | 8.2e-3 |
+| 1e5 | auto | 5 | 6,144 | 0.356M | 3.81e-4 | 1.89e-4 | 1.60e-3 | 7.2e-3 |
+| 1e5 | 4 | 4 | 6,144 | 0.354M | 3.81e-4 | 1.88e-4 | 1.60e-3 | 7.2e-3 |
+| 1e6 | 8 | 8 | 360,448 | 28.5M | 4.26e-4 | 2.87e-4 | 1.58e-3 | 9.4e-3 |
+| 1e6 | auto | 6 | 65,536 | 5.50M | 3.88e-4 | 2.35e-4 | 1.59e-3 | 1.1e-2 |
+| 1e6 | 5 | 5 | 65,536 | 5.49M | 3.88e-4 | 2.35e-4 | 1.59e-3 | 1.1e-2 |
+
+W with `"auto"` (GPU, as item 1's rows): the auto level's capacities are cml 4's at 1e5 and cml 5's at 1e6, so is its
+W: 1e5 910.5 B/p (`"outside"`) / 423.7 (`"adjoint"`), 1e6 299.5 (`"adjoint"`), against 5087.7 / 2119.6 and 1069.8 at
+cml 8. Error at or below cml 8's with 5-15x fewer far pairs and leaves: the level-8 floor at <= 1e6 cuts every bulk
+cell to 1-3 particles, and the coarser floor gives leaves near the target, whose expansions are as accurate.
+
+Recommendation (the user's call: it changes default programs below ~2.5e7): make `"auto"` the galaxy preset's default once the HoreKa rows
+(`seg_<N>_auto_adj`, `pre_<N>_fc1_auto`) show the step time at 1e5-1e7 does not regress; it leaves the 25M disc +
+bulge and 1e8 programs unchanged (level 8), but moves S9's clipped-Plummer calibration (8e6, 2.5e7: level 7) and any
+run below ~2.5e7, and the floor's outskirt split is coarser there (the outliers the level-8 floor was added for,
+`TreeConfig.cell_min_level`'s note, were measured on a 2e6 Plummer, where auto picks 6). Not changed here.
+
+**4. The prepare's eager compiles.** Found with a `jax.monitoring` listener on the backend-compile event that keeps
+the Python stack (GPU, F's disc at 2e4): every warm pre-pass compiled 11 programs (2.9 s there) -- 8 x `jit(while)`
+in yggdrax's `_build_mac_extents` (four eager `lax.while_loop` extent passes per walk, two walks: their body closures
+are new every call), `jit(wrapped)` of the P2M leaf `pallas_call`, and the f_b seed's sorted CSR near field:
+`jit(wrapped)` of its `pallas_call` and `jit(cond)` of its long-row pieces. Under `eager_jit_cache` (on with
+`gradient_plan(freeze_cache=...)`) the three call sites run through one `jax.jit` per function, static arguments
+and `JACCPOT_*` environment, kept on the engine (3 programs); a tracer argument or the cache off calls the function
+as before. Warm pre-pass with it: **0 compiles** (CPU interpret, N 512; GPU 2e4: 0, wall 6.8 -> 3.4 s contended).
+Plans identical: CPU bitwise (plan, frozen statics, seed, forward state, acceleration, f_b); on GPU the seeds of
+two plain pre-passes already differ (2346-2781 of 80,000 bytes: the eager walk ladder is not reproducible there),
+the cached one's by 3922, the caps equal, the end states bitwise. Not touched: yggdrax (the while loops could be
+hoisted there; not this track's repo).
+
+**Open.**
+- Make `"adjoint"` mimirax's default: needs G1 relaxed from bitwise to round-off at step 0 (a user decision).
+- `cell_min_level="auto"` as the galaxy preset's default (above).
+- yggdrax: hoist `_propagate_extents`' while loop to module level (then the eager cache needs no MAC-extents site).
+- The HoreKa rows (`bench/slurm/s10_shooting_timing.sbatch`, mimirax): `seg_<N>_adj`, `al_<N>_c2_adam_adj`,
+  `seg_<N>_auto_adj`, `pre_<N>_fc1_auto` beside F's; `pre_<N>_fc1` now includes the eager cache.
+
+### The long-horizon study, K = 10 (2026-11-03)
+
+Track ST of `s10c` reran L's recovery cells with the same ten starts in every cell, the same driver and budget (AL +
+L-BFGS, 20 outer x 200 inner steps, tol 1e-8), and no wall-time cap: every fit ran to the driver's own stop (21 fits
+crossed a process boundary and resumed bitwise through mimirax's new opt-in `AugmentedLagrangian.minimize(...,
+checkpoint=, resume=)`). mimirax `s10/study-k10` on PR #11; records in `studies/long_horizon_shooting/`.
+
+| horizon (Lyapunov times) | method | successes | driver's stop | passes to the stop, median (range) | passes to tolerance, oracle, median |
+| --- | --- | --- | --- | --- | --- |
+| 3.9 | single | 10/10 | converged | 122 (116-126) | 122 |
+| 7.7 | single | 10/10 | converged | 440 (368-488) | 374 |
+| 9.7 | single | 7/10 | converged | 775 (425-1,420) | 585 |
+| 9.7 | multiple, nodes from the data | 10/10 | budget | 42,788 (42,605-42,875) | 6,180 |
+| 11.6 | single | 1/10 | converged | 855 (450-2,778) | 1,014 (one) |
+| 11.6 | multiple, nodes from the data | 10/10 | budget | 51,297 (50,706-51,588) | 6,666 |
+| 11.6 | multiple, nodes from a forward run | 0/10 | budget | 49,470 (48,858-50,436) | -- |
+| 15.5 | single | 0/10 | converged | 5,328 (664-44,408) | -- |
+| 15.5 | multiple, nodes from the data | 10/10 | budget | 68,404 (67,768-68,768) | 8,288 |
+| 15.5 | multiple, nodes from a forward run | 0/10 | budget | 65,308 (65,016-65,968) | -- |
+
+The node initialisation is still the method: from the data, multiple shooting recovers the halo 10/10 at every long
+horizon (max |theta error| 8.4e-6 - 4.1e-4); from a forward run it fails 0/10. The price is not session 2's: no
+multiple-shooting fit meets the stopping rule. The violation never shrinks 4x per outer iteration, so mu grows x10
+each time and hits its 1e12 cap by outer iteration 7; from there 200 L-BFGS steps lower the defects by 0-11 % per
+outer iteration, and they stall at 6.5e-5 - 5.8e-3 -- the inner solver's convergence rate on an ill-conditioned
+penalty subproblem, ten orders above float64 round-off (at 3.9 Lyapunov times a multiple-shooting fit does converge by
+the rule, 5,828 passes). Session 2's 6-13k passes were the oracle reading. Single shooting at 11.6 is 1/10 (L: 3/10):
+two starts flipped under a different compiled GPU program; on a rough objective the success rate is a statistic at
+K = 10 resolution. Not run (about 11 card-hours): multiple shooting at 7.7 and forward-run nodes at 9.7, so where
+forward-run nodes start failing below 11.6 stays open.
+
+**Deferred (the user, 2026-11-03: when the science needs the performance).** The cost of multiple shooting is the
+driver's: a gentler penalty schedule or a lower cap, more inner steps at fixed mu, or a Gauss-Newton / condensing
+inner solver (needs per-segment JVPs the checkpointed rollouts refuse); or a stop scaled to the noise
+(`violation_scale`), for every method alike. Each needs the multiple-shooting cells rerun.

@@ -141,8 +141,13 @@ class GalaxySettings:
         (``mac_force_scale_prepass_theta``). Theta 0.3, 0.5 and 0.8 gave the same
         lists and the same states bit for bit (CPU, N = 2048). It stays 0.8, the
         value the bench passes; it is still part of the compile keys.
-    cell_min_level : int
+    cell_min_level : Union[int, Literal["auto"]]
         No leaf coarser than this Morton level (``TreeConfig.cell_min_level``).
+        ``"auto"`` (opt-in; the default stays 8): picked at the first eager
+        prepare, the level at most 8 whose occupied cells hold, on average,
+        nearest a leaf's worth of particles -- 8 at production N, coarser at small N,
+        where 8 cuts 1-3 particles per leaf (``docs/production_2026-10.md``, "S10
+        follow-ups"). Single card.
     leaf_capacity : Union[int, Literal["auto"]]
         ``TreeConfig.leaf_capacity``; ``"auto"`` sizes it at the first eager
         prepare.
@@ -185,7 +190,7 @@ class GalaxySettings:
     leaf_size: int = 64
     max_order: int = 6
     theta: float = 0.8
-    cell_min_level: int = 8
+    cell_min_level: Union[int, Literal["auto"]] = 8
     leaf_capacity: Union[int, Literal["auto"]] = "auto"
     leaf_headroom: float = 1.15
     cubic_bounds: bool = True
@@ -1848,8 +1853,12 @@ class ProductionRunner:
             segment's gradient statics are frozen on a rebuild at its start, whose
             program is then compiled once per compile key and kept here instead of
             once per call (a warm 2-step pre-pass: 32 -> 5 s, CPU interpret,
-            N = 512, ``dehnen_error``). The plans are the same. ``None`` (the
-            default): compiled per call, as before.
+            N = 512, ``dehnen_error``). The plans are the same. With it, the
+            eager prepare's per-call programs (the MAC extents' while loops, the
+            P2M and the f_b seed's near-field Pallas calls) are also compiled once
+            and kept on the engine (:mod:`jaccpot.runtime.eager_cache`), so a warm
+            pre-pass compiles none of them. ``None`` (the default): compiled per
+            call, as before.
 
         Returns
         -------
@@ -1876,17 +1885,24 @@ class ProductionRunner:
         flag = getattr(engine, "_strict_particle_record_start", None)
         self._grad_recorder = recorder
         engine._strict_particle_record_start = True
+        eager = contextlib.nullcontext()
+        if freeze_cache is not None:
+            from jaccpot.runtime.eager_cache import eager_jit_cache
+
+            programs = vars(engine).setdefault("_eager_jit_programs", {})
+            eager = eager_jit_cache(programs)
         try:
-            forward = self.run(
-                state,
-                masses,
-                dt=dt,
-                num_steps=num_steps,
-                t0=t0,
-                force_params=force_params,
-                external_params=external_params,
-                restart_from=restart_from,
-            )
+            with eager:
+                forward = self.run(
+                    state,
+                    masses,
+                    dt=dt,
+                    num_steps=num_steps,
+                    t0=t0,
+                    force_params=force_params,
+                    external_params=external_params,
+                    restart_from=restart_from,
+                )
         finally:
             self._grad_recorder = None
             if had_flag:
@@ -1911,6 +1927,7 @@ class ProductionRunner:
         restart_from: Any = None,
         checkpoint: Optional[str] = "step",
         inner_steps: Optional[int] = None,
+        start_force: str = "outside",
     ) -> Any:
         """A loss of the run's final state, and its gradient: pre-pass, then gradient run.
 
@@ -1950,6 +1967,12 @@ class ProductionRunner:
             ``differentiable_rollout``'s checkpoint mode, per segment.
         inner_steps : Optional[int]
             Its ``inner_steps`` (``"nested"``).
+        start_force : str
+            Where a seeded segment's start force runs
+            (:meth:`GradientPlan.rollout
+            <jaccpot.production_grad.GradientPlan.rollout>`): ``"outside"``
+            (default) or ``"adjoint"`` (less memory; step 0 bitwise the runner's
+            only for a one-multiply field).
 
         Returns
         -------
@@ -1968,7 +1991,11 @@ class ProductionRunner:
             restart_from=restart_from,
         )
         return plan.value_and_grad(
-            loss, wrt=wrt, checkpoint=checkpoint, inner_steps=inner_steps
+            loss,
+            wrt=wrt,
+            checkpoint=checkpoint,
+            inner_steps=inner_steps,
+            start_force=start_force,
         )
 
     # ------------------------------------------------------------------

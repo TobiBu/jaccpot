@@ -161,7 +161,11 @@ def _galaxy_advanced(settings: GalaxySettings) -> FMMAdvancedConfig:
             leaf_target=int(settings.leaf_size),
             leaf_partition="cells",
             leaf_capacity=settings.leaf_capacity,
-            cell_min_level=int(settings.cell_min_level),
+            cell_min_level=(
+                settings.cell_min_level
+                if settings.cell_min_level == "auto"
+                else int(settings.cell_min_level)
+            ),
             leaf_headroom=(
                 float(settings.leaf_headroom)
                 if settings.leaf_capacity == "auto"

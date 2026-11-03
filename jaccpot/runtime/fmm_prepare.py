@@ -795,6 +795,59 @@ class PrepareMixin(_EngineBase):
             tree_needs=tree_needs,
         )
 
+    def _resolve_auto_cell_min_level(
+        self,
+        positions: Array,
+        *,
+        leaf_size: int,
+        bounds: Tuple[Array, Array],
+        num_valid: Optional[int] = None,
+    ) -> None:
+        """Pick ``TreeConfig(cell_min_level="auto")`` from this prepare's particles.
+
+        Once, at the first eager build, before ``leaf_capacity="auto"`` is sized
+        (the live leaves depend on the level):
+        :func:`~jaccpot.runtime.capacity_plan.auto_cell_min_level` in this
+        prepare's own bounds. The level then sticks -- every later build, traced
+        refreshes included, keeps it -- so this is a no-op unless the level is
+        ``"auto"`` and not yet picked.
+
+        Parameters
+        ----------
+        positions : Array
+            Positions at the working dtype, as the tree build receives them.
+        leaf_size : int
+            The build's leaf size.
+        bounds : Tuple[Array, Array]
+            The build's Morton box.
+        num_valid : Optional[int]
+            The build's leading live rows (``None``: all of them).
+
+        Raises
+        ------
+        ValueError
+            If the level is still unpicked when the build is traced.
+        """
+        ceiling = getattr(self, "_tree_cell_min_level_auto", None)
+        if ceiling is None:
+            return
+        if isinstance(positions, Tracer):
+            raise ValueError(
+                "TreeConfig(cell_min_level='auto') is picked at the first EAGER "
+                "prepare; this build is traced. Prepare once outside the trace, "
+                "or pass an explicit cell_min_level."
+            )
+        from .capacity_plan import auto_cell_min_level
+
+        self._tree_cell_min_level = auto_cell_min_level(
+            positions,
+            leaf_size=int(leaf_size),
+            bounds=bounds,
+            num_valid=num_valid,
+            max_level=int(ceiling),
+        )
+        self._tree_cell_min_level_auto = None
+
     def _resolve_auto_leaf_capacity(
         self,
         positions: Array,
@@ -967,6 +1020,12 @@ class PrepareMixin(_EngineBase):
                 reuse_count=int(cached_topology.reuse_count) + 1,
             )
         else:
+            self._resolve_auto_cell_min_level(
+                positions_arr,
+                leaf_size=int(leaf_size),
+                bounds=inferred_bounds,
+                num_valid=num_valid,
+            )
             self._resolve_auto_leaf_capacity(
                 positions_arr,
                 leaf_size=int(leaf_size),
@@ -3553,9 +3612,19 @@ class PrepareMixin(_EngineBase):
             from jaccpot.pallas.nearfield_leafpair_csr import (
                 nearfield_leafpair_csr_sorted_direct_pallas,
             )
+            from jaccpot.runtime.eager_cache import eager_cached
 
             ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)[leaf_nodes]
-            _, near = nearfield_leafpair_csr_sorted_direct_pallas(
+            # eager: its pallas_call and lax.cond compiled again per call unless
+            # the opt-in cache is on (jaccpot.runtime.eager_cache)
+            _, near = eager_cached(
+                nearfield_leafpair_csr_sorted_direct_pallas,
+                leaf_width=int(tree_artifacts.leaf_cap),
+                chunk=max(1, env_int("JACCPOT_NEARFIELD_LEAFPAIR_CSR_CHUNK", 64)),
+                interpret=env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False),
+                with_force_scale=True,
+                softening_kernel=getattr(self, "softening_kernel", None),
+            )(
                 jnp.asarray(tree_artifacts.positions_sorted),
                 jnp.asarray(tree_artifacts.masses_sorted),
                 ranges[:, 0],
@@ -3563,13 +3632,8 @@ class PrepareMixin(_EngineBase):
                 jnp.maximum(neighbors - leaf_nodes[0], 0),
                 offsets,
                 counts,
-                leaf_width=int(tree_artifacts.leaf_cap),
                 softening_sq=eps_sq,
                 G=jnp.asarray(float(self.G), dtype),
-                chunk=max(1, env_int("JACCPOT_NEARFIELD_LEAFPAIR_CSR_CHUNK", 64)),
-                interpret=env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False),
-                with_force_scale=True,
-                softening_kernel=getattr(self, "softening_kernel", None),
             )
         else:
             from jaccpot.runtime._adaptive_policy import _near_field_force_scale

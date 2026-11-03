@@ -399,6 +399,25 @@ float64); under `dehnen_error` to 3e-8 / 6e-8 (positions / masses), because a re
 file holds the f_b of the restart state's own force, not the one its thresholds came
 from, so the recompute linearises the edge's force on neighbouring lists.
 
+**Opt-ins for a caller with many plans (S10 follow-ups; defaults unchanged).**
+- `plan.rollout(inputs, start_force="adjoint")` (also `value_and_grad(...,
+  start_force=)`): a segment that starts from a seed (`"start"`, `"seed_kept"`,
+  `"eager_self"` -- every multiple-shooting segment) hands its start force to the
+  rollout, whose reverse runs it as unit 0 of its one reverse loop, instead of a
+  `jax.checkpoint` beside it. W at the S9 2e6 Plummer calibration 883 -> 406 B/p; the
+  value and the gradients are the default's (CPU: bitwise but the masses' gradient at
+  1.2e-16). The start total's field is then added inside the program: with a field of
+  more than one multiply step 0 may move by an ulp off the runner's eager add.
+- `plan.rollout(inputs, arrays=plan.arrays(device))`: the plan's array data (the
+  array leaves of `dt` / the force parameters, every segment's f_b seed, a restart's
+  restored handle) as program ARGUMENTS instead of constants copied into the program.
+- `gradient_plan(..., freeze_cache={})` also keeps the eager prepare's per-call
+  programs on the engine (`jaccpot/runtime/eager_cache.py`): a warm pre-pass compiles
+  nothing (it compiled 11 programs, ~1.5 s, at 1e5).
+- `GalaxySettings(cell_min_level="auto")` / `TreeConfig(cell_min_level="auto")`: the
+  level floor picked at the first eager prepare -- the level <= 8 whose occupied
+  cells hold, on average, nearest a leaf's worth of particles; 8 at production N.
+
 Single card only. Checkpointing per segment as `differentiable_rollout`'s
 (`checkpoint="step"` by default; memory: `docs/production_2026-10.md`, "S9").
 

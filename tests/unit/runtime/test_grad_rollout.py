@@ -554,6 +554,10 @@ def test_a_step_without_a_verdict_always_passes_and_an_unknown_aux_is_refused():
         (dict(masses=jnp.ones((N + 1,))), r"masses must be \[64\]"),
         (dict(velocities=jnp.zeros((N, 3), jnp.float32)), "the state has one dtype"),
         (dict(acceleration=jnp.zeros((N, 2))), r"acceleration must be \[64, 3\]"),
+        (
+            dict(acceleration=jnp.zeros((N, 3)), start_aux=lambda a, b: b),
+            "start_aux needs acceleration=None",
+        ),
     ],
 )
 def test_bad_arguments_are_refused(kw, match):
@@ -695,3 +699,54 @@ def test_a_chain_that_passes_its_aux_on_is_not_refused(checkpoint):
     want = jax.jit(jax.grad(lambda x: loss(x, None)))(x0)
     scale = float(jnp.max(jnp.abs(want)))
     assert float(jnp.max(jnp.abs(got - want))) <= 1e-12 * scale
+
+
+def _counting():
+    """The direct sum, its aux a float that each force call increments by one."""
+    base = _step()
+
+    def step(x, m, params, aux):
+        acc, _ = base(x, m, params, None)
+        return acc, aux + 1.0
+
+    return step
+
+
+@pytest.mark.parametrize("checkpoint", MODES, ids=MODE_IDS)
+def test_start_aux_maps_the_start_forces_aux_for_the_first_step(checkpoint):
+    """``start_aux(aux_in, aux_out)`` replaces the aux the start force returned
+    (what the production chain's ``"seed_kept"`` segment needs: the seed again
+    for the first step): the steps continue from it, and nothing else moves -- the
+    state and the gradient are the rollout's without it, bitwise."""
+    from jaccpot.runtime.grad_rollout import differentiable_rollout
+
+    x0, v0, m, wx, wv = _system()
+    steps = 3
+    kw = dict(
+        checkpoint=checkpoint,
+        inner_steps=2 if checkpoint in ("nested", "offload") else None,
+    )
+
+    def run(x, start_aux):
+        extra = {} if start_aux is None else {"start_aux": start_aux}
+        out = differentiable_rollout(
+            _counting(), x, v0, m, DT, steps, aux=jnp.asarray(7.0), **kw, **extra
+        )
+        return jnp.sum(wx * out.positions) + jnp.sum(wv * out.velocities), out
+
+    def seed_again(aux_in, aux_out):
+        del aux_out
+        return aux_in + 100.0
+
+    (plain_value, plain), plain_grad = jax.jit(
+        jax.value_and_grad(lambda x: run(x, None), has_aux=True)
+    )(x0)
+    (value, mapped), grad = jax.jit(
+        jax.value_and_grad(lambda x: run(x, seed_again), has_aux=True)
+    )(x0)
+    assert float(plain.aux) == 7.0 + 1.0 + steps
+    assert float(mapped.aux) == 7.0 + 100.0 + steps
+    assert np.array_equal(np.asarray(value), np.asarray(plain_value))
+    for got, want in zip(mapped[:3], plain[:3]):
+        assert np.array_equal(np.asarray(got), np.asarray(want))
+    assert np.array_equal(np.asarray(grad), np.asarray(plain_grad))
