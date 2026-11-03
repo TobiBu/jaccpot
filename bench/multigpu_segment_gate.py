@@ -240,6 +240,10 @@ def _solver(g: float, soft: float, leaf_capacity=None):
     return solver
 
 
+class _NoCaps:
+    """A one-device mesh's cross capacities: none (``vars`` of it is empty)."""
+
+
 def _cross_caps(leaves_per_device: float, max_cells: int):
     """``bench/multigpu_rollout_gate.py``'s formulas, ``max_cells`` the leaf cap."""
     from jaccpot.distributed.cross import CrossCapacities
@@ -354,7 +358,10 @@ def main() -> None:
     from jaccpot.distributed.rollout import decompose
 
     devices = jax.devices()
-    assert devices[0].platform == "gpu", devices
+    # H0_SMOKE_CPU: bench/slurm/h0's CPU smoke of the commands (forced host devices)
+    assert (
+        devices[0].platform == "gpu" or os.environ.get("H0_SMOKE_CPU") == "1"
+    ), devices
     assert len(devices) >= NDEV, devices
     smi_before = _smi()
     pos0, vel0, mass0, g, soft, dt = _ic()
@@ -490,9 +497,10 @@ def main() -> None:
             if isinstance(v, (int, float, bool))
         }
         result["plan"] = list(runner.force.setup.plan.fingerprint())
+        # one device: nothing crosses and the library sizes no cross capacities (None)
         result["cross_caps"] = {
             k: v
-            for k, v in vars(runner.force.cross_caps).items()
+            for k, v in vars(runner.force.cross_caps or _NoCaps()).items()
             if isinstance(v, (int, float)) or v is None
         }
         if runner.force.cross_needs_measured is not None:
@@ -535,7 +543,7 @@ def main() -> None:
         result["migration_cap_final"] = runner.migration_cap
         result["cross_caps_final"] = {
             k: v
-            for k, v in vars(runner.force.cross_caps).items()
+            for k, v in vars(runner.force.cross_caps or _NoCaps()).items()
             if isinstance(v, (int, float)) or v is None
         }
         drifted = getattr(runner.force, "cross_needs_drifted", None)
