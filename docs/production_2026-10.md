@@ -2761,6 +2761,10 @@ multiple-shooting cell; every multiple-shooting fit stopped at a wall-time cap b
 and cost read from its theta history (favours multiple shooting); success is `max |theta - theta*| <= 1e-3`. The cost
 is the inner solver: L-BFGS on 43,008 node variables at 15.5 Lyapunov times.
 
+**Superseded by the K = 10 rerun** ("The long-horizon study, K = 10" below): the conclusion stands, the cost does
+not -- run to the driver's own stop, every multiple-shooting fit spends its whole budget (43k-68k passes), and
+single shooting at 11.6 Lyapunov times is 1/10.
+
 ### The fused lane on GPU (F): float32, disc in MN + NFW, galaxy preset
 Disc mass 1e-2 at R 0.5-3, softening 0.015 (N/1e5)^(-1/3), dt 0.01, 2 segments of 50 steps. jaccpot 5385b164,
 nornax 48479ae, fusion autotuner off, cards 6/7 (contended; no timings).
@@ -2813,7 +2817,7 @@ mode on 1, 2 and 4 cards. Every row kind ran locally at 1e5 (rc 0, clean verdict
 ### S10 follow-ups (2026-11-02)
 
 Track FU of `s10c` (a background session; the user approved the four items). jaccpot `s10/followups` on 3363d8c0
-(PR #495), mimirax `s10/followups` on 9cccda4 (PR #11). Every item is opt-in. CPU program identity 36/36 against
+(PR #495), mimirax `s10/followups` on 9cccda4 (PR #11); both rebased onto main once those merged (jaccpot f3c6ac01, mimirax 47fcfb8, 2026-11-03). Every item is opt-in. CPU program identity 36/36 against
 `s9-base-cpu` (tag `fu-final-cpu`, jaccpot 9ba4615f). GPU rows on cards 6 / 7 (shared with a second session):
 memory and functional only, no timings; track F's disc and bench (`bench/s10_fused_shooting.py`, galaxy preset,
 float32, fusion autotuner off), nornax 48479ae.
@@ -2941,3 +2945,39 @@ hoisted there; not this track's repo).
 - yggdrax: hoist `_propagate_extents`' while loop to module level (then the eager cache needs no MAC-extents site).
 - The HoreKa rows (`bench/slurm/s10_shooting_timing.sbatch`, mimirax): `seg_<N>_adj`, `al_<N>_c2_adam_adj`,
   `seg_<N>_auto_adj`, `pre_<N>_fc1_auto` beside F's; `pre_<N>_fc1` now includes the eager cache.
+
+### The long-horizon study, K = 10 (2026-11-03)
+
+Track ST of `s10c` reran L's recovery cells with the same ten starts in every cell, the same driver and budget (AL +
+L-BFGS, 20 outer x 200 inner steps, tol 1e-8), and no wall-time cap: every fit ran to the driver's own stop (21 fits
+crossed a process boundary and resumed bitwise through mimirax's new opt-in `AugmentedLagrangian.minimize(...,
+checkpoint=, resume=)`). mimirax `s10/study-k10` on PR #11; records in `studies/long_horizon_shooting/`.
+
+| horizon (Lyapunov times) | method | successes | driver's stop | passes to the stop, median (range) | passes to tolerance, oracle, median |
+| --- | --- | --- | --- | --- | --- |
+| 3.9 | single | 10/10 | converged | 122 (116-126) | 122 |
+| 7.7 | single | 10/10 | converged | 440 (368-488) | 374 |
+| 9.7 | single | 7/10 | converged | 775 (425-1,420) | 585 |
+| 9.7 | multiple, nodes from the data | 10/10 | budget | 42,788 (42,605-42,875) | 6,180 |
+| 11.6 | single | 1/10 | converged | 855 (450-2,778) | 1,014 (one) |
+| 11.6 | multiple, nodes from the data | 10/10 | budget | 51,297 (50,706-51,588) | 6,666 |
+| 11.6 | multiple, nodes from a forward run | 0/10 | budget | 49,470 (48,858-50,436) | -- |
+| 15.5 | single | 0/10 | converged | 5,328 (664-44,408) | -- |
+| 15.5 | multiple, nodes from the data | 10/10 | budget | 68,404 (67,768-68,768) | 8,288 |
+| 15.5 | multiple, nodes from a forward run | 0/10 | budget | 65,308 (65,016-65,968) | -- |
+
+The node initialisation is still the method: from the data, multiple shooting recovers the halo 10/10 at every long
+horizon (max |theta error| 8.4e-6 - 4.1e-4); from a forward run it fails 0/10. The price is not session 2's: no
+multiple-shooting fit meets the stopping rule. The violation never shrinks 4x per outer iteration, so mu grows x10
+each time and hits its 1e12 cap by outer iteration 7; from there 200 L-BFGS steps lower the defects by 0-11 % per
+outer iteration, and they stall at 6.5e-5 - 5.8e-3 -- the inner solver's convergence rate on an ill-conditioned
+penalty subproblem, ten orders above float64 round-off (at 3.9 Lyapunov times a multiple-shooting fit does converge by
+the rule, 5,828 passes). Session 2's 6-13k passes were the oracle reading. Single shooting at 11.6 is 1/10 (L: 3/10):
+two starts flipped under a different compiled GPU program; on a rough objective the success rate is a statistic at
+K = 10 resolution. Not run (about 11 card-hours): multiple shooting at 7.7 and forward-run nodes at 9.7, so where
+forward-run nodes start failing below 11.6 stays open.
+
+**Deferred (the user, 2026-11-03: when the science needs the performance).** The cost of multiple shooting is the
+driver's: a gentler penalty schedule or a lower cap, more inner steps at fixed mu, or a Gauss-Newton / condensing
+inner solver (needs per-segment JVPs the checkpointed rollouts refuse); or a stop scaled to the noise
+(`violation_scale`), for every method alike. Each needs the multiple-shooting cells rerun.
