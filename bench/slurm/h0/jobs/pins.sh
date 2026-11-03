@@ -11,7 +11,8 @@
 source "$H0_JACCPOT/bench/slurm/h0/jobs/_prologue.sh"
 h0_need_preflight pins
 export CUDA_VISIBLE_DEVICES=$FIRST_CARD
-[ "${SMOKE:-}" = 1 ] && export DCE_PINS_SMOKE_N=2048
+# L3 scores 4096 targets: a smoke N below that cannot sample them
+[ "${SMOKE:-}" = 1 ] && export DCE_PINS_SMOKE_N=8192
 ROOT=$OUT/pins
 PINS="$H0_PY bench/dce_pins.py"
 MAIN_YGG=$H0_YGGDRAX

@@ -85,6 +85,7 @@ if [ "${SMOKE:-}" = 1 ]; then
   for spec in "${JOBS[@]}"; do
     IFS='|' read -r name _limit what <<< "$spec"
     selected "$name" || continue
+    if [ -f "$H0_RUN/$name/DONE" ]; then echo "=== SMOKE $name: done before, skipped"; continue; fi
     echo "=== SMOKE $name: $what  $(date -Is)"
     start=$SECONDS
     if SMOKE=1 H0_JACCPOT=$H0_JACCPOT H0_RUN=$H0_RUN H0_JOB=$name \

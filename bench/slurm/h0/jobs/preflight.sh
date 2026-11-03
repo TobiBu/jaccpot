@@ -43,7 +43,7 @@ entry() {  # name command...
   if "$@" > "$OUT/logs/$name.log" 2>&1; then echo ok > "$OUT/status/$name"; else echo "failed rc=$?" > "$OUT/status/$name"; fi
   echo "    $(cat "$OUT/status/$name") in $((SECONDS - start)) s"
 }
-entry pins env DCE_PINS_SMOKE_N=$N "$H0_PY" bench/dce_pins.py record --pins L1,L3 --tag preflight --root "$OUT/pins"
+entry pins env DCE_PINS_SMOKE_N=$((N < 8192 ? 8192 : N)) "$H0_PY" bench/dce_pins.py record --pins L1,L3 --tag preflight --root "$OUT/pins"
 entry scaling env SMOKE_N=$N TIERS=weak REPS=1 OUT="$OUT/scaling" bash bench/slurm/multigpu_scaling.sbatch
 entry grad env SMOKE_N=$N ROWS='^(s8_8e6|r_8e6_T1_fwd|r_8e6_T1_grad_offload)$' PY="$H0_PY" OUT="$OUT/grad" \
   bash bench/slurm/grad_rollout_timing.sbatch
@@ -52,7 +52,7 @@ entry auto env CUDA_VISIBLE_DEVICES="$FIRST_CARD" XLA_PYTHON_CLIENT_PREALLOCATE=
   "$H0_PY" "$H0_MIMIRAX/bench/s10_fused_shooting.py" --task timing --n "$((N < 20000 ? N : 20000))" --steps 5 \
   --reps 1 --segments 2 --only seggrad --start-force adjoint --cell-min-level auto --out "$OUT/auto_seg.json"
 # the scaling sbatch and the others swallow a row's failure: look at their own records too
-grep -l '"rc": [1-9]' "$OUT"/scaling/*.smi.txt > /dev/null 2>&1 && echo "failed (a row's rc != 0)" > "$OUT/status/scaling"
+grep -lE '"rc": ([1-9-]|"timeout")' "$OUT"/scaling/*.smi.txt > /dev/null 2>&1 && echo "failed (a row's rc != 0)" > "$OUT/status/scaling"
 grep -q FAILED "$OUT/logs/grad.log" && echo "failed (a row FAILED)" > "$OUT/status/grad"
 for e in "$OUT"/status/*; do echo "$(basename "$e"): $(cat "$e")"; done | tee "$OUT/status.txt"
 h0_done

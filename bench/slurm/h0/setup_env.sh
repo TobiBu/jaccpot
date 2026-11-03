@@ -29,6 +29,8 @@ if [ -n "${H0_MODULES:-}" ]; then
   module load $H0_MODULES
 fi
 mkdir -p "$H0_ROOT"/{src,data,runs,bench_dir}
+# the CUDA wheels are ~3 GB: keep pip's cache off a small $HOME quota
+export PIP_CACHE_DIR=${PIP_CACHE_DIR:-$H0_ROOT/pip-cache}
 log() { echo "[setup_env $(date +%H:%M:%S)] $*"; }
 
 # --- 1. the venv -----------------------------------------------------------------------------
