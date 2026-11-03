@@ -1328,9 +1328,725 @@ def l2l_real_levels_lanes_reverse_pallas(
     return g.reshape(nodes, C), dbar[:, :3]
 
 
+# ------------------------------------------------------------------ forward mode
+# The tangents of both cascades (``ad_mode="forward"``, :mod:`jaccpot.pallas._tangent`),
+# ONE NODE PER LANE on the forwards' own grids and level order: the M2M bottom up,
+# one lane per parent; the L2L top down, one lane per node below the root. Below the
+# reverses for the reason the reverses are below the forwards: no kernel above moves.
+#
+# A tangent launch carries the PRIMAL table as well (the forward's in-place update,
+# aliased) and the ``K`` tangent tables next to it: a level reads its sources' final
+# primal and tangent rows, written by the previous launch, exactly as the forward
+# reads its sources. Per edge ``w = T(delta) v``:
+#
+#     M2M:  dw = T(delta) dv + sum_a ddelta_a A_a w
+#     L2L:  dw = T(delta) [ dv + sum_a ddelta_a A_a^T v ]
+#
+# with ``A_a`` the ladder of the reverse (:func:`_ladder_lanes`: ``<g, A_a h> =
+# _ladder_lanes(g, h)[a]``), so the geometry tangent never differentiates the
+# rotations -- exact on the axis (``rho = 0``) and at a zero edge. ``T(delta) dv`` is
+# the linear map of ONE :func:`~jaccpot.pallas._tangent.linearize_lanes` of
+# :func:`_translate_lane` in its coefficients, shared by the ``K`` tangents. A dead
+# centre tangent (``live_cent=False``) drops the ladder terms; the coefficient
+# tangents always propagate (a dead input still receives the geometry terms of the
+# levels below or above).
+
+
+def _ladder_coeff_adjoint(harm: dict, *, p: int) -> Any:
+    """``e -> sum_a e_a A_a harm``: the ladder's adjoint in its coefficient slot.
+
+    Parameters
+    ----------
+    harm : dict
+        The vector ``A`` acts on, per ``(degree, m)``, lane vectors.
+    p : int
+        Order. Static.
+
+    Returns
+    -------
+    Any
+        ``f((ex, ey, ez)) -> dict`` over every ``(degree, m)``.
+    """
+    _, vjp = jax.vjp(lambda g: _ladder_lanes(g, harm, p=p), harm)
+    return lambda e: vjp(tuple(e))[0]
+
+
+def _ladder_harm_adjoint(coeff: dict, *, p: int) -> Any:
+    """``e -> sum_a e_a A_a^T coeff``: the ladder's adjoint in its harmonic slot.
+
+    Parameters
+    ----------
+    coeff : dict
+        The vector ``A^T`` acts on, per ``(degree, m)``, lane vectors.
+    p : int
+        Order. Static.
+
+    Returns
+    -------
+    Any
+        ``f((ex, ey, ez)) -> dict`` over every ``(degree, m)`` (zero at degree ``p``).
+    """
+    _, vjp = jax.vjp(lambda h: _ladder_lanes(coeff, h, p=p), coeff)
+    return lambda e: vjp(tuple(e))[0]
+
+
+def _store_tangent_rows(
+    tout_ref: KernelRef,
+    j: int,
+    node: Array,
+    valid: Array,
+    vals: dict,
+    *,
+    p: int,
+    C: int,
+    packed: dict,
+    lane: Array,
+) -> None:
+    """:func:`_store_rows` into tangent ``j`` of a ``[K, nodes * C]`` table.
+
+    Parameters
+    ----------
+    tout_ref : KernelRef
+        The tangent tables.
+    j : int
+        Which tangent. Static.
+    node : Array
+        Each lane's node.
+    valid : Array
+        Lanes that write.
+    vals : dict
+        Values per ``(degree, m)``.
+    p : int
+        Order. Static.
+    C : int
+        Coefficients per node. Static.
+    packed : dict
+        Packed index per ``(degree, m)``. Static.
+    lane : Array
+        Lane index (masked lanes point past the table).
+    """
+    assert plgpu is not None
+    size = tout_ref.shape[1]
+    base = _flat(jnp.where(valid, node, size // C + lane), C, size)
+    for key in _keys(p):
+        plgpu.store(tout_ref.at[j, base + packed[key]], vals[key], mask=valid)
+
+
+def _m2m_tan_lanes_kernel(
+    coef_ref: KernelRef,
+    tcoef_ref: KernelRef,
+    cent_ref: KernelRef,
+    tcent_ref: KernelRef,
+    left_ref: KernelRef,
+    right_ref: KernelRef,
+    nbl_ref: KernelRef,
+    start_ref: KernelRef,
+    count_ref: KernelRef,
+    out_ref: KernelRef,
+    tout_ref: KernelRef,
+    *,
+    p: int,
+    k_lanes: int,
+    tables: dict,
+    num_internal: int,
+    k: int,
+    live_cent: bool,
+) -> None:
+    """:func:`_m2m_lanes_kernel` with ``K`` tangents: the parent's row and its tangents.
+
+    Parameters
+    ----------
+    coef_ref : KernelRef
+        Flat primal multipoles ``[nodes * C]`` (aliased to ``out_ref``).
+    tcoef_ref : KernelRef
+        Flat tangent tables ``[K, nodes * C]`` (aliased to ``tout_ref``).
+    cent_ref : KernelRef
+        Padded centres ``[nodes, 4]``.
+    tcent_ref : KernelRef
+        Padded centre tangents ``[K, nodes, 4]``.
+    left_ref : KernelRef
+        Left child per internal node ``[internal]``.
+    right_ref : KernelRef
+        Right child per internal node ``[internal]``.
+    nbl_ref : KernelRef
+        ``nodes_by_level`` padded with ``-1``.
+    start_ref : KernelRef
+        This level's start in ``nodes_by_level`` ``[1]``.
+    count_ref : KernelRef
+        This level's node count ``[1]``.
+    out_ref : KernelRef
+        **Output** the primal table, written at this level's parents.
+    tout_ref : KernelRef
+        **Output** the tangent tables, written at this level's parents.
+    p : int
+        Order. Static.
+    k_lanes : int
+        Lanes (nodes) per program. Static.
+    tables : dict
+        :func:`_cascade_lane_tables`. Static.
+    num_internal : int
+        Internal node count. Static.
+    k : int
+        ``K``. Static.
+    live_cent : bool
+        Whether the centre tangent can be nonzero. Static.
+
+    Returns
+    -------
+    None
+        Writes the parents' rows.
+    """
+    from jaccpot.pallas._tangent import linearize_lanes
+
+    assert pl is not None and plgpu is not None
+    C, packed = tables["C"], tables["packed"]
+    base = pl.program_id(0) * k_lanes
+    count = count_ref[0]
+
+    @pl.when(base < count)
+    def _live():
+        lane = lax.broadcasted_iota(jnp.int32, (k_lanes,), 0)
+        slot = base + lane
+        valid = slot < count
+        node = nbl_ref[start_ref[0] + jnp.where(valid, slot, 0)]
+        valid = valid & (node >= 0) & (node < num_internal)
+        node_safe = jnp.where(valid, node, 0)
+        px = cent_ref[node_safe, 0]
+        py = cent_ref[node_safe, 1]
+        pz = cent_ref[node_safe, 2]
+        acc = None
+        tacc: list = [None] * k
+        for child_ref in (left_ref, right_ref):
+            ch = child_ref[node_safe]
+            ok = valid & (ch >= 0)
+            ch = jnp.where(ok, ch, 0)
+            dx = jnp.where(ok, cent_ref[ch, 0] - px, 0.0)
+            dy = jnp.where(ok, cent_ref[ch, 1] - py, 0.0)
+            dz_ = jnp.where(ok, cent_ref[ch, 2] - pz, 1.0)
+            row = _flat(ch, C, coef_ref.shape[0])
+            v = {key: coef_ref[row + packed[key]] for key in _keys(p)}
+            w, lin = linearize_lanes(
+                lambda vv: _translate_lane(
+                    vv, dx, dy, dz_, which="m2m", p=p, tables=tables
+                ),
+                (v,),
+            )
+            adj = _ladder_coeff_adjoint(w, p=p) if live_cent else None
+            wm = {key: jnp.where(ok, val, 0.0) for key, val in w.items()}
+            acc = wm if acc is None else {key: acc[key] + wm[key] for key in wm}
+            for j in range(k):
+                dv = {key: tcoef_ref[j, row + packed[key]] for key in _keys(p)}
+                dw = lin(dv)
+                if adj is not None:
+                    e = [
+                        jnp.where(
+                            ok, tcent_ref[j, ch, a] - tcent_ref[j, node_safe, a], 0.0
+                        )
+                        for a in range(3)
+                    ]
+                    ga = adj(e)
+                    dw = {key: dw[key] + ga[key] for key in dw}
+                dw = {key: jnp.where(ok, val, 0.0) for key, val in dw.items()}
+                prev = tacc[j]
+                tacc[j] = (
+                    dw if prev is None else {key: prev[key] + dw[key] for key in dw}
+                )
+        _store_rows(out_ref, node_safe, valid, acc, p=p, C=C, packed=packed, lane=lane)
+        for j in range(k):
+            _store_tangent_rows(
+                tout_ref,
+                j,
+                node_safe,
+                valid,
+                tacc[j],
+                p=p,
+                C=C,
+                packed=packed,
+                lane=lane,
+            )
+
+
+def _l2l_tan_lanes_kernel(
+    coef_ref: KernelRef,
+    tcoef_ref: KernelRef,
+    cent_ref: KernelRef,
+    tcent_ref: KernelRef,
+    parent_ref: KernelRef,
+    nbl_ref: KernelRef,
+    start_ref: KernelRef,
+    count_ref: KernelRef,
+    out_ref: KernelRef,
+    tout_ref: KernelRef,
+    *,
+    p: int,
+    k_lanes: int,
+    tables: dict,
+    k: int,
+    live_cent: bool,
+) -> None:
+    """:func:`_l2l_lanes_kernel` with ``K`` tangents: the node's row and its tangents.
+
+    Parameters
+    ----------
+    coef_ref : KernelRef
+        Flat primal locals ``[nodes * C]`` (aliased to ``out_ref``).
+    tcoef_ref : KernelRef
+        Flat tangent tables ``[K, nodes * C]`` (aliased to ``tout_ref``).
+    cent_ref : KernelRef
+        Padded centres ``[nodes, 4]``.
+    tcent_ref : KernelRef
+        Padded centre tangents ``[K, nodes, 4]``.
+    parent_ref : KernelRef
+        Parent per node ``[nodes]`` (``-1`` at the root).
+    nbl_ref : KernelRef
+        ``nodes_by_level`` padded with ``-1``.
+    start_ref : KernelRef
+        This level's start in ``nodes_by_level`` ``[1]``.
+    count_ref : KernelRef
+        This level's node count ``[1]``.
+    out_ref : KernelRef
+        **Output** the primal table, written at this level's nodes.
+    tout_ref : KernelRef
+        **Output** the tangent tables, written at this level's nodes.
+    p : int
+        Order. Static.
+    k_lanes : int
+        Lanes (nodes) per program. Static.
+    tables : dict
+        :func:`_cascade_lane_tables`. Static.
+    k : int
+        ``K``. Static.
+    live_cent : bool
+        Whether the centre tangent can be nonzero. Static.
+
+    Returns
+    -------
+    None
+        Writes the nodes' rows.
+    """
+    from jaccpot.pallas._tangent import linearize_lanes
+
+    assert pl is not None and plgpu is not None
+    C, packed = tables["C"], tables["packed"]
+    base = pl.program_id(0) * k_lanes
+    count = count_ref[0]
+
+    @pl.when(base < count)
+    def _live():
+        lane = lax.broadcasted_iota(jnp.int32, (k_lanes,), 0)
+        slot = base + lane
+        valid = slot < count
+        node = nbl_ref[start_ref[0] + jnp.where(valid, slot, 0)]
+        valid = valid & (node >= 0)
+        node_safe = jnp.where(valid, node, 0)
+        par = parent_ref[node_safe]
+        valid = valid & (par >= 0)
+        par = jnp.where(valid, par, 0)
+        dx = jnp.where(valid, cent_ref[par, 0] - cent_ref[node_safe, 0], 0.0)
+        dy = jnp.where(valid, cent_ref[par, 1] - cent_ref[node_safe, 1], 0.0)
+        dz_ = jnp.where(valid, cent_ref[par, 2] - cent_ref[node_safe, 2], 1.0)
+        prow = _flat(par, C, coef_ref.shape[0])
+        nrow = _flat(node_safe, C, coef_ref.shape[0])
+        v = {key: coef_ref[prow + packed[key]] for key in _keys(p)}
+        w, lin = linearize_lanes(
+            lambda vv: _translate_lane(
+                vv, dx, dy, dz_, which="l2l", p=p, tables=tables
+            ),
+            (v,),
+        )
+        new = {key: coef_ref[nrow + packed[key]] + w[key] for key in _keys(p)}
+        _store_rows(out_ref, node_safe, valid, new, p=p, C=C, packed=packed, lane=lane)
+        adj = _ladder_harm_adjoint(v, p=p) if live_cent else None
+        for j in range(k):
+            u = {key: tcoef_ref[j, prow + packed[key]] for key in _keys(p)}
+            if adj is not None:
+                e = [
+                    jnp.where(
+                        valid, tcent_ref[j, par, a] - tcent_ref[j, node_safe, a], 0.0
+                    )
+                    for a in range(3)
+                ]
+                ga = adj(e)
+                u = {key: u[key] + ga[key] for key in u}
+            dw = lin(u)
+            dnew = {key: tcoef_ref[j, nrow + packed[key]] + dw[key] for key in _keys(p)}
+            _store_tangent_rows(
+                tout_ref, j, node_safe, valid, dnew, p=p, C=C, packed=packed, lane=lane
+            )
+
+
+def _tangent_level_operands(
+    centers: Array,
+    t_centers: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    *,
+    dtype: Any,
+    width: int,
+    k_lanes: int,
+) -> tuple[Array, Array, Array, Array]:
+    """The padded centres, centre tangents and level index arrays of a tangent cascade.
+
+    Parameters
+    ----------
+    centers : Array
+        ``[nodes, 3]`` centres.
+    t_centers : Array
+        ``[K, nodes, 3]`` centre tangents.
+    nodes_by_level : Array
+        Level-major node ids.
+    level_offsets : Array
+        ``[levels + 1]`` starts.
+    dtype : Any
+        The coefficients' dtype.
+    width : int
+        Widest level. Static.
+    k_lanes : int
+        Nodes per program. Static.
+
+    Returns
+    -------
+    tuple[Array, Array, Array, Array]
+        ``(cent [nodes, 4], tcent [K, nodes, 4], nbl, offs)``.
+    """
+    idx = level_offsets.dtype
+    nbl = jnp.concatenate(
+        [jnp.asarray(nodes_by_level, idx), jnp.full((width + k_lanes,), -1, idx)]
+    )
+    cent = jnp.pad(jnp.asarray(centers, dtype), ((0, 0), (0, 1)))
+    tcent = jnp.pad(jnp.asarray(t_centers, dtype), ((0, 0), (0, 0), (0, 1)))
+    return cent, tcent, nbl, jnp.asarray(level_offsets, idx)
+
+
+def m2m_real_levels_lanes_tangent_pallas(
+    packed: Array,
+    centers: Array,
+    left_child: Array,
+    right_child: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    t_packed: Array,
+    t_centers: Array,
+    *,
+    order: int,
+    num_internal: int,
+    num_levels: int,
+    level_batch_width: int,
+    k_lanes: int = 32,
+    interpret: bool = False,
+    backend: str = "triton",
+    num_warps: int = 1,
+    live_cent: bool = True,
+) -> Array:
+    """``K`` tangents of :func:`m2m_real_levels_lanes_pallas`, on its grid and level order.
+
+    Parameters
+    ----------
+    packed : Array
+        ``[nodes, C]`` packed multipoles with the leaves filled.
+    centers : Array
+        ``[nodes, 3]`` expansion centres.
+    left_child : Array
+        ``[internal]`` left children.
+    right_child : Array
+        ``[internal]`` right children.
+    nodes_by_level : Array
+        Level-major node ids.
+    level_offsets : Array
+        ``[levels + 1]`` starts into ``nodes_by_level``.
+    t_packed : Array
+        ``[K, nodes, C]`` tangents of ``packed``.
+    t_centers : Array
+        ``[K, nodes, 3]`` tangents of ``centers``.
+    order : int
+        Expansion order. Static.
+    num_internal : int
+        Internal node count. Static.
+    num_levels : int
+        Levels the forward covers. Static.
+    level_batch_width : int
+        Nodes per level at most. Static.
+    k_lanes : int
+        Nodes per program. Static.
+    interpret : bool
+        Pallas interpret mode.
+    backend : str
+        Pallas GPU lowering.
+    num_warps : int
+        Warps per program.
+    live_cent : bool
+        Whether ``t_centers`` can be nonzero (``False`` drops the ladder terms).
+
+    Returns
+    -------
+    Array
+        ``[K, nodes, C]`` tangent of the output table.
+    """
+    statics = dict(
+        order=order,
+        num_internal=num_internal,
+        num_levels=num_levels,
+        level_batch_width=level_batch_width,
+        k_lanes=k_lanes,
+        interpret=interpret,
+        backend=backend,
+        num_warps=num_warps,
+        live_cent=live_cent,
+    )
+    arrays = (
+        packed,
+        centers,
+        left_child,
+        right_child,
+        nodes_by_level,
+        level_offsets,
+        t_packed,
+        t_centers,
+    )
+    if _eager(*arrays):
+        return _M2M_TAN_EAGER(*arrays, **statics)
+    p = int(order)
+    C = _check(p, packed)
+    dtype = packed.dtype
+    nodes = int(packed.shape[0])
+    kt = int(t_packed.shape[0])
+    t_flat = jnp.asarray(t_packed, dtype).reshape(kt, -1)
+    if int(num_internal) <= 0 or int(num_levels) <= 1:
+        return t_flat.reshape(kt, nodes, C)
+    tables = _cascade_lane_tables(p)
+    k = max(1, int(k_lanes))
+    width = int(max(level_batch_width, 1))
+    cent, tcent, nbl, offs = _tangent_level_operands(
+        centers,
+        t_centers,
+        nodes_by_level,
+        level_offsets,
+        dtype=dtype,
+        width=width,
+        k_lanes=k,
+    )
+    idx = offs.dtype
+    left = jnp.asarray(left_child, idx)
+    right = jnp.asarray(right_child, idx)
+    kernel = functools.partial(
+        _m2m_tan_lanes_kernel,
+        p=p,
+        k_lanes=k,
+        tables=tables,
+        num_internal=int(num_internal),
+        k=kt,
+        live_cent=bool(live_cent),
+    )
+
+    def body(rev: Array, carry: tuple[Array, Array]) -> tuple[Array, Array]:
+        level = (int(num_levels) - 2) - rev
+        flat, tflat = carry
+        return _rev_level_call(
+            kernel,
+            [
+                flat,
+                tflat,
+                cent,
+                tcent,
+                left,
+                right,
+                nbl,
+                offs[level][None],
+                (offs[level + 1] - offs[level])[None],
+            ],
+            num_programs=-(-width // k),
+            interpret=interpret,
+            backend=backend,
+            num_warps=num_warps,
+            name=f"m2m_tan_real_lanes_p{p}_k{k}_t{kt}",
+        )
+
+    _, t_flat = lax.fori_loop(
+        0,
+        int(num_levels) - 1,
+        body,
+        (jnp.asarray(packed).reshape(-1), t_flat),
+        unroll=True,
+    )
+    return t_flat.reshape(kt, nodes, C)
+
+
+def l2l_real_levels_lanes_tangent_pallas(
+    coeffs_local: Array,
+    centers: Array,
+    parent: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    t_coeffs_local: Array,
+    t_centers: Array,
+    *,
+    order: int,
+    num_levels: int,
+    level_batch_width: int,
+    k_lanes: int = 32,
+    interpret: bool = False,
+    backend: str = "triton",
+    num_warps: int = 1,
+    live_cent: bool = True,
+) -> Array:
+    """``K`` tangents of :func:`l2l_real_levels_lanes_pallas`, on its grid and level order.
+
+    Parameters
+    ----------
+    coeffs_local : Array
+        ``[nodes, C]`` packed locals after M2L.
+    centers : Array
+        ``[nodes, 3]`` expansion centres.
+    parent : Array
+        ``[nodes]`` parent per node (``-1`` at the root).
+    nodes_by_level : Array
+        Level-major node ids.
+    level_offsets : Array
+        ``[levels + 1]`` starts into ``nodes_by_level``.
+    t_coeffs_local : Array
+        ``[K, nodes, C]`` tangents of ``coeffs_local``.
+    t_centers : Array
+        ``[K, nodes, 3]`` tangents of ``centers``.
+    order : int
+        Expansion order. Static.
+    num_levels : int
+        Levels present. Static.
+    level_batch_width : int
+        Nodes per level at most. Static.
+    k_lanes : int
+        Nodes per program. Static.
+    interpret : bool
+        Pallas interpret mode.
+    backend : str
+        Pallas GPU lowering.
+    num_warps : int
+        Warps per program.
+    live_cent : bool
+        Whether ``t_centers`` can be nonzero (``False`` drops the ladder terms).
+
+    Returns
+    -------
+    Array
+        ``[K, nodes, C]`` tangent of the cascaded locals.
+    """
+    statics = dict(
+        order=order,
+        num_levels=num_levels,
+        level_batch_width=level_batch_width,
+        k_lanes=k_lanes,
+        interpret=interpret,
+        backend=backend,
+        num_warps=num_warps,
+        live_cent=live_cent,
+    )
+    arrays = (
+        coeffs_local,
+        centers,
+        parent,
+        nodes_by_level,
+        level_offsets,
+        t_coeffs_local,
+        t_centers,
+    )
+    if _eager(*arrays):
+        return _L2L_TAN_EAGER(*arrays, **statics)
+    p = int(order)
+    C = _check(p, coeffs_local)
+    dtype = coeffs_local.dtype
+    nodes = int(coeffs_local.shape[0])
+    kt = int(t_coeffs_local.shape[0])
+    t_flat = jnp.asarray(t_coeffs_local, dtype).reshape(kt, -1)
+    if int(num_levels) <= 1:
+        return t_flat.reshape(kt, nodes, C)
+    tables = _cascade_lane_tables(p)
+    k = max(1, int(k_lanes))
+    width = int(max(level_batch_width, 1))
+    cent, tcent, nbl, offs = _tangent_level_operands(
+        centers,
+        t_centers,
+        nodes_by_level,
+        level_offsets,
+        dtype=dtype,
+        width=width,
+        k_lanes=k,
+    )
+    par = jnp.asarray(parent, offs.dtype)
+    kernel = functools.partial(
+        _l2l_tan_lanes_kernel,
+        p=p,
+        k_lanes=k,
+        tables=tables,
+        k=kt,
+        live_cent=bool(live_cent),
+    )
+
+    def body(level: Array, carry: tuple[Array, Array]) -> tuple[Array, Array]:
+        flat, tflat = carry
+        return _rev_level_call(
+            kernel,
+            [
+                flat,
+                tflat,
+                cent,
+                tcent,
+                par,
+                nbl,
+                offs[level][None],
+                (offs[level + 1] - offs[level])[None],
+            ],
+            num_programs=-(-width // k),
+            interpret=interpret,
+            backend=backend,
+            num_warps=num_warps,
+            name=f"l2l_tan_real_lanes_p{p}_k{k}_t{kt}",
+        )
+
+    _, t_flat = lax.fori_loop(
+        1,
+        int(num_levels),
+        body,
+        (jnp.asarray(coeffs_local).reshape(-1), t_flat),
+        unroll=True,
+    )
+    return t_flat.reshape(kt, nodes, C)
+
+
+#: An eager call's M2M tangent cascade (as :data:`_M2M_EAGER`).
+_M2M_TAN_EAGER = jax.jit(
+    m2m_real_levels_lanes_tangent_pallas,
+    static_argnames=(
+        "order",
+        "num_internal",
+        "num_levels",
+        "level_batch_width",
+        "k_lanes",
+        "interpret",
+        "backend",
+        "num_warps",
+        "live_cent",
+    ),
+)
+#: An eager call's L2L tangent cascade (as :data:`_L2L_EAGER`).
+_L2L_TAN_EAGER = jax.jit(
+    l2l_real_levels_lanes_tangent_pallas,
+    static_argnames=(
+        "order",
+        "num_levels",
+        "level_batch_width",
+        "k_lanes",
+        "interpret",
+        "backend",
+        "num_warps",
+        "live_cent",
+    ),
+)
+
+
 __all__ = [
     "l2l_real_levels_lanes_pallas",
     "l2l_real_levels_lanes_reverse_pallas",
+    "l2l_real_levels_lanes_tangent_pallas",
     "m2m_real_levels_lanes_pallas",
     "m2m_real_levels_lanes_reverse_pallas",
+    "m2m_real_levels_lanes_tangent_pallas",
 ]
