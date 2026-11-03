@@ -218,11 +218,13 @@ def balanced_splitters_shard(
     """Cuts that split the particles evenly, for an ownership of exact ranges.
 
     The rebalance between segments under migration. ``sfc_repartition``'s sample
-    sort draws the same number of samples from every device whatever its count,
-    so on domains that are already exact Morton ranges its median sample is the
-    current cut and it moves nothing however unequal the counts are (2e6 disc +
-    bulge on two A100s: 999,037 / 1,000,963 drifted to 1,012,142 / 987,858 over
-    12 steps of fixed cuts, through two repartitions that sent 0 rows). Here the
+    sort cuts only to within a sample block (``count / num_samples`` rows); until
+    yggdrax weighted its samples by their device's count (2026-11) it drew the
+    same weight from every device whatever its count, so on domains that are
+    already exact Morton ranges its median sample was the current cut and it moved
+    nothing however unequal the counts were (2e6 disc + bulge on two A100s:
+    999,037 / 1,000,963 drifted to 1,012,142 / 987,858 over 12 steps of fixed
+    cuts, through two repartitions that sent 0 rows). Here the
     devices' live codes, in device order, ARE the sorted global sequence, so the
     cut ``j`` is the code at global rank ``j * N // ndev`` exactly: the device
     holding that rank reads it from its sorted codes, the others offer the

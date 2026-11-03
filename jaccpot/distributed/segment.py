@@ -1983,7 +1983,9 @@ class MeshSegmentRunner:
         (:func:`~jaccpot.distributed.migration.balanced_splitters_shard`) and a
         migration to them moves only the rows that change owner, through a buffer
         sized to its exact need -- not ``sfc_repartition``, whose sample sort
-        cannot rebalance exact ranges and whose exchange holds every row
+        cuts only to within a sample block (before yggdrax weighted its samples,
+        2026-11, it could not rebalance exact ranges at all) and whose exchange
+        holds every row
         (cap-sized buffers: the run's peak once the migration shrank the cross
         field's; 8e6 Plummer on two A100s, 1.75 GB per device against 1.66-1.69
         GB in the segments).
