@@ -33,6 +33,7 @@ from jaccpot.pallas.cascade_real_level import (  # noqa: E402
     m2m_real_levels_pallas_cvjp,
     m2m_real_levels_pallas_tangent,
     m2m_real_levels_pallas_tangent_jnp,
+    pallas_cascade_level_supported,
 )
 
 _TOL = {jnp.float64: 1e-11, jnp.float32: 5e-5}
@@ -175,7 +176,18 @@ _OPS = {
 }
 
 
-def _call(tree, which, order, coef, cent, t_coef, t_cent, live=(True, True), ref=False):
+def _call(
+    tree,
+    which,
+    order,
+    coef,
+    cent,
+    t_coef,
+    t_cent,
+    live=(True, True),
+    ref=False,
+    interpret=True,
+):
     op = _OPS[which][1 if ref else 0]
     topo = tree.m2m_topo() if which == "m2m" else tree.l2l_topo()
     static = tree.m2m_static(order) if which == "m2m" else tree.l2l_static(order)
@@ -186,7 +198,7 @@ def _call(tree, which, order, coef, cent, t_coef, t_cent, live=(True, True), ref
         t_coef,
         t_cent,
         **static,
-        interpret=True,
+        interpret=interpret,
         backend="triton",
         num_warps=4,
         live=live,
@@ -404,3 +416,40 @@ def test_production_lane_count(plummer_tree, which, monkeypatch):
     got = _call(plummer_tree, which, order, coef, cent, t_coef, t_cent)
     want = _call(plummer_tree, which, order, coef, cent, t_coef, t_cent, ref=True)
     assert _rel_max(got, want) < 1e-11
+
+
+def _native_or_skip(interpret: bool) -> None:
+    """Native Triton lowering needs an Ampere+ GPU; interpret mode runs anywhere."""
+    if not interpret and not pallas_cascade_level_supported():
+        pytest.skip("native Pallas GPU lowering not available here")
+
+
+#: Native tolerances: the CPU-interpret measurements (fp64 1.2e-14, fp32 4.7e-6 on
+#: the Plummer tree; the on-axis tree asserted < 1e-10 in fp64) with headroom for
+#: the GPU's fused multiply-adds.
+_NATIVE_TOL = {jnp.float64: 1e-11, jnp.float32: 5e-5}
+
+
+@pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
+@pytest.mark.parametrize("k", [1, 8])
+@pytest.mark.parametrize("which", ["m2m", "l2l"])
+@pytest.mark.parametrize("tree_name", ["plummer", "on_axis"])
+def test_native_gpu_parity(request, tree_name, which, k, dtype, monkeypatch):
+    """The Triton tangent kernels at the production 32 lanes against the reference,
+    natively, in both halves at once, on the Plummer and the on-axis trees (skips
+    without an Ampere card)."""
+    _native_or_skip(False)
+    monkeypatch.setenv("JACCPOT_CASCADE_LANES_K", "32")
+    tree = request.getfixturevalue(
+        "plummer_tree" if tree_name == "plummer" else "axis_tree"
+    )
+    order = 4
+    coef, cent, t_coef, t_cent = _inputs(tree, which, order, dtype, k, k)
+    got = _call(tree, which, order, coef, cent, t_coef, t_cent, interpret=False)
+    want = _call(tree, which, order, coef, cent, t_coef, t_cent, ref=True)
+    assert np.all(np.isfinite(np.asarray(got)))
+    assert np.linalg.norm(np.asarray(want)) > 0
+    tol = (
+        _NATIVE_TOL[dtype] if tree_name == "plummer" else max(_NATIVE_TOL[dtype], 1e-10)
+    )
+    assert _rel_max(got, want) < tol, _rel_max(got, want)

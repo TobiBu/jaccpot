@@ -28,6 +28,7 @@ from jaccpot.pallas.p2m_real_leaf import (  # noqa: E402
     p2m_real_leaves_pallas_cvjp,
     p2m_real_leaves_pallas_tangent,
     p2m_real_leaves_pallas_tangent_jnp,
+    pallas_p2m_real_leaf_supported,
 )
 from jaccpot.upward.real_tree_expansions import _p2m_leaves_real  # noqa: E402
 
@@ -341,3 +342,38 @@ def test_dead_rows_past_the_leaves_carry_nothing():
         live=(True, True, True),
     )
     np.testing.assert_allclose(got_dead, got, rtol=1e-14, atol=1e-14)
+
+
+def _native_or_skip(interpret: bool) -> None:
+    """Native Triton lowering needs an Ampere+ GPU; interpret mode runs anywhere."""
+    if not interpret and not pallas_p2m_real_leaf_supported():
+        pytest.skip("native Pallas GPU lowering not available here")
+
+
+#: Native tolerances: the CPU-interpret measurements (fp64 2.2e-16, fp32 2.0e-7)
+#: with headroom for the GPU's fused multiply-adds and reduction order.
+_NATIVE_TOL = {jnp.float64: 1e-12, jnp.float32: 2e-6}
+
+
+@pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
+@pytest.mark.parametrize("k", [1, 8])
+def test_native_gpu_parity(tree, k, dtype):
+    """The Triton tangent kernel against the reference, natively, at p5 (skips
+    without an Ampere card)."""
+    _native_or_skip(False)
+    order = 5
+    args = tree.args(dtype)
+    tangents = _tangents(args, k, order)
+    (got,) = p2m_real_leaves_pallas_tangent(
+        *args,
+        *tangents,
+        **tree.static(order),
+        leaf_width=tree.leaf,
+        interpret=False,
+        backend="triton",
+        num_warps=None,
+        live=(True, True, True),
+    )
+    (want,) = _ref(tree, args, tangents, order)
+    assert np.all(np.isfinite(np.asarray(got)))
+    assert _rel_max(got, want) < _NATIVE_TOL[dtype], _rel_max(got, want)

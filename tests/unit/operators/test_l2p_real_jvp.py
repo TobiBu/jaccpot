@@ -27,6 +27,7 @@ from jaccpot.pallas.l2p_real import (  # noqa: E402
     l2p_real_particles_pallas_tangent,
     l2p_real_particles_pallas_tangent_jnp,
 )
+from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported  # noqa: E402
 from jaccpot.runtime.dtypes import INDEX_DTYPE  # noqa: E402
 
 _ORDER = 5
@@ -293,3 +294,37 @@ def test_finite_differences_anchor_the_twin():
     h = 1e-5
     fd = (f(h) - f(-h)) / (2 * h)
     assert _rel_max(t[0], fd) < 1e-7
+
+
+def _native_or_skip(interpret: bool) -> None:
+    """Native Triton lowering needs an Ampere+ GPU; interpret mode runs anywhere."""
+    if not interpret and not pallas_m2l_real_csr_supported():
+        pytest.skip("native Pallas GPU lowering not available here")
+
+
+#: Native tolerances: the CPU-interpret measurements (fp64 3.7e-16, fp32 1.2e-7)
+#: with headroom for the GPU's fused multiply-adds and reduction order.
+_NATIVE_TOL = {jnp.float64: 1e-12, jnp.float32: 2e-6}
+
+
+@pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
+@pytest.mark.parametrize("k", [1, 8])
+def test_native_gpu_parity(k, dtype):
+    """The Triton tangent kernel (production block 128) against the reference,
+    natively, on the cell tree (skips without an Ampere card)."""
+    _native_or_skip(False)
+    args = _case(len(_CASES), dtype)
+    tangents = _tangents(args, k, 0)
+    (got,) = l2p_real_particles_pallas_tangent(
+        *args,
+        *tangents,
+        order=_ORDER,
+        block=128,
+        interpret=False,
+        backend="triton",
+        num_warps=4,
+        live=(True, True, True),
+    )
+    (want,) = _ref(args, tangents)
+    assert np.all(np.isfinite(np.asarray(got)))
+    assert _rel_max(got, want) < _NATIVE_TOL[dtype], _rel_max(got, want)
