@@ -1,0 +1,140 @@
+{
+ "_about": "Local single-card L pins (bench/dce_pins.py record --pins L1,L2,L3, root /export/scratch/tbuck/dce_pins), A100-PCIE-40GB on the shared development machine, a free card with another user's idle 416 MiB context on it (every row flagged contaminated; the numbers are clean per docs/production_2026-10.md). The H0 sanity row compares HoreKa's h0-L-main with these. No L pins were recorded locally on main 96122f63; the S9/S10 merges since 7510558a (#486-#498) were opt-in with CPU program identity 36/36 per their records, but nobody re-timed the L pins on 96122f63 locally: a HoreKa-vs-local gap of a few percent is not by itself a regression.",
+ "tags": {
+  "ab-base-20261030": {
+   "about": "jaccpot main 7510558a (worktree ~/jaccpot-ab483), yggdrax pre-#104, card 7",
+   "L1": {
+    "n": 8000000,
+    "step_ms_min": 76.177,
+    "step_ms_median": 76.446,
+    "bytes_per_particle": 315.74,
+    "far_pair_count": 39093974
+   },
+   "L2": {
+    "n": 100000000,
+    "step_ms_min": 843.547,
+    "step_ms_median": 844.581,
+    "bytes_per_particle": 256.77,
+    "far_pair_count": 402173018
+   },
+   "L3": {
+    "n": 25000000,
+    "step_ms_min": 233.535,
+    "step_ms_median": 234.765,
+    "bytes_per_particle": 257.36,
+    "far_pair_count": 94801662,
+    "force_ms_min": 99.869,
+    "force_ms_median": 100.188,
+    "rel_l2": 0.0004179115652402862
+   }
+  },
+  "ab-base-b-20261030": {
+   "about": "the same, A-vs-A control, card 7",
+   "L1": {
+    "n": 8000000,
+    "step_ms_min": 76.221,
+    "step_ms_median": 76.596,
+    "bytes_per_particle": 315.74,
+    "far_pair_count": 39093974
+   },
+   "L2": {
+    "n": 100000000,
+    "step_ms_min": 842.317,
+    "step_ms_median": 845.007,
+    "bytes_per_particle": 256.77,
+    "far_pair_count": 402173018
+   },
+   "L3": {
+    "n": 25000000,
+    "step_ms_min": 234.331,
+    "step_ms_median": 234.884,
+    "bytes_per_particle": 255.36,
+    "far_pair_count": 94801662,
+    "force_ms_min": 99.858,
+    "force_ms_median": 99.979,
+    "rel_l2": 0.0004179115652402862
+   }
+  },
+  "ab-new-20261030": {
+   "about": "jaccpot #485 on 7510558a + yggdrax #104 (= main's single-card path since), card 7",
+   "L1": {
+    "n": 8000000,
+    "step_ms_min": 76.169,
+    "step_ms_median": 76.477,
+    "bytes_per_particle": 315.74,
+    "far_pair_count": 39093974
+   },
+   "L2": {
+    "n": 100000000,
+    "step_ms_min": 844.488,
+    "step_ms_median": 844.665,
+    "bytes_per_particle": 256.77,
+    "far_pair_count": 402173018
+   },
+   "L3": {
+    "n": 25000000,
+    "step_ms_min": 235.549,
+    "step_ms_median": 236.312,
+    "bytes_per_particle": 255.36,
+    "far_pair_count": 94801662,
+    "force_ms_min": 99.857,
+    "force_ms_median": 100.053,
+    "rel_l2": 0.0004179115652402862
+   }
+  },
+  "s11s2-L-main-e82389b": {
+   "about": "jaccpot main e82389b5, card 1",
+   "L1": {
+    "n": 8000000,
+    "step_ms_min": 76.664,
+    "step_ms_median": 76.752,
+    "bytes_per_particle": 315.74,
+    "far_pair_count": 39093974
+   },
+   "L2": {
+    "n": 100000000,
+    "step_ms_min": 864.029,
+    "step_ms_median": 864.876,
+    "bytes_per_particle": 256.77,
+    "far_pair_count": 402173018
+   },
+   "L3": {
+    "n": 25000000,
+    "step_ms_min": 235.207,
+    "step_ms_median": 237.158,
+    "bytes_per_particle": 257.36,
+    "far_pair_count": 94801662,
+    "force_ms_min": 100.208,
+    "force_ms_median": 100.28,
+    "rel_l2": 0.0004179115652402862
+   }
+  },
+  "s11s2-L-main-e82389b-b": {
+   "about": "the same, A-vs-A control, card 1",
+   "L1": {
+    "n": 8000000,
+    "step_ms_min": 76.551,
+    "step_ms_median": 76.852,
+    "bytes_per_particle": 315.74,
+    "far_pair_count": 39093974
+   },
+   "L2": {
+    "n": 100000000,
+    "step_ms_min": 865.546,
+    "step_ms_median": 867.177,
+    "bytes_per_particle": 256.77,
+    "far_pair_count": 402173018
+   },
+   "L3": {
+    "n": 25000000,
+    "step_ms_min": 233.191,
+    "step_ms_median": 234.522,
+    "bytes_per_particle": 255.36,
+    "far_pair_count": 94801662,
+    "force_ms_min": 100.41,
+    "force_ms_median": 100.472,
+    "rel_l2": 0.0004179115652402862
+   }
+  }
+ }
+}
