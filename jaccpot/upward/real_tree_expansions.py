@@ -61,7 +61,7 @@ was removed in the 2026-10 cleanup, K.)
 
 from __future__ import annotations
 
-from typing import NamedTuple, Optional
+from typing import Any, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -637,6 +637,8 @@ def prepare_real_upward_sweep(
     if p < 0:
         raise ValueError("max_order must be >= 0")
 
+    from jaccpot.runtime._forward_seams import jnp_stage
+
     mass_moments = tree_mass_moments(tree, positions_sorted, masses_sorted)
     centers = jnp.asarray(mass_moments.center_of_mass, dtype=positions_sorted.dtype)
 
@@ -671,12 +673,19 @@ def prepare_real_upward_sweep(
         from jaccpot._env import env_flag
         from jaccpot.pallas.p2m_real_leaf import p2m_real_leaves_pallas_cvjp
         from jaccpot.runtime.eager_cache import eager_cached
+        from jaccpot.runtime.grad_options import forward_mode_enabled
 
         node_ranges_arr = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
+        p2m_seam: Any = p2m_real_leaves_pallas_cvjp
+        if forward_mode_enabled():
+            # ad_mode="forward": the custom_jvp sibling (the same launch)
+            from jaccpot.runtime._forward_seams import p2m_real_leaves_forward
+
+            p2m_seam = p2m_real_leaves_forward
         # eager (a prepare): the pallas_call compiled again per call unless the
         # opt-in cache is on (jaccpot.runtime.eager_cache)
         packed = eager_cached(
-            p2m_real_leaves_pallas_cvjp,
+            p2m_seam,
             p,
             num_internal,
             total_nodes,
@@ -691,7 +700,8 @@ def prepare_real_upward_sweep(
             node_ranges_arr[num_internal:],
         )
     else:
-        packed = _p2m_leaves_real(
+        packed = jnp_stage(
+            _p2m_leaves_real,
             jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
             positions_sorted,
             masses_sorted,
@@ -707,6 +717,7 @@ def prepare_real_upward_sweep(
         # vectorised level loop (66 ms on the 40-level cell tree at N=2e5)
         from jaccpot._env import env_flag
         from jaccpot.pallas.cascade_real_level import m2m_real_levels_pallas_cvjp
+        from jaccpot.runtime.grad_options import forward_mode_enabled
 
         hinted = _registered_num_levels(
             total_nodes=total_nodes, num_internal=num_internal
@@ -714,7 +725,13 @@ def prepare_real_upward_sweep(
         pallas_levels = (
             num_levels if static_num_levels is not None else (hinted or num_levels)
         )
-        packed = m2m_real_levels_pallas_cvjp(
+        m2m_seam: Any = m2m_real_levels_pallas_cvjp
+        if forward_mode_enabled():
+            # ad_mode="forward": the custom_jvp sibling (the same launch)
+            from jaccpot.runtime._forward_seams import m2m_real_levels_forward
+
+            m2m_seam = m2m_real_levels_forward
+        packed = m2m_seam(
             packed,
             centers,
             jnp.asarray(tree.left_child, dtype=INDEX_DTYPE),
@@ -731,7 +748,8 @@ def prepare_real_upward_sweep(
             4,
         )
     else:
-        packed = aggregate_m2m_real_by_level(
+        packed = jnp_stage(
+            aggregate_m2m_real_by_level,
             packed,
             centers,
             jnp.asarray(tree.left_child, dtype=INDEX_DTYPE),

@@ -16,10 +16,11 @@ Split out of ``core.py`` (Tier 1.6, A.9 seam 3); every function body is unchange
 
 from __future__ import annotations
 
+import functools
 import os
 import time
 from functools import partial
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -388,6 +389,7 @@ def _propagate_solidfmm_locals_by_level(
                 l2l_real_levels_fb_pallas_cvjp,
                 l2l_real_levels_pallas_cvjp,
             )
+            from jaccpot.runtime.grad_options import forward_mode_enabled
 
             if force_scale is not None:
                 return l2l_real_levels_fb_pallas_cvjp(
@@ -406,7 +408,13 @@ def _propagate_solidfmm_locals_by_level(
                     "triton",
                     4,
                 )
-            return l2l_real_levels_pallas_cvjp(
+            l2l_seam: Any = l2l_real_levels_pallas_cvjp
+            if forward_mode_enabled():
+                # ad_mode="forward": the custom_jvp sibling (the same launch)
+                from jaccpot.runtime._forward_seams import l2l_real_levels_forward
+
+                l2l_seam = l2l_real_levels_forward
+            return l2l_seam(
                 coeffs_local,
                 centers,
                 jnp.asarray(parent, dtype=left_internal.dtype),
@@ -916,7 +924,16 @@ def _prepare_solidfmm_downward_sweep(
                 **l2l_kwargs,
             )
         else:
-            locals_updated = _propagate_solidfmm_locals_by_level(
+            from jaccpot.runtime._forward_seams import jnp_stage
+
+            # the Pallas cascade's forward mode is its custom_jvp sibling; the
+            # jnp level loop keeps its primal under jnp_stage
+            l2l_stage = (
+                _propagate_solidfmm_locals_by_level
+                if "pallas_levels" in l2l_kwargs
+                else functools.partial(jnp_stage, _propagate_solidfmm_locals_by_level)
+            )
+            locals_updated = l2l_stage(
                 locals_updated,
                 centers,
                 left_child,
