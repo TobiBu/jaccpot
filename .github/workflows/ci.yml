@@ -193,11 +193,17 @@ jobs:
             workers: 1
             timeout: 45
           # its opt-ins (S10 follow-ups: start_force="adjoint", the plan's arrays):
-          # the forwards; the gradient comparisons are manual (as above)
-          - shard: integration-strict-grad-runner-opt
+          # the forwards; the gradient comparisons are manual (as above). One
+          # shard per file: together in one worker they passed 16 GB (#498); alone
+          # 11.9 GB / ~19 min and 12.2 GB / ~16 min (local, -n 0, 2026-11-03).
+          - shard: integration-strict-grad-start-force
             typecheck: "0"
             workers: 1
-            timeout: 60
+            timeout: 45
+          - shard: integration-strict-grad-arrays
+            typecheck: "0"
+            workers: 1
+            timeout: 40
           - shard: mutual-static-device
             typecheck: "0"
             timeout: 15
