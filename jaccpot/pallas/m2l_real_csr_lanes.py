@@ -39,7 +39,7 @@ the same program as before.
 from __future__ import annotations
 
 import functools
-from typing import Any, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -50,6 +50,7 @@ from jaxtyping import Array
 
 from jaccpot.operators.real_rotations import _real_rotation_generator_block
 from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
+from jaccpot.pallas._tangent import linearize_lanes, make_tangent_op
 from jaccpot.pallas.m2l_real_csr import (
     csr_by_target,
     m2l_real_csr_tables,
@@ -61,6 +62,8 @@ __all__ = [
     "m2l_real_csr_lanes_fb_pallas_cvjp",
     "m2l_real_csr_lanes_pallas",
     "m2l_real_csr_lanes_pallas_cvjp",
+    "m2l_real_csr_lanes_pallas_tangent",
+    "m2l_real_csr_lanes_pallas_tangent_jnp",
     "m2l_real_csr_lanes_reverse_pallas",
 ]
 
@@ -1407,3 +1410,745 @@ def _m2l_lanes_fb_cvjp_bwd(
 
 
 m2l_real_csr_lanes_fb_pallas_cvjp.defvjp(_m2l_lanes_fb_cvjp_fwd, _m2l_lanes_fb_cvjp_bwd)
+
+
+# ------------------------------------------------------------------ tangent
+# Forward mode (``ad_mode="forward"``, plan forward-mode Phase 1, track C). The
+# tangent of the local increments flows the same way as the primal -- sources into
+# each target row -- so the tangent kernel is the forward's grid and loop (one
+# program per target, ``k_lanes`` pairs per tile, the same CSR by target, the same
+# accumulation order) with the pair body linearised in-kernel
+# (:func:`~jaccpot.pallas._tangent.linearize_lanes`): the pair's primal
+# intermediates once, then ``K`` applications of its linear map. No transposed
+# list, no by-source sort, no symmetric requirement (those are the reverse's).
+
+
+def _m2l_pair_tangent_lanes(
+    keys: list,
+    vs: tuple,
+    delta3: tuple,
+    tvs: Optional[list],
+    tdeltas: Optional[list],
+    valid: Array,
+    *,
+    p: int,
+    tables: dict,
+) -> list:
+    """The ``K`` tangents of one tile of pairs, on-axis lanes given the analytic term.
+
+    The tangent of :func:`_m2l_lane_pair` with respect to the source multipole
+    (linear) and the displacement ``delta = c_t - c_s``. :func:`_m2l_lane_pair`
+    reaches ``dx`` and ``dy`` only through ``rho`` and the azimuth, so its
+    linearisation gives a zero transverse derivative on the axis and a
+    cancellation-dominated one just off it. In the band ``rho^2 <= eps r^2``,
+    ``z != 0`` (the band of :func:`jaccpot.operators._transverse_degeneracy_jvp.split_transverse_tangent`)
+    the transverse tangent is withdrawn from the polar route and replaced by the
+    commutator of formula (2)/(3) there, applied (not transposed: the reverse's
+    :func:`_on_axis_pair_cotangent` is its transpose)::
+
+        dF . (tx, ty) = (tx / z) [G_loc^y F0 - F0 G_mp^y] v
+                      - (ty / z) [G_loc^x F0 - F0 G_mp^x] v
+
+    ``F0 v`` is the pair's primal output; ``F0 G v`` is the pair evaluated on the
+    generator image of ``v`` (the pair is linear in the multipole). The two
+    commutator images are shared by the ``K`` tangents and computed only for a tile
+    that has an on-axis lane.
+
+    Parameters
+    ----------
+    keys : list
+        The ``(degree, m)`` keys, in the order of ``vs``.
+    vs : tuple
+        Source multipoles per key, lane vectors.
+    delta3 : tuple
+        ``(dx, dy, dz)`` lane vectors, target minus source (padding lanes at
+        ``(0, 0, 1)``).
+    tvs : Optional[list]
+        Per tangent, the multipole tangents per key (a tuple of lane vectors);
+        ``None`` when the multipole tangent is known zero.
+    tdeltas : Optional[list]
+        Per tangent, ``(tdx, tdy, tdz)``; ``None`` when the centre tangent is known
+        zero.
+    valid : Array
+        Lane mask of real pairs.
+    p : int
+        Order. Static.
+    tables : dict
+        :func:`_lane_tables`. Static.
+
+    Returns
+    -------
+    list
+        Per tangent, the local tangents per key (a tuple of lane vectors), NOT
+        masked by ``valid``.
+    """
+    dx, dy, dz_ = delta3
+
+    def pair(v: tuple, ax: Array, ay: Array, az: Array) -> tuple:
+        w = _m2l_lane_pair(
+            dict(zip(keys, v)), ax, ay, az, p=p, tables=tables, safe=True
+        )
+        return tuple(w[key] for key in keys)
+
+    if tdeltas is None:
+        assert tvs is not None
+        _, lin_v = linearize_lanes(lambda v: pair(v, dx, dy, dz_), (vs,))
+        return [lin_v(tv) for tv in tvs]
+    if tvs is None:
+        w, lin_d = linearize_lanes(lambda a, b, c: pair(vs, a, b, c), (dx, dy, dz_))
+
+        def tangent(k: int, ax: Array, ay: Array, az: Array) -> tuple:
+            return lin_d(ax, ay, az)
+
+    else:
+        tvs_live = tvs
+        w, lin_vd = linearize_lanes(pair, (vs, dx, dy, dz_))
+
+        def tangent(k: int, ax: Array, ay: Array, az: Array) -> tuple:
+            return lin_vd(tvs_live[k], ax, ay, az)
+
+    rho2 = dx * dx + dy * dy
+    epsilon = float(jnp.finfo(dx.dtype).eps)
+    on_axis = valid & (rho2 <= epsilon * (rho2 + dz_ * dz_)) & (dz_ != 0)
+
+    def _commutators() -> tuple[tuple, tuple]:
+        def one(g_in: list, g_out: list) -> tuple:
+            image_out = _bapply_lanes(dict(zip(keys, w)), g_out, transpose=False, p=p)
+            image_in = _bapply_lanes(dict(zip(keys, vs)), g_in, transpose=False, p=p)
+            f_image = pair(tuple(image_in[key] for key in keys), dx, dy, dz_)
+            return tuple(image_out[key] - f for key, f in zip(keys, f_image))
+
+        return (
+            one(tables["GmpY"], tables["GlocY"]),
+            one(tables["GmpX"], tables["GlocX"]),
+        )
+
+    zeros = tuple(jnp.zeros_like(dx) for _ in keys)
+    # a count, not `jnp.any`: Pallas Triton has no lowering for `reduce_or`
+    any_on_axis = jnp.sum(on_axis.astype(jnp.int32)) > 0
+    comm_y, comm_x = lax.cond(any_on_axis, _commutators, lambda: (zeros, zeros))
+    inverse_z = jnp.where(on_axis, 1.0 / jnp.where(on_axis, dz_, 1.0), 0.0)
+    zero = jnp.zeros_like(dx)
+    out = []
+    for k, (tdx, tdy, tdz) in enumerate(tdeltas):
+        scale_x = inverse_z * tdx
+        scale_y = inverse_z * tdy
+        routed_x = jnp.where(on_axis, zero, tdx)
+        routed_y = jnp.where(on_axis, zero, tdy)
+        tw = tangent(k, routed_x, routed_y, tdz)
+        out.append(
+            tuple(
+                t + scale_x * cy - scale_y * cx for t, cy, cx in zip(tw, comm_y, comm_x)
+            )
+        )
+    return out
+
+
+def _m2l_tangent_lanes_kernel(
+    mult_ref: KernelRef,
+    cent_ref: KernelRef,
+    src_ref: KernelRef,
+    off_ref: KernelRef,
+    cnt_ref: KernelRef,
+    tmult_ref: KernelRef,
+    tcent_ref: KernelRef,
+    out_ref: KernelRef,
+    *,
+    p: int,
+    k_lanes: int,
+    tables: dict,
+    k_tangents: int,
+    live_mult: bool,
+    live_cent: bool,
+) -> None:
+    """One program per target; ``k_lanes`` pairs per iteration; ``K`` tangents.
+
+    :func:`_m2l_lanes_kernel`'s grid, loop and accumulation order, the pair body
+    replaced by :func:`_m2l_pair_tangent_lanes`.
+
+    Parameters
+    ----------
+    mult_ref : KernelRef
+        Packed multipoles ``[n, C]``.
+    cent_ref : KernelRef
+        Padded centres ``[n, 4]``.
+    src_ref : KernelRef
+        Target-sorted sources ``[P]``.
+    off_ref : KernelRef
+        Row start per target ``[n_targets]``.
+    cnt_ref : KernelRef
+        Row length per target ``[n_targets]``.
+    tmult_ref : KernelRef
+        Multipole tangents ``[K, n, C]`` (unread when not ``live_mult``).
+    tcent_ref : KernelRef
+        Padded centre tangents ``[K, n, 4]`` (unread when not ``live_cent``).
+    out_ref : KernelRef
+        This target's local tangents ``[K, 1, C]``.
+    p : int
+        Order. Static.
+    k_lanes : int
+        Lanes per tile. Static.
+    tables : dict
+        :func:`_lane_tables`. Static.
+    k_tangents : int
+        ``K``. Static.
+    live_mult : bool
+        The multipole tangent is not known zero. Static.
+    live_cent : bool
+        The centre tangent is not known zero. Static.
+
+    Returns
+    -------
+    None
+        Writes the row's ``K`` tangents.
+    """
+    dtype = out_ref.dtype
+    packed = tables["packed"]
+    tgt = pl.program_id(0)
+    start = off_ref[tgt]
+    cnt = cnt_ref[tgt]
+    ctx = cent_ref[tgt, 0]
+    cty = cent_ref[tgt, 1]
+    ctz = cent_ref[tgt, 2]
+    lane = lax.broadcasted_iota(jnp.int32, (k_lanes,), 0)
+    n_tiles = (cnt + (k_lanes - 1)) // k_lanes
+    keys = [(ell, m) for ell in range(p + 1) for m in range(-ell, ell + 1)]
+    n_keys = len(keys)
+    acc0 = tuple(jnp.zeros((k_lanes,), dtype) for _ in range(k_tangents * n_keys))
+    # the target's centre tangents, once per program
+    ttc: list = []
+    if live_cent:
+        ttc = [tuple(tcent_ref[k, tgt, a] for a in range(3)) for k in range(k_tangents)]
+
+    def body(t: Array, accs: tuple[Array, ...]) -> tuple[Array, ...]:
+        pos = t * k_lanes + lane
+        valid = pos < cnt
+        i_safe = jnp.where(valid, start + pos, start)
+        sid = src_ref[i_safe]
+        zero = jnp.zeros((k_lanes,), dtype)
+        dx = jnp.where(valid, ctx - cent_ref[sid, 0], zero)
+        dy = jnp.where(valid, cty - cent_ref[sid, 1], zero)
+        dz_ = jnp.where(valid, ctz - cent_ref[sid, 2], jnp.ones_like(zero))
+        vs = tuple(mult_ref[sid, packed[key]] for key in keys)
+        tvs = None
+        if live_mult:
+            tvs = [
+                tuple(
+                    jnp.where(valid, tmult_ref[k, sid, packed[key]], zero)
+                    for key in keys
+                )
+                for k in range(k_tangents)
+            ]
+        tdeltas = None
+        if live_cent:
+            tdeltas = [
+                tuple(
+                    jnp.where(valid, ttc[k][a] - tcent_ref[k, sid, a], zero)
+                    for a in range(3)
+                )
+                for k in range(k_tangents)
+            ]
+        tws = _m2l_pair_tangent_lanes(
+            keys, vs, (dx, dy, dz_), tvs, tdeltas, valid, p=p, tables=tables
+        )
+        mask = valid.astype(dtype)
+        out = []
+        for k in range(k_tangents):
+            row = accs[k * n_keys : (k + 1) * n_keys]
+            out.extend(a + tw * mask for a, tw in zip(row, tws[k]))
+        return tuple(out)
+
+    accs = lax.fori_loop(0, n_tiles, body, acc0)
+    for k in range(k_tangents):
+        for i, key in enumerate(keys):
+            out_ref[k, 0, packed[key]] = jnp.sum(accs[k * n_keys + i])
+
+
+def _m2l_tangent_csr(
+    sources: Array,
+    targets: Array,
+    active_pair_count: Array,
+    *,
+    nt: int,
+    presorted: bool,
+    has_active_count: bool,
+) -> tuple[Array, Array, Array]:
+    """The forward's CSR by target: :func:`csr_by_target` with the forward's arguments.
+
+    Parameters
+    ----------
+    sources : Array
+        ``[P]`` sources.
+    targets : Array
+        ``[P]`` targets, or the row offsets with ``presorted``.
+    active_pair_count : Array
+        Live prefix length (a dummy when not ``has_active_count``).
+    nt : int
+        Target rows. Static.
+    presorted : bool
+        As the forward. Static.
+    has_active_count : bool
+        ``active_pair_count`` is real (the seam's ``None`` otherwise). Static.
+
+    Returns
+    -------
+    tuple[Array, Array, Array]
+        ``(sources_sorted, offsets, counts)``.
+    """
+    return csr_by_target(
+        sources,
+        targets,
+        total_nodes=nt,
+        active_pair_count=active_pair_count if has_active_count else None,
+        presorted=bool(presorted),
+    )
+
+
+def _m2l_tangent_impl(
+    multipoles: Array,
+    centers: Array,
+    sources: Array,
+    targets: Array,
+    active_pair_count: Array,
+    t_multipoles: Array,
+    t_centers: Array,
+    *,
+    order: int,
+    k_lanes: int = 32,
+    interpret: bool = False,
+    backend: str = "triton",
+    num_warps: int = 1,
+    n_targets: Optional[int] = None,
+    presorted: bool = False,
+    symmetric: bool = False,
+    has_active_count: bool = True,
+    live: tuple[bool, ...] = (True, True),
+) -> list:
+    """The Pallas tangent kernel for one ``K`` bucket (see :func:`m2l_real_csr_lanes_pallas_tangent`).
+
+    Parameters
+    ----------
+    multipoles : Array
+        ``[n, C]``.
+    centers : Array
+        ``[n, 3]``.
+    sources : Array
+        ``[P]``.
+    targets : Array
+        ``[P]`` (or row offsets with ``presorted``).
+    active_pair_count : Array
+        Live prefix length, or a dummy.
+    t_multipoles : Array
+        ``[K, n, C]``.
+    t_centers : Array
+        ``[K, n, 3]``.
+    order : int
+        Expansion order.
+    k_lanes : int
+        Pairs per iteration.
+    interpret : bool
+        Pallas interpret mode.
+    backend : str
+        Pallas GPU lowering.
+    num_warps : int
+        Warps per program.
+    n_targets : Optional[int]
+        Target rows (``None``: ``n``).
+    presorted : bool
+        CSR-ordered list with row offsets.
+    symmetric : bool
+        Accepted for the seam's signature; the tangent does not need it.
+    has_active_count : bool
+        ``active_pair_count`` is real.
+    live : tuple[bool, ...]
+        ``(multipoles, centers)`` tangent liveness.
+
+    Returns
+    -------
+    list
+        ``[t_locals [K, n_targets, C]]``.
+
+    Raises
+    ------
+    ValueError
+        On a shape mismatch or an ``n_targets`` outside ``[0, n]``.
+    """
+    del symmetric
+    p = int(order)
+    tables = _lane_tables(p)
+    C = tables["C"]
+    mult = jnp.asarray(multipoles)
+    dtype = mult.dtype
+    n = int(mult.shape[0])
+    if int(mult.shape[1]) != C:
+        raise ValueError(f"multipoles must have {C} coefficients for order {p}")
+    k_tan = int(t_multipoles.shape[0])
+    if tuple(t_multipoles.shape) != (k_tan, n, C) or tuple(t_centers.shape) != (
+        k_tan,
+        n,
+        3,
+    ):
+        raise ValueError(
+            "tangents must be [K, n, C] and [K, n, 3], got "
+            f"{tuple(t_multipoles.shape)} and {tuple(t_centers.shape)}"
+        )
+    nt = n if n_targets is None else int(n_targets)
+    if not (0 <= nt <= n):
+        raise ValueError(f"n_targets must lie in [0, {n}], got {nt}")
+    live_mult, live_cent = (bool(x) for x in live)
+    src_sorted, offsets, counts = _m2l_tangent_csr(
+        sources,
+        targets,
+        active_pair_count,
+        nt=nt,
+        presorted=presorted,
+        has_active_count=has_active_count,
+    )
+    if nt == 0 or int(src_sorted.shape[0]) == 0 or not (live_mult or live_cent):
+        return [jnp.zeros((k_tan, nt, C), dtype)]
+    cent_p = jnp.pad(jnp.asarray(centers, dtype), ((0, 0), (0, 1)))
+    tmult = jnp.asarray(t_multipoles, dtype)
+    tcent_p = jnp.pad(jnp.asarray(t_centers, dtype), ((0, 0), (0, 0), (0, 1)))
+    kernel = functools.partial(
+        _m2l_tangent_lanes_kernel,
+        p=p,
+        k_lanes=int(k_lanes),
+        tables=tables,
+        k_tangents=k_tan,
+        live_mult=live_mult,
+        live_cent=live_cent,
+    )
+    backend_kwargs = pallas_backend_kwargs(backend, interpret)
+    if "compiler_params" in backend_kwargs:
+        backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
+            num_warps=int(num_warps)
+        )
+
+    def bs_full(arr: Array) -> pl.BlockSpec:
+        shp = tuple(arr.shape)
+        return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
+
+    operands = [mult, cent_p, src_sorted, offsets, counts, tmult, tcent_p]
+    live_tag = ("m" if live_mult else "") + ("c" if live_cent else "")
+    out = pl.pallas_call(
+        kernel,
+        grid=(nt,),
+        in_specs=[bs_full(o) for o in operands],
+        out_specs=pl.BlockSpec((k_tan, 1, C), lambda t: (0, t, 0)),
+        out_shape=jax.ShapeDtypeStruct((k_tan, nt, C), dtype),
+        interpret=bool(interpret),
+        name=f"m2l_tan_real_csr_lanes_p{p}_k{int(k_lanes)}_K{k_tan}_{live_tag}",
+        **backend_kwargs,
+    )(*operands)
+    return [out]
+
+
+def _m2l_tangent_abstract(
+    multipoles: Any,
+    centers: Any,
+    sources: Any,
+    targets: Any,
+    active_pair_count: Any,
+    t_multipoles: Any,
+    t_centers: Any,
+    **params: Any,
+) -> list:
+    """Closed-form output shape of the M2L tangent op.
+
+    Parameters
+    ----------
+    multipoles : Any
+        ``[n, C]`` shape/dtype.
+    centers : Any
+        Unused.
+    sources : Any
+        Unused.
+    targets : Any
+        Unused.
+    active_pair_count : Any
+        Unused.
+    t_multipoles : Any
+        ``[K, n, C]`` shape/dtype.
+    t_centers : Any
+        Unused.
+    **params : Any
+        The op's parameters (``n_targets`` is read).
+
+    Returns
+    -------
+    list
+        ``[ShapeDtypeStruct((K, n_targets, C))]``.
+    """
+    del centers, sources, targets, active_pair_count, t_centers
+    n, C = (int(s) for s in multipoles.shape)
+    nt = n if params.get("n_targets") is None else int(params["n_targets"])
+    return [jax.ShapeDtypeStruct((int(t_multipoles.shape[0]), nt, C), multipoles.dtype)]
+
+
+#: Forward-mode tangent of :func:`m2l_real_csr_lanes_pallas_cvjp` (the seam table of
+#: the forward-mode plan): ``op(multipoles, centers, sources, targets,
+#: active_pair_count, t_multipoles [K, n, C], t_centers [K, n, 3], *, order,
+#: k_lanes, interpret, backend, num_warps, n_targets, presorted, symmetric,
+#: has_active_count, live) -> (t_locals [K, n_targets, C],)``. ``active_pair_count``
+#: is a dummy ``int32 [1]`` when ``has_active_count`` is False (the seam's ``None``).
+#: The reference is :func:`m2l_real_csr_lanes_pallas_tangent_jnp`.
+m2l_real_csr_lanes_pallas_tangent = make_tangent_op(
+    "m2l_real_csr_lanes",
+    _m2l_tangent_impl,
+    num_primals=5,
+    abstract_eval=_m2l_tangent_abstract,
+)
+
+
+@functools.lru_cache(maxsize=None)
+def _packed_keys(order: int) -> tuple:
+    """The ``(degree, m)`` key of each packed coefficient index.
+
+    Parameters
+    ----------
+    order : int
+        Expansion order.
+
+    Returns
+    -------
+    tuple
+        ``keys[i]`` is the key stored at packed index ``i``.
+    """
+    packed = _lane_tables(int(order))["packed"]
+    by_index = {i: key for key, i in packed.items()}
+    return tuple(by_index[i] for i in range(len(by_index)))
+
+
+def _m2l_lane_pair_packed(coeffs: Array, delta: Array, *, order: int) -> Array:
+    """:func:`_m2l_lane_pair` (guarded) on packed rows: ``[P, C], [P, 3] -> [P, C]``.
+
+    Parameters
+    ----------
+    coeffs : Array
+        ``[P, C]`` source multipoles.
+    delta : Array
+        ``[P, 3]`` target minus source centres.
+    order : int
+        Expansion order.
+
+    Returns
+    -------
+    Array
+        ``[P, C]`` local contributions, the lane kernel's arithmetic per pair.
+    """
+    p = int(order)
+    tables = _lane_tables(p)
+    keys = _packed_keys(p)
+    v = {key: coeffs[..., i] for i, key in enumerate(keys)}
+    w = _m2l_lane_pair(
+        v, delta[..., 0], delta[..., 1], delta[..., 2], p=p, tables=tables, safe=True
+    )
+    return jnp.stack([w[key] for key in keys], axis=-1)
+
+
+def _m2l_lane_pair_packed_with_axis(
+    coeffs: Array, delta: Array, *, order: int
+) -> Array:
+    """:func:`_m2l_lane_pair_packed` with the analytic transverse derivative on the axis.
+
+    Parameters
+    ----------
+    coeffs : Array
+        ``[P, C]`` source multipoles.
+    delta : Array
+        ``[P, 3]`` target minus source centres.
+    order : int
+        Expansion order.
+
+    Returns
+    -------
+    Array
+        ``[P, C]``; its ``jax.jvp`` carries formula (2)/(3) of
+        :mod:`jaccpot.operators._transverse_degeneracy_jvp` in the band.
+    """
+    from jaccpot.operators._transverse_degeneracy_jvp import (
+        with_transverse_degeneracy_jvp,
+    )
+    from jaccpot.operators.real_rotations import _M2L_TRANSVERSE_GENERATORS
+
+    rule = with_transverse_degeneracy_jvp(
+        _m2l_lane_pair_packed, generators=_M2L_TRANSVERSE_GENERATORS
+    )
+    return rule(coeffs, delta, order=int(order))
+
+
+def _m2l_tangent_twin(
+    multipoles: Array,
+    centers: Array,
+    sources: Array,
+    targets: Array,
+    active_pair_count: Array,
+    *,
+    order: int,
+    n_targets: Optional[int],
+    presorted: bool,
+    has_active_count: bool,
+) -> Callable[[Array, Array], Array]:
+    """The pure-JAX twin of the lane kernel, ``(multipoles, centers) -> locals``.
+
+    The forward's CSR by target, :func:`_m2l_lane_pair_packed_with_axis` on every
+    entry (padding entries at ``delta = (0, 0, 1)``, masked), a ``segment_sum`` by
+    target row.
+
+    Parameters
+    ----------
+    multipoles : Array
+        ``[n, C]``: fixes ``n`` and the dtype.
+    centers : Array
+        ``[n, 3]``.
+    sources : Array
+        ``[P]``.
+    targets : Array
+        ``[P]`` (or row offsets with ``presorted``).
+    active_pair_count : Array
+        Live prefix length, or a dummy.
+    order : int
+        Expansion order.
+    n_targets : Optional[int]
+        Target rows (``None``: ``n``).
+    presorted : bool
+        CSR-ordered list with row offsets.
+    has_active_count : bool
+        ``active_pair_count`` is real.
+
+    Returns
+    -------
+    Callable[[Array, Array], Array]
+        ``f(multipoles, centers) -> [n_targets, C]``.
+    """
+    del centers
+    p = int(order)
+    dtype = jnp.asarray(multipoles).dtype
+    n = int(multipoles.shape[0])
+    C = int(multipoles.shape[1])
+    nt = n if n_targets is None else int(n_targets)
+    src_sorted, offsets, counts = _m2l_tangent_csr(
+        sources,
+        targets,
+        active_pair_count,
+        nt=nt,
+        presorted=presorted,
+        has_active_count=has_active_count,
+    )
+    num = int(src_sorted.shape[0])
+    if nt == 0 or num == 0:
+        return lambda m, c: jnp.zeros((nt, C), dtype)
+
+    entry = jnp.arange(num, dtype=offsets.dtype)
+    # rows are consecutive and ordered: an entry's row is the last one starting at
+    # or before it, if the entry lies inside that row
+    row = jnp.searchsorted(offsets, entry, side="right").astype(offsets.dtype) - 1
+    row_safe = jnp.clip(row, 0, nt - 1)
+    valid = (row >= 0) & (entry < offsets[row_safe] + counts[row_safe])
+    src = jnp.where(valid, src_sorted, 0)
+    tgt = jnp.where(valid, row_safe, 0)
+    unit_z = jnp.asarray([0.0, 0.0, 1.0], dtype)
+
+    def primal(m: Array, c: Array) -> Array:
+        delta = jnp.where(valid[:, None], c[tgt] - c[src], unit_z)
+        contrib = _m2l_lane_pair_packed_with_axis(m[src], delta, order=p)
+        contrib = jnp.where(valid[:, None], contrib, 0.0)
+        return jax.ops.segment_sum(contrib, tgt, num_segments=nt)
+
+    return primal
+
+
+def m2l_real_csr_lanes_pallas_tangent_jnp(
+    multipoles: Array,
+    centers: Array,
+    sources: Array,
+    targets: Array,
+    active_pair_count: Array,
+    t_multipoles: Array,
+    t_centers: Array,
+    *,
+    order: int,
+    k_lanes: int = 32,
+    interpret: bool = False,
+    backend: str = "triton",
+    num_warps: int = 1,
+    n_targets: Optional[int] = None,
+    presorted: bool = False,
+    symmetric: bool = False,
+    has_active_count: bool = True,
+    live: tuple[bool, ...] = (True, True),
+) -> tuple[Array]:
+    """Pure-JAX reference of :data:`m2l_real_csr_lanes_pallas_tangent` (same signature).
+
+    ``jax.vmap`` over ``K`` of ``jax.jvp`` of a twin of the lane kernel: the same
+    CSR by target (:func:`csr_by_target` with the forward's arguments), the lane
+    kernel's pair arithmetic (:func:`_m2l_lane_pair`, guarded) on every entry, the
+    analytic transverse derivative on the axis
+    (:func:`~jaccpot.operators._transverse_degeneracy_jvp.with_transverse_degeneracy_jvp`
+    with the real M2L generators), and a ``segment_sum`` by target. Its primal is
+    the Pallas forward to round-off (another summation order). The parity
+    reference of the tangent kernel and track A's fallback; it materialises
+    ``[P, C]`` per tangent, so it is for tests and modest sizes.
+
+    Parameters
+    ----------
+    multipoles : Array
+        ``[n, C]``.
+    centers : Array
+        ``[n, 3]``.
+    sources : Array
+        ``[P]``.
+    targets : Array
+        ``[P]`` (or row offsets with ``presorted``).
+    active_pair_count : Array
+        Live prefix length, or a dummy.
+    t_multipoles : Array
+        ``[K, n, C]``.
+    t_centers : Array
+        ``[K, n, 3]``.
+    order : int
+        Expansion order.
+    k_lanes : int
+        Unused (the kernel's tile).
+    interpret : bool
+        Unused.
+    backend : str
+        Unused.
+    num_warps : int
+        Unused.
+    n_targets : Optional[int]
+        Target rows (``None``: ``n``).
+    presorted : bool
+        CSR-ordered list with row offsets.
+    symmetric : bool
+        Unused.
+    has_active_count : bool
+        ``active_pair_count`` is real.
+    live : tuple[bool, ...]
+        Unused (zero tangents give zero).
+
+    Returns
+    -------
+    tuple[Array]
+        ``(t_locals [K, n_targets, C],)``.
+    """
+    del k_lanes, interpret, backend, num_warps, symmetric, live
+    mult = jnp.asarray(multipoles)
+    dtype = mult.dtype
+    primal = _m2l_tangent_twin(
+        mult,
+        centers,
+        sources,
+        targets,
+        active_pair_count,
+        order=order,
+        n_targets=n_targets,
+        presorted=presorted,
+        has_active_count=has_active_count,
+    )
+    cent = jnp.asarray(centers, dtype)
+
+    def one(tm: Array, tc: Array) -> Array:
+        return jax.jvp(primal, (mult, cent), (tm.astype(dtype), tc.astype(dtype)))[1]
+
+    return (jax.vmap(one)(t_multipoles, t_centers),)
