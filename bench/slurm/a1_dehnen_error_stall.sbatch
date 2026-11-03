@@ -9,9 +9,11 @@
 #   ROWS='^stall_' sbatch bench/slurm/a1_dehnen_error_stall.sbatch     # the rows whose tag matches a regex
 #
 # Three code arms, two checkouts:
-#   base   jaccpot main (PY_BASE): the O(n^2) long-row rank -- the stall as reported
-#   net    the A1 branch (PY_A1), floor off: the long CSR rows merge-sorted (the safety net, default)
-#   floor  the A1 branch with mac_force_scale_floor 0.5 (the fix; opt-in unless the gates passed)
+#   base   jaccpot main (PY_BASE): the O(n^2) long-row rank and the NaN walk-table entries -- the stall as reported
+#   net    the A1 branch (PY_A1), its defaults: the long CSR rows merge-sorted (the safety net) AND a non-finite
+#          s_n in eq (16a)'s walk table set to 1 (the fix: the 5.3M-leaf row was a one-particle leaf whose s_5, s_6
+#          were NaN on the GPU, docs/production_2026-11.md section A1)
+#   floor  the A1 branch with mac_force_scale_floor 0.5 (opt-in; it did not bind at the stall: a control)
 # and the geometric MAC at theta 0.7 (geo07) as the fallback the plan compares against.
 #
 # Rows:

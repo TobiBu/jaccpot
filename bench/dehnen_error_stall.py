@@ -9,9 +9,9 @@ that main and the A1 branch share), reported through ``jax.debug.callback``.
 
 Arms:
 
-``error``  ``preset="galaxy"`` (eq 16a at ``adaptive_eps`` 1e-4): the stall on main;
-           with the A1 merge-sort of long CSR rows, the stall without its 124 s rank;
-``floor``  the same with ``mac_force_scale_floor`` (the A1 fix; the A1 branch only);
+``error``  ``preset="galaxy"`` (eq 16a at ``adaptive_eps`` 1e-4): the stall on main; on the
+           A1 branch, without it (long CSR rows merge-sorted, no NaN walk-table entry);
+``floor``  the same with ``mac_force_scale_floor`` (opt-in; the A1 branch only);
 ``geoTT``  the geometric Dehnen MAC at theta ``TT / 10`` (``geo07``: the fallback).
 
 Usage (one card; the restart files of the 1e8 bar disc and the 1.06e8 merger are
