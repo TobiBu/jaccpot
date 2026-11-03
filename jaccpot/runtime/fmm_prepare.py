@@ -3471,6 +3471,7 @@ class PrepareMixin(_EngineBase):
         return force_scale_floor_nodes(
             tree=tree,
             node_mass=jnp.asarray(tree_artifacts.upward.mass_moments.mass, radii.dtype),
+            node_centers=jnp.asarray(walk_geometry.center, radii.dtype),
             node_radii=radii,
             max_particle_mass=jnp.max(jnp.abs(tree_artifacts.masses_sorted)),
             gravitational_constant=float(self.G),

@@ -53,7 +53,6 @@ from yggdrax.dtypes import INDEX_DTYPE, as_index
 
 __all__ = [
     "FarForceScaleInputs",
-    "ancestor_max_by_level",
     "ancestor_sum_by_level",
     "cross_far_force_scale_own",
     "far_force_scale_from_node_totals",
@@ -274,80 +273,11 @@ def ancestor_sum_by_level(
     return state[: own.shape[0]]
 
 
-def ancestor_max_by_level(
-    own: Array,
-    left_child: Array,
-    right_child: Array,
-    parent: Array,
-    nodes_by_level: Array,
-    level_offsets: Array,
-    *,
-    num_internal: int,
-    num_levels: int,
-    level_batch_width: int,
-) -> Array:
-    """Each node's own value or the largest of its ancestors', top-down by level.
-
-    :func:`ancestor_sum_by_level` with ``max`` in place of ``+``: the same level
-    tables, the same true-parent-edge rule.
-
-    Parameters
-    ----------
-    own : Array
-        ``[total_nodes]`` per-node values.
-    left_child : Array
-        Left child per internal node, ``[num_internal]`` (``-1`` none).
-    right_child : Array
-        Right child per internal node.
-    parent : Array
-        ``[total_nodes]`` parent per node (``-1`` for the root).
-    nodes_by_level : Array
-        Internal nodes grouped by level.
-    level_offsets : Array
-        Level starts into ``nodes_by_level``.
-    num_internal : int
-        Internal node count. Static.
-    num_levels : int
-        Levels in the tables. Static.
-    level_batch_width : int
-        Slot width per level. Static.
-
-    Returns
-    -------
-    Array
-        ``[total_nodes]`` the maximum over each node's ancestor chain, the node
-        included.
-    """
-    if int(num_internal) <= 0:
-        return own
-    bw = int(max(level_batch_width, 1))
-    offsets, nodes, slot = _level_windows(nodes_by_level, level_offsets, bw)
-    left = jnp.asarray(left_child, dtype=INDEX_DTYPE)
-    right = jnp.asarray(right_child, dtype=INDEX_DTYPE)
-    par = jnp.asarray(parent, dtype=INDEX_DTYPE)
-    dead = as_index(own.shape[0])
-    low = jnp.asarray(-jnp.inf, own.dtype)
-    state = jnp.concatenate([own, jnp.full((1,), low, own.dtype)])
-
-    def body(level: Array, st: Array) -> Array:
-        level_idx = as_index(level)
-        batch, ok = _level_nodes(level_idx, offsets, nodes, slot, bw, num_internal)
-        safe = jnp.where(ok, batch, as_index(0))
-        val = jnp.where(ok, st[safe], low)
-        lc, rc = left[safe], right[safe]
-        l_ok = ok & (lc >= 0) & (par[jnp.maximum(lc, 0)] == safe)
-        r_ok = ok & (rc >= 0) & (par[jnp.maximum(rc, 0)] == safe)
-        st = st.at[jnp.where(l_ok, lc, dead)].max(val)
-        return st.at[jnp.where(r_ok, rc, dead)].max(val)
-
-    state = lax.fori_loop(0, max(int(num_levels) - 1, 0), body, state)
-    return state[: own.shape[0]]
-
-
 def force_scale_floor_nodes(
     *,
     tree: Any,
     node_mass: Array,
+    node_centers: Array,
     node_radii: Array,
     max_particle_mass: Array,
     gravitational_constant: float,
@@ -357,27 +287,30 @@ def force_scale_floor_nodes(
 ) -> Array:
     """A certified lower bound on eq (16b)'s ``f_b`` for every particle of each node.
 
-    For a node ``P`` of mass ``M_P`` whose particles lie within ``rho_P`` of its
-    centre, every particle ``b`` of ``P`` has
+    For a particle ``b`` of node ``P``, split the other sources into ``P`` itself and,
+    for every ``Q`` on ``P``'s ancestor chain (``P`` included, the root excluded),
+    ``Q``'s sibling ``S``. With ``rho`` a radius bounding a node's particles about its
+    centre ``c``,
 
-        f_b >= G (M_P - m_b) / ((4 rho_P)^2 + eps^2),
+        f_b >= G (M_P - m_b) / ((4 rho_P)^2 + eps^2)
+             + sum_Q G M_S / ((|c_S - c_Q| + rho_S + 3 rho_Q)^2 + eps^2),
 
-    and so does the fused lane's ESTIMATE of ``f_b``, not only its exact value:
-    each other particle ``a`` of ``P`` reaches ``b`` either through a near pair --
-    exactly, at ``|x_a - x_b| <= 2 rho_P`` -- or through a far pair ``(X -> B)``,
-    ``a`` in ``X``, ``b`` in ``B``, as ``G M_X / ((|c_X - c_B| + rho_B)^2 +
-    eps^2)`` (:func:`far_force_scale_own`). The walk pairs disjoint nodes only, so
-    ``X`` and ``B`` both lie inside ``P``: ``|c_X - c_B| <= 2 rho_P`` and
-    ``rho_B <= 2 rho_P``. The bound holds for ``P`` and every ancestor of the
-    node, so a node takes the largest over its ancestor chain
-    (:func:`ancestor_max_by_level`); ``m_b`` is bounded by the largest particle
-    mass.
+    and that holds for the fused lane's ESTIMATE of ``f_b``, not only its exact
+    value. Each source ``a`` reaches ``b`` either through a near pair -- exactly --
+    or through a far pair ``(X -> B)``, ``a`` in ``X``, ``b`` in ``B``, as ``G M_X /
+    ((|c_X - c_B| + rho_B)^2 + eps^2)`` (:func:`far_force_scale_own`). The walk pairs
+    disjoint nodes only, so ``X`` and ``B`` lie in the same two of the subtrees above:
+    both inside ``P`` (``|c_X - c_B| + rho_B <= 4 rho_P``), or ``X`` inside ``S`` and
+    ``B`` inside ``Q`` (``|c_X - c_B| + rho_B <= |c_S - c_Q| + rho_S + 3 rho_Q``:
+    centres lie in their node's sphere, and ``rho_B <= 2 rho_Q``). A near pair's
+    distance is below both bounds. The chain sum is :func:`ancestor_sum_by_level` of
+    each node's sibling term; ``m_b`` is bounded by the largest particle mass.
 
-    ``factor`` (at most 1) scales it below what a correct estimate already meets,
-    so on a correct estimate the floor never binds and eq (16a) decides exactly as
-    without it. Where the estimate falls below it, the estimate is wrong, and
-    ``eps * min_b f_b`` would accept almost nothing: one leaf's near row held 70 %
-    of all leaves at 1e8 (#487).
+    ``factor`` (at most 1) scales it below what a correct estimate already meets, so
+    on a correct estimate the floor never binds and eq (16a) decides exactly as
+    without it. Where the estimate falls below it, the estimate is wrong, and ``eps *
+    min_b f_b`` would accept almost nothing: one leaf's near row held 70 % of all
+    leaves at 1e8 (#487).
 
     Parameters
     ----------
@@ -385,6 +318,8 @@ def force_scale_floor_nodes(
         The step's tree (topology and level tables).
     node_mass : Array
         ``[total_nodes]`` node masses.
+    node_centers : Array
+        ``[total_nodes, 3]`` the centres the radii are taken about.
     node_radii : Array
         ``[total_nodes]`` radii bounding each node's particles about its centre
         (the walk geometry's, as eq (16b)'s far half uses).
@@ -402,8 +337,7 @@ def force_scale_floor_nodes(
     Returns
     -------
     Array
-        ``[total_nodes]`` the floor, in ``node_mass``'s dtype; zero where no
-        ancestor holds more than one particle's mass.
+        ``[total_nodes]`` the floor, in ``node_mass``'s dtype.
     """
     from yggdrax.tree import get_level_offsets, get_nodes_by_level
 
@@ -411,21 +345,39 @@ def force_scale_floor_nodes(
 
     mass = jnp.asarray(node_mass)
     dtype = mass.dtype
+    centers = jnp.asarray(node_centers, dtype)
     rho = jnp.asarray(node_radii, dtype)
-    reach = 4.0 * rho
-    own = (
-        jnp.asarray(float(factor) * float(gravitational_constant), dtype)
-        * jnp.maximum(mass - jnp.asarray(max_particle_mass, dtype), 0.0)
-        / (reach * reach + jnp.asarray(softening_sq, dtype))
-    )
+    eps2 = jnp.asarray(softening_sq, dtype)
+    g = jnp.asarray(float(factor) * float(gravitational_constant), dtype)
     total = int(jnp.asarray(tree.parent).shape[0])
     num_internal = int(jnp.asarray(tree.left_child).shape[0])
+    left = jnp.asarray(tree.left_child, dtype=INDEX_DTYPE)
+    right = jnp.asarray(tree.right_child, dtype=INDEX_DTYPE)
+    parent = jnp.asarray(tree.parent, dtype=INDEX_DTYPE)
+    node = jnp.arange(num_internal, dtype=INDEX_DTYPE)
+    # each child's term from its sibling, on true parent edges only
+    lc, rc = jnp.maximum(left, 0), jnp.maximum(right, 0)
+    pair = (left >= 0) & (right >= 0) & (parent[lc] == node) & (parent[rc] == node)
+    gap = jnp.sqrt(jnp.sum((centers[lc] - centers[rc]) ** 2, axis=1))
+
+    def term(src: Array, dst: Array) -> Array:
+        reach = gap + rho[src] + 3.0 * rho[dst]
+        return jnp.where(pair, g * mass[src] / (reach * reach + eps2), 0.0)
+
+    dead = as_index(total)
+    sib = (
+        jnp.zeros((total + 1,), dtype)
+        .at[jnp.where(pair, lc, dead)]
+        .set(term(rc, lc))
+        .at[jnp.where(pair, rc, dead)]
+        .set(term(lc, rc))[:total]
+    )
     offsets = get_level_offsets(tree)
-    return ancestor_max_by_level(
-        own,
-        jnp.asarray(tree.left_child, dtype=INDEX_DTYPE),
-        jnp.asarray(tree.right_child, dtype=INDEX_DTYPE),
-        jnp.asarray(tree.parent, dtype=INDEX_DTYPE),
+    chain = ancestor_sum_by_level(
+        sib,
+        left,
+        right,
+        parent,
         jnp.asarray(get_nodes_by_level(tree), dtype=INDEX_DTYPE),
         jnp.asarray(offsets, dtype=INDEX_DTYPE),
         num_internal=num_internal,
@@ -434,6 +386,13 @@ def force_scale_floor_nodes(
             offsets, total_nodes=total, num_internal=num_internal
         ),
     )
+    reach = 4.0 * rho
+    inside = (
+        g
+        * jnp.maximum(mass - jnp.asarray(max_particle_mass, dtype), 0.0)
+        / (reach * reach + eps2)
+    )
+    return chain + inside
 
 
 def far_force_scale_own(
