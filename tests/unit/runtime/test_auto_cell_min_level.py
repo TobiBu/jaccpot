@@ -47,9 +47,7 @@ def _grid(level: int, per_cell: int, seed: int = 0) -> np.ndarray:
     # inside each cell, away from its faces; the box corners pin the bounds
     offsets = rng.uniform(0.25, 0.75, size=(cells.shape[0] * per_cell, 3))
     pos = (np.repeat(cells, per_cell, axis=0) + offsets) / side
-    return np.concatenate([pos, [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]]).astype(
-        np.float32
-    )
+    return np.concatenate([pos, [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]]).astype(np.float32)
 
 
 def test_the_occupied_cells_are_numpys():
@@ -85,7 +83,9 @@ def test_the_occupied_cells_are_numpys():
         (0, 10, 64, 0),
     ],
 )
-def test_the_level_whose_occupied_cells_hold_nearest_a_leaf(level, per_cell, leaf, want):
+def test_the_level_whose_occupied_cells_hold_nearest_a_leaf(
+    level, per_cell, leaf, want
+):
     pos = jnp.asarray(_grid(level, per_cell))
     got = auto_cell_min_level(pos, leaf_size=leaf, bounds=_infer_bounds(pos))
     assert got == want
