@@ -98,7 +98,30 @@ and the 1024 particles with the smallest carried f_b.
 These rows ran with the build probe on and one step per segment, which add their own costs (0.93 s per step is the
 1e8 disc's unprobed rate). They show that the stall is gone; they are not timings.
 
-<!-- A1_H3H4 -->
+**The whole stalled segment and the merger, with the guard** (bfa876c8, the same probe, contended):
+
+| run | longest near row per build | near entries | per step | peak |
+| --- | --- | --- | --- | --- |
+| bar disc, steps 31-40 from `restart_3.npz` | 166-190 in all 10 builds | 115.6-115.7M | 1.19-2.39 s | 20.27 GiB |
+| merger, steps 1361-1365 from `restart_final_136.npz` | 545-591 in all 5 (without the guard: 4.75M in 4) | 117.9M (127.5M) | 1.27-3.65 s | 20.86 GiB |
+| merger with the floor at 0.5, no guard | 4.75M in 4 of 5, as without the floor | 127.5M | | |
+
+### Gates
+
+| gate | result |
+| --- | --- |
+| small reproduction fixed by each fix | the NaN needs the GPU's flush-to-zero; on CPU: the guard test (inf/NaN injected, finite rows bitwise, eager and jitted), the floor's injected-f_b flood (878 -> 116 of 873 leaves), the hub-row merge sort |
+| the stalling 1e8 restart at about the pre-stall wall time | yes, with either change; the stalled steps take what the others take (tables above; contended) |
+| accuracy no worse than geometric theta 0.7 at equal time | rel-L2 / p99 / max 1.26x / 1.29x / 1.54x lower from half the far pairs; HoreKa times pending |
+| safety net: CSR arrays bitwise | it is a sort; interpret-mode tests against the NumPy directed sort; CPU identity 36/36 at 79e42475 (the CPU lane does not lower the Pallas placement) |
+| the guard: bitwise where finite | CPU identity at bfa876c8: 32/36 identical; the 4 `dehnen_error` variants move their compiled runners' TEXT, every array bitwise (1302 arrays) |
+| the floor: bitwise where it does not bind | CPU lane test bitwise; at #487 it never bound |
+| S12 mesh `dehnen_error` gates | `tests/distributed/test_mesh_segment_dehnen_error.py` 4/4 (CPU, 2 devices) |
+| GPU pins S1, S6, S1p/t/e/x/g, G1 | <!-- PINS --> |
+
+Other tests: the numeric goldens (`tests/characterization`) 21/21; `tests/unit/runtime` and `tests/unit/operators`
+(not slow) 997 passed, 139 skipped; the new and touched unit files also under `JACCPOT_RUNTIME_TYPECHECK=1`. The
+constructor-state golden gained one line, `mac_force_scale_floor: None`.
 
 ### Restoring at 1e8: a 14.9 GiB block the BFC allocator could not place
 
