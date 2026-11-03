@@ -74,6 +74,8 @@ _NORNAX_ADAPTER = "tests/integration/test_mutual_fmm_nornax.py"
 _NORNAX_DISTRIBUTED = "tests/integration/test_mutual_distributed_nornax.py"
 _SEGMENT_CRITERION = "tests/distributed/test_mesh_segment_dehnen_error.py"
 _SEGMENT_MIGRATION = "tests/distributed/test_mesh_segment_migration_fused.py"
+# the multi-GPU mode as N processes x 1 device against 1 process x N devices (M2)
+_MULTIPROCESS = "tests/distributed/test_multiprocess_runtime.py"
 # the mesh potential and the production runner's multi-GPU mode on the fused force
 # (S11 session 2, tracks E and D): ~11 min of compilation between them on CI
 _SEGMENT_RUNNER_FILES = (
@@ -201,7 +203,8 @@ SHARDS: dict[str, list[str]] = {
         "tests/distributed",
         *_UNIT_MULTI_DEVICE,
         "-m",
-        "not distributed_criterion and not distributed_segment",
+        "not distributed_criterion and not distributed_segment"
+        " and not distributed_multiprocess",
     ],
     "distributed-criterion": ["tests/distributed", "-m", "distributed_criterion"],
     # the fused mesh lane's segment runner (S11): minutes of compile per case
@@ -223,6 +226,9 @@ SHARDS: dict[str, list[str]] = {
     # session 2, tracks E and D): with them the segment job took ~24 of its 40
     # minutes (1,390 s of calls on this host at -n 1, ~1.2x that on CI)
     "distributed-segment-runner": [*_SEGMENT_RUNNER_FILES, "-m", "distributed_segment"],
+    # the multi-GPU mode as N localhost processes (M2): child processes against
+    # one process with N forced devices; its own job (no forced devices needed)
+    "distributed-multiprocess": [_MULTIPROCESS, "-m", "distributed_multiprocess"],
 }
 
 # The two jobs that do not run on every pull request. Each costs minutes of
@@ -236,6 +242,7 @@ GATED_SHARDS: tuple[str, ...] = (
     "distributed-segment-criterion",
     "distributed-segment-migration",
     "distributed-segment-runner",
+    "distributed-multiprocess",
     "nornax-distributed",
 )
 GATED_PATHS: tuple[str, ...] = (
