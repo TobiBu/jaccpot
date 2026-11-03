@@ -638,7 +638,7 @@ class GradientPlan:
             or (boundary is None) != (self.boundary is None)
         ):
             raise ValueError(
-                "arrays do not match this plan: take them from this plan's " "arrays()"
+                "arrays do not match this plan: take them from its arrays()"
             )
         params = jax.tree_util.tree_unflatten(
             treedef, [leaf if new is None else new for leaf, new in zip(leaves, given)]
