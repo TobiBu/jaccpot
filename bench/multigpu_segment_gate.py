@@ -68,7 +68,10 @@ import numpy as np  # noqa: E402
 
 jax.config.update("jax_enable_x64", True)
 
-_DISC_IC = "/export/scratch/tbuck/odisseo_ic/disk_bulge_25m.npz"
+#: the 25M disc+bulge IC; DISC_IC (or --disc-ic) on any other machine
+_DISC_IC = os.environ.get(
+    "DISC_IC", "/export/scratch/tbuck/odisseo_ic/disk_bulge_25m.npz"
+)
 
 
 def _args() -> argparse.Namespace:

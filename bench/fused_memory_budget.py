@@ -65,7 +65,10 @@ sys.path.insert(
     ),
 )
 
-_DISC_IC = "/export/scratch/tbuck/odisseo_ic/disk_bulge_25m.npz"
+#: the 25M disc+bulge IC; DISC_IC on any other machine (as bench/s1b_mosaic_l2p.py)
+_DISC_IC = os.environ.get(
+    "DISC_IC", "/export/scratch/tbuck/odisseo_ic/disk_bulge_25m.npz"
+)
 _CAP_VARS = (
     "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP",
     "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP",
