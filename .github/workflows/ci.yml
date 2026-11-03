@@ -191,18 +191,23 @@ jobs:
           - shard: integration-strict-grad-runner
             typecheck: "0"
             workers: 1
+            jax_cache: "off"
             timeout: 45
           # its opt-ins (S10 follow-ups: start_force="adjoint", the plan's arrays):
           # the forwards; the gradient comparisons are manual (as above). One
           # shard per file: together in one worker they passed 16 GB (#498); alone
-          # 11.9 GB / ~19 min and 12.2 GB / ~16 min (local, -n 0, 2026-11-03).
+          # 11.9 GB / ~19 min and 12.2 GB / ~16 min (local, -n 0, 2026-11-03). Cold
+          # (`jax_cache: "off"`, see `env`): warm, their forwards alone peak at
+          # 18.4 / 19.0 GB.
           - shard: integration-strict-grad-start-force
             typecheck: "0"
             workers: 1
+            jax_cache: "off"
             timeout: 45
           - shard: integration-strict-grad-arrays
             typecheck: "0"
             workers: 1
+            jax_cache: "off"
             timeout: 40
           - shard: mutual-static-device
             typecheck: "0"
@@ -243,6 +248,15 @@ jobs:
       # compiles become warm-cache hits (conftest enables the disk cache only
       # when this dir is set).
       JACCPOT_TEST_JAX_CACHE_DIR: ${{ github.workspace }}/.jax_cache
+      # `jax_cache: "off"` (per shard): compile cold, no disk cache. For the
+      # production-runner gradient forwards a WARM cache costs more memory than a
+      # cold compile: test_the_gradient_runs_forward_is_the_runners[dehnen_error_nofield]
+      # alone peaks at 18.4 GB loading its interpret-mode CPU executables from the
+      # cache, 12.8 GB compiling them (the shard: 12.8 cold / 18.4 warm, local,
+      # 2026-11-03, identical on main and #498). It passed only while each run
+      # restored a cache keyed on other sources (mostly cold), and was OOM-killed
+      # twice in a row once it restored its own.
+      JACCPOT_TEST_NO_JAX_CACHE: ${{ matrix.jax_cache == 'off' && '1' || '0' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -252,6 +266,7 @@ jobs:
           python-version: "3.13"
           cache: pip
       - name: Restore JAX compilation cache
+        if: matrix.jax_cache != 'off'
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.jax_cache
