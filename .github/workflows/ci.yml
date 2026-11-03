@@ -209,6 +209,22 @@ jobs:
             workers: 1
             jax_cache: "off"
             timeout: 40
+          # Forward mode (ad_mode="forward"): the F gates through the production
+          # lane -- jvp / jacfwd / linearize programs of the 3-step rollout and a
+          # two-segment GradientPlan, every Pallas kernel in interpret mode. The
+          # whole file in one process: 69 min, 15.6 GB RSS (local, -n 0,
+          # 2026-11-03); the gates that also compile the rollout's REVERSE
+          # gradient (F2, F5's jacrev) are a shard of their own. MEASURED_FORWARD
+          - shard: integration-strict-grad-forward
+            typecheck: "0"
+            workers: 1
+            jax_cache: "off"
+            timeout: 90
+          - shard: integration-strict-grad-forward-adjoint
+            typecheck: "0"
+            workers: 1
+            jax_cache: "off"
+            timeout: 75
           - shard: mutual-static-device
             typecheck: "0"
             timeout: 15

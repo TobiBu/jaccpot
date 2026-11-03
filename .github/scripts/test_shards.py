@@ -60,6 +60,7 @@ _RUNTIME_MAC_FILES = (
 # (minutes each on CPU); with them `unit-runtime` was cancelled at its cap or
 # OOM-killed (2026-10-22, PR #443), so they are a shard of their own.
 _RUNTIME_GRAD_FILES = (
+    "tests/unit/runtime/test_forward_seams.py",
     "tests/unit/runtime/test_l2p_particle_major_reverse.py",
     "tests/unit/runtime/test_large_n_far_chain_grad.py",
     "tests/unit/runtime/test_large_n_grad_reverse_path.py",
@@ -136,6 +137,22 @@ _STRICT_GRAD_RUNNER_START_FORCE = (
     "tests/integration/strict/test_runner_gradient_start_force.py"
 )
 _STRICT_GRAD_RUNNER_ARRAYS = "tests/integration/strict/test_runner_gradient_arrays.py"
+# Forward mode (ad_mode="forward") through the production lane: the F gates (jvp
+# primal bitwise, the adjoint identity against the reverse path, finite
+# differences, jacfwd == jacrev, NaN on overflow, linearize == jvp). Forward and
+# reverse programs of the whole 3-step rollout in interpret mode. The whole file
+# in one process peaked at 15.6 GB RSS (CPU, 2026-11-03, 69 min at -n 0): the two
+# gates that compile a REVERSE gradient of the rollout as well (F2's adjoint
+# identity, F5's jacrev) run in a shard of their own.
+_STRICT_GRAD_FORWARD = "tests/integration/strict/test_forward_mode.py"
+_STRICT_GRAD_FORWARD_ADJOINT: tuple[str, ...] = tuple(
+    f"{_STRICT_GRAD_FORWARD}::{test}"
+    for test in (
+        "test_the_tangent_is_the_adjoints_transpose[plummer]",
+        "test_the_tangent_is_the_adjoints_transpose[dehnen_error]",
+        "test_jacfwd_over_parameters_is_jacrev",
+    )
+)
 _STRICT_GRAD_RUNNER_OPT: tuple[str, ...] = (
     _STRICT_GRAD_RUNNER_START_FORCE,
     _STRICT_GRAD_RUNNER_ARRAYS,
@@ -167,6 +184,7 @@ SHARDS: dict[str, list[str]] = {
                 _STRICT_GRAD_ROLLOUT,
                 _STRICT_GRAD_RUNNER,
                 *_STRICT_GRAD_RUNNER_OPT,
+                _STRICT_GRAD_FORWARD,
             )
         ),
     ],
@@ -180,6 +198,11 @@ SHARDS: dict[str, list[str]] = {
     "integration-strict-grad-runner": [_STRICT_GRAD_RUNNER],
     "integration-strict-grad-start-force": [_STRICT_GRAD_RUNNER_START_FORCE],
     "integration-strict-grad-arrays": [_STRICT_GRAD_RUNNER_ARRAYS],
+    "integration-strict-grad-forward": [
+        _STRICT_GRAD_FORWARD,
+        *(f"--deselect={node}" for node in _STRICT_GRAD_FORWARD_ADJOINT),
+    ],
+    "integration-strict-grad-forward-adjoint": list(_STRICT_GRAD_FORWARD_ADJOINT),
     "mutual-static-device": [_MUTUAL_STATIC_DEVICE],
     "unit": [
         "tests/unit",
