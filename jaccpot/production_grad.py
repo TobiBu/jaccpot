@@ -806,9 +806,13 @@ class _Recorder:
     ----------
     runner : Any
         The :class:`~jaccpot.production.ProductionRunner`.
+    freeze_cache : Optional[dict]
+        The freeze step's compiled rebuild programs, by the provider's compile key,
+        shared with other pre-passes of this runner (``gradient_plan(...,
+        freeze_cache=)``); ``None``: this pre-pass's own (compiled again per call).
     """
 
-    def __init__(self, runner: Any) -> None:
+    def __init__(self, runner: Any, freeze_cache: Optional[dict] = None) -> None:
         self.runner = runner
         self.engine = runner.engine
         self.segments: list = []
@@ -821,6 +825,8 @@ class _Recorder:
         self._start_f_b: Optional[np.ndarray] = None
         #: the gradient statics frozen so far, by provider compile key
         self._frozen: dict = {}
+        #: the freeze step's rebuild programs, by provider compile key
+        self._rebuild_programs: dict = {} if freeze_cache is None else freeze_cache
 
     def begin(
         self,
@@ -937,7 +943,12 @@ class _Recorder:
         engine as it found it. ``strict_run_v2`` makes a new provider object every
         call, so the statics are kept by the provider's compile key (the template,
         the walk caps, the depth bound: what they depend on), and a segment whose
-        key an earlier one froze rebuilds and compiles nothing.
+        key an earlier one froze rebuilds and compiles nothing. The rebuild's
+        program is kept by the same key and engine (``freeze_cache``: across
+        pre-passes too), so a pre-pass whose key an earlier one compiled freezes
+        the statics on this start's own eager topology without compiling (the
+        freeze's trace and compile were 35 s, most of a warm pre-pass; its run
+        0.1 s: CPU interpret, N = 512, ``dehnen_error``, 2026-11-01).
 
         Parameters
         ----------
@@ -961,11 +972,9 @@ class _Recorder:
             state = jnp.asarray(self._start_state)
             f_b_in = None if f_b is None else jnp.asarray(f_b)
             with _trace_state_kept(self.engine):
-                topology = jax.jit(
-                    lambda x, m, s: provider.rebuild(
-                        x, m, force_scale=s, keep_far_list=True
-                    )
-                )(state[:, 0], self._masses, f_b_in)
+                topology = self._rebuild_program(key, provider)(
+                    state[:, 0], self._masses, f_b_in
+                )
                 statics = provider.with_grad_plan(topology).grad_statics
             self._frozen[key] = statics
         return type(provider)(
@@ -977,6 +986,34 @@ class _Recorder:
             template=provider.template,
             grad_statics=statics,
         )
+
+    def _rebuild_program(self, key: tuple, provider: Any) -> Callable[..., Any]:
+        """The jitted ``provider.rebuild(..., keep_far_list=True)`` of ``key``.
+
+        Cached by the provider's compile key, which holds everything the traced
+        rebuild reads at trace time apart from the engine (``provider.key()``), and
+        by the engine itself: an entry of another engine is not reused.
+
+        Parameters
+        ----------
+        key : tuple
+            ``provider.key()``.
+        provider : Any
+            The provider to trace it with when no program is cached.
+
+        Returns
+        -------
+        Callable[..., Any]
+            ``program(positions, masses, force_scale) -> FusedTopology``.
+        """
+        entry = self._rebuild_programs.get(key)
+        if entry is not None and entry[0] is self.engine:
+            return entry[1]
+        program = jax.jit(
+            lambda x, m, s: provider.rebuild(x, m, force_scale=s, keep_far_list=True)
+        )
+        self._rebuild_programs[key] = (self.engine, program)
+        return program
 
     def plan(self, forward: Any) -> GradientPlan:
         """The :class:`GradientPlan` of the pre-pass.

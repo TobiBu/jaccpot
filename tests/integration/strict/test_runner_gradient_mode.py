@@ -224,6 +224,44 @@ def test_the_gradient_runs_forward_is_the_runners(name):
         assert _bitwise(out.aux[0], forward.handle.force_scale) == 0
 
 
+@pytest.mark.xdist_group("runner_gradient_freeze_cache")
+def test_a_shared_freeze_cache_compiles_the_freeze_once(monkeypatch):
+    """``gradient_plan(..., freeze_cache=)`` (opt-in, S10: one plan per shooting
+    segment, re-planned many times): the first pre-pass with the cache compiles the
+    freeze rebuild and keeps it; a second one traces no rebuild at all (its scans
+    are the engine's, cached by the same key). Both plans are the plan without the
+    cache: the same start, plan snapshot, frozen statics and forward, bitwise."""
+    from jaccpot.runtime.fused_provider import FusedForceProvider
+
+    runner = _runner("plummer", g._solver("dehnen"))
+    x, v, m, _ = g._system()
+    state = jnp.stack([x, v], axis=1)
+    kw = dict(dt=g.DT, num_steps=SEGMENT, external_params={"k": g.K_EXT})
+    plain = runner.gradient_plan(state, m, **kw)
+    cache: dict = {}
+    first = runner.gradient_plan(state, m, freeze_cache=cache, **kw)
+    assert len(cache) == 1
+    entry = next(iter(cache.values()))
+    assert entry[0] is runner.engine
+    traced: list = []
+    rebuild = FusedForceProvider.rebuild
+
+    def counting(self, *args, **kwargs):
+        traced.append(1)
+        return rebuild(self, *args, **kwargs)
+
+    monkeypatch.setattr(FusedForceProvider, "rebuild", counting)
+    second = runner.gradient_plan(state, m, freeze_cache=cache, **kw)
+    assert traced == [] and next(iter(cache.values())) is entry
+    want = plain.segments[0]
+    for plan in (first, second):
+        (seg,) = plan.segments
+        assert (seg.kind, seg.retries) == (want.kind, want.retries) == ("start", 0)
+        assert seg.plan == want.plan
+        assert seg.provider.grad_statics == want.provider.grad_statics
+        assert _bitwise(plan.forward.state, plain.forward.state) == 0
+
+
 @_MANUAL
 @pytest.mark.parametrize("name", _lanes("plummer", "dehnen_error"))
 def test_the_gradient_is_finite_and_repeats_bitwise(name):

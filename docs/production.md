@@ -367,6 +367,10 @@ res.value, res.grads["positions"], res.result        # 2. the gradient run
    records the successful attempt's start, host-side, only while the recorder is on).
    Each segment's provider gets the gradient plan's statics frozen on a rebuild at its
    start. Cost: one host copy of the state per segment, one rebuild program per plan.
+   `gradient_plan(..., freeze_cache={})` (opt-in, S10) keeps that program across the
+   pre-passes of one runner, by compile key: a caller that re-plans often (multiple
+   shooting, a plan per segment) compiles it once (a warm 2-step pre-pass 32 -> 5 s,
+   CPU interpret, N = 512, `dehnen_error`).
 2. **The gradient run is one jitted program**: a chain of `differentiable_rollout`
    calls over each segment's `differentiable_step`, each segment traced under its own
    plan. Only statics change between segments, so the chain is one pure function of

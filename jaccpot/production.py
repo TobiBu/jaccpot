@@ -1806,6 +1806,7 @@ class ProductionRunner:
         force_params: Any = None,
         external_params: Any = None,
         restart_from: Any = None,
+        freeze_cache: Optional[dict] = None,
     ) -> Any:
         """The forward pre-pass of a gradient run: :meth:`run`, recorded per segment.
 
@@ -1841,6 +1842,14 @@ class ProductionRunner:
         restart_from : Any
             As :meth:`run`: the gradient run then starts from the restart's state,
             and its first segment from the restored acceleration and f_b.
+        freeze_cache : Optional[dict]
+            Opt-in: a dict the caller keeps across pre-passes of this runner (e.g.
+            one per multiple-shooting segment, re-planned many times). Each
+            segment's gradient statics are frozen on a rebuild at its start, whose
+            program is then compiled once per compile key and kept here instead of
+            once per call (a warm 2-step pre-pass: 32 -> 5 s, CPU interpret,
+            N = 512, ``dehnen_error``). The plans are the same. ``None`` (the
+            default): compiled per call, as before.
 
         Returns
         -------
@@ -1862,7 +1871,7 @@ class ProductionRunner:
         from jaccpot.production_grad import _Recorder
 
         engine = self.engine
-        recorder = _Recorder(self)
+        recorder = _Recorder(self, freeze_cache=freeze_cache)
         had_flag = "_strict_particle_record_start" in vars(engine)
         flag = getattr(engine, "_strict_particle_record_start", None)
         self._grad_recorder = recorder

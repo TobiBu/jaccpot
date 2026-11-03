@@ -2596,3 +2596,57 @@ All nine passed on the merge with and without `JACCPOT_RUNTIME_TYPECHECK=1`.
   for 16 B/p per step of pinned host (~1.6 GB per step at 1e8). Worth it only if HoreKa shows the replay is a large
   share of c / a.
 - The aux guard covers the output side only (above).
+
+## S10 (session 1) — multiple shooting in mimirax (2026-11-01)
+
+Plan `s10-multiple-shooting.md` (dev plan D6, part 3). The user's decisions: each segment runs on jaccpot's
+`differentiable_rollout` (the fused lane through `runner.gradient_plan` per segment), not nornax's
+`leapfrog_kdk_rollout`; the defects are enforced by an augmented Lagrangian; the analytic galaxy potentials live in
+nornax; mimirax's CI installs nornax and jaccpot at pinned commits. Shared steps only (block-step gradients stay out).
+Three tracks: M (mimirax core), J (the fused-lane segment engine), N (nornax). CPU only; no timings.
+
+### What session 1 built
+| piece | where | what |
+| --- | --- | --- |
+| `SegmentEngine`, `MultipleShootingForwardModel` | mimirax `shooting.py` | params `{"theta", "nodes": {positions, velocities}}` (node 0 the given initial condition unless freed); `evaluate` runs every segment ONCE and returns the prediction and the defects `node_{k+1} - end_k` (`[S-1, N, 6]`, nornax's `shooting_defect` sign); `init_nodes` from a forward run (defects exactly 0); the engine's optional host hooks `prepare` / `check` |
+| constraints, the augmented Lagrangian | mimirax `inference/objective.py`, `inference/augmented_lagrangian.py` | `InferenceProblem.constraints` (unconstrained: the old objective bitwise); `AugmentedLagrangian`: Python outer loop over multipliers and penalty, Python inner loop of ONE jitted optax step (Adam, or L-BFGS with `value_fn` for its line search), `prepare` before and `check` after every step, a failed check re-prepares, re-traces and redoes the step. VJP only |
+| `DirectSumSegmentEngine`, `rows_field` | mimirax `adapters/jaccpot.py` | `differentiable_rollout(direct_sum_step_fn, ..., external_fn=rows_field(field), external_args=theta, checkpoint="step")`; `rows_field` turns nornax's `f(x, t, args)` into the rollout's `f(state, args)` reading `state[:, 0]` only (zero velocity rows, nothing stored), at a fixed t |
+| `FusedSegmentEngine` | mimirax `adapters/jaccpot.py` | `prepare` runs `runner.gradient_plan(node_k, masses, dt, num_steps=L_k, external_params=theta)` only for a segment with no plan or a failed check (otherwise 7-10 us: the driver calls it every step); the traced call is `plan.rollout(..., checkpoint="step")` behind an `optimization_barrier` per input (without it XLA folded the caller's constants -- the plan's dt / G / eps2, fixed masses, node 0 -- and moved 209 of 6144 elements off the runner's result); `check` reads every segment's bits once and re-plans the failed ones at the next `prepare`, and refuses an aux from a program traced on a replaced plan |
+| `gradient_plan(..., freeze_cache=)` | jaccpot `production.py`, `production_grad.py` | opt-in: the freeze rebuild's program kept per compile key across pre-passes (a fresh `jax.jit(lambda)` per call was ~35 s of a ~32 s warm pre-pass's trace and compile; with it ~5 s). Default unchanged; plans identical (test) |
+| `shooting_node` on a `RebuildingForceModel` | nornax `solvers/leapfrog_kdk.py`, `FusedProviderForce.seed` | `k_max=0`; the f_b seed through `topology`; the node carries the evaluation's aux (stopped). Node + rollout == `initialize_block_state` + rollout bitwise (real lane, both MACs); 2 + node + 2 steps == 4 steps bitwise, defect 0. Under `dehnen_error` a node is bitwise to a rollout's step k only when seeded with step k-1's f_b; seeded at its own positions it is a restart's force (the force-error class) |
+| `nornax.potentials` | nornax | `MiyamotoNagai`, `NFW` (M = 4 pi rho_0 r_s^3, Odisseo's "Mvir"; `nfw_mass_from_virial`), `Hernquist`, `CompositePotential`; `f(x, t, args)` with traced params in `args`, G static; against Odisseo's formulas 1e-13, -grad(phi) 1e-12, finite at r = 0 |
+
+### Gates (CPU, float64)
+| gate | result |
+| --- | --- |
+| single vs multiple, direct sum (N 64, 4 x 10 steps) | defects exactly 0; prediction == the single 40-step rollout bitwise (a segment's start force is the single rollout's end-of-step force at the same positions); d/d(theta) of `J(theta, init_nodes(theta))` to 5.0e-15 |
+| single vs multiple, fused lane (interpret, N 512, p2, 2 x 2 steps, harmonic field), against E's chain over 4 steps | a shooting node is a START boundary, E's chain edge CARRIED. Plummer: 4 velocity elements by 6.9e-18, gradients theta exact / x0 1.7e-16 / v0 3.0e-17 (relative); `dehnen_error`: the node's start force takes its thresholds from the node's pre-pass seed, other lists: 3001 elements up to 5.3e-8, gradients 3.6e-12 / 2.7e-7 / 1.5e-9 -- the FMM's error class. At propagated nodes each segment == the runner from that node bitwise, f_b too |
+| defects -> 0 (direct sum, N 32, 4 x 20 steps, nodes perturbed 1e-2) | violation 4.9e-2 -> 7.4e-9 relative, theta error 9e-9, 3 outer / 337 inner (L-BFGS), one trace |
+| recovery, Plummer field (N 32, 80 steps, noise 1e-3) | 1 / 2 / 4 segments: the same estimate (2e-8 / 9e-8 apart), +2.8e-4 / +2.9e-4 from the truth; 15 / 901 / 1834 inner steps |
+| recovery, galaxy potential (N 64 disc, mass 1e-2, in nornax's MN disc + NFW halo; halo log M, log r_s; 80 steps, noise 1e-3) | 2 segments +1.063e-3 / +1.053e-3, single +1.068e-3 / +1.057e-3 from the truth; 12/357 against 2/21 outer/inner steps |
+| FD of the augmented Lagrangian | theta 2.1e-10 / 1.4e-10, nodes 6.6e-11 (direct sum); fused lane through 2 segments: theta 5.9e-10 / 5.2e-10, node 1.1e-9 |
+| compile once, re-plan | fused lane: 2 Adam steps from moved theta and nodes, one trace, no re-plan; a quartered far cap in segment 1: `check` False, `prepare` re-plans segment 1 only (3.0 s / 7.1 s), the stale program refused, the redo passes |
+| VJP only | `jax.jvp` through a `"step"` segment raises (the `custom_vjp`); the driver never calls forward mode |
+| defaults | jaccpot CPU identity 36/36 (`s10-j-cpu`); nornax's default programs 12/12 identical lowered text |
+
+### What it means
+On short horizons single shooting is far cheaper for the same answer (the Plummer recovery: 15 inner steps against
+1834 with 4 segments; 400 steps looked the same): multiple shooting pays for its `6 N (S - 1)` node variables in
+iterations, and its case is the long, chaotic horizon where the single-shot objective is rough. Session 2's recovery
+gate has to be set on such a horizon.
+
+### Open for session 2
+- GPU: segments one per card (async dispatch of independent segment programs), the recovery at 1e5-1e6 on a long
+  horizon, memory per segment, a HoreKa sbatch.
+- At large N the masses, initial condition and observations must become ARGUMENTS of the jitted step (they are
+  closure constants now).
+- `dehnen_error`: a node's seed is the pre-pass's f_b at that node, baked in until the next re-plan, so the objective
+  moves by the force-error class at each re-plan.
+- L-BFGS line-search trial points are not checked (the accepted point is, at the next step).
+- One fused-lane process peaks at 16.5 / 20.6 GB RSS on CPU (Plummer / `dehnen_error`): its gates are manual
+  (`MIMIRAX_RUN_MANUAL_TESTS=1`).
+- `rows_field` evaluates at a fixed t: time-dependent potentials need a time-aware field in the rollout.
+- Porting S9 session 2's hand-written reverse into nornax's `leapfrog_kdk_rollout` (its `jax.checkpoint`-in-scan
+  likely holds session 1's W), if the nornax driver is to run production gradients.
+- mimirax main: `test_m2m_rollout.py::test_adam_does_not_settle_on_this_objective` fails with jax 0.11.2 / optax 0.2.8
+  (Adam reaches -0.063, the test expects > 1.0); it never ran in CI (no solver installed).
