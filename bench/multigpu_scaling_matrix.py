@@ -21,7 +21,7 @@ strong     fixed N on 1 / 2 / 4 cards, migrating: the 25M disc + bulge and Plumm
            8e6; one card = the gate's single-card lane (``--mode solo``) and its
            one-device mesh (``--ndev 1``)
 weak       4e6 Plummer particles per card on 1 / 2 / 4 cards, migrating
-memory     Plummer at 1e7, 2e7, 3e7, 4e7 particles per card on every card,
+memory     Plummer at 1e7, 2e7, 3e7, 4e7 (``--memory-per-card``) particles per card on every card,
            migrating, 3 segments of 4 steps; stops at the first row that fails
            (out of memory) and records it
 =========  ==========================================================================
@@ -79,6 +79,12 @@ def _args() -> argparse.Namespace:
     p.add_argument("--segments", type=int, default=8)
     p.add_argument("--max-cards", type=int, default=4)
     p.add_argument(
+        "--memory-per-card",
+        default="1e7,2e7,3e7,4e7",
+        help="memory tier: Plummer particles per card, ascending (stops at the first "
+        "row that fails)",
+    )
+    p.add_argument(
         "--disc-ic",
         default=None,
         help="the gate's --disc-ic (the 25M disc + bulge .npz; default the gate's path)",
@@ -87,7 +93,19 @@ def _args() -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--redo", action="store_true")
     p.add_argument("--summary", action="store_true", help="only rebuild SUMMARY.md")
+    p.add_argument(
+        "--smoke-n",
+        type=int,
+        default=None,
+        help="a smoke test of the rows' commands: every row at this N; with "
+        "JAX_PLATFORMS=cpu on forced host devices (bench/slurm/h0)",
+    )
     return p.parse_args()
+
+
+def _on_cpu() -> bool:
+    """A CPU smoke run (``JAX_PLATFORMS=cpu``): the cards are forced host devices."""
+    return os.environ.get("JAX_PLATFORMS", "").strip().lower() == "cpu"
 
 
 def _devices() -> list[str]:
@@ -119,7 +137,10 @@ def _matrix(args: argparse.Namespace, ncards: int) -> list[dict]:
         if k > ncards:
             return
         solo = "solo" in extra
-        gate = ["--mode", "solo" if solo else "segment", "--ic", ic, "--n", str(int(n))]
+        # a smoke run changes N alone: every other argument is the row's own
+        n_run = args.smoke_n or n
+        gate = ["--mode", "solo" if solo else "segment", "--ic", ic]
+        gate += ["--n", str(int(n_run))]
         gate += ["--mac", mac]
         if ic == "disc" and n >= 2.5e7:
             # the L3 pin's 25M disc + bulge (the gate's disc formula: 7.6e-3)
@@ -172,7 +193,7 @@ def _matrix(args: argparse.Namespace, ncards: int) -> list[dict]:
             add(f"weak_P4e6pc_{k}c", k, "plummer", 4e6 * k, macs[0], *extra)
     if "memory" in tiers:
         k = min(ncards, args.max_cards)
-        for per_card in (1e7, 2e7, 3e7, 4e7):
+        for per_card in (float(x) for x in args.memory_per_card.split(",") if x):
             n = per_card * k
             add(
                 f"memory_P{_short(per_card)}pc_{k}c",
@@ -232,11 +253,15 @@ def _run_row(row: dict, devices: list[str], args: argparse.Namespace) -> dict:
         XLA_PYTHON_CLIENT_PREALLOCATE="false",
         XLA_FLAGS=(env.get("XLA_FLAGS", "") + " " + flags).strip(),
     )
+    if _on_cpu():
+        # CPU: the row's cards are forced host devices; no card is named
+        env["CUDA_VISIBLE_DEVICES"] = ""
+        env["XLA_FLAGS"] += f" --xla_force_host_platform_device_count={row['cards']}"
     cmd = [sys.executable, str(GATE), *row["gate_args"], "--out", str(out)]
     if args.dry_run:
         print(f"CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']} {' '.join(cmd)}")
         return dict(tag=row["tag"], dry_run=True)
-    before = _smi(cards)
+    before = _smi(cards) if not _on_cpu() else dict(cards=[], processes=[])
     begun = time.time()
     with open(args.out_dir / f"{row['tag']}.log", "w") as log:
         try:
@@ -245,7 +270,7 @@ def _run_row(row: dict, devices: list[str], args: argparse.Namespace) -> dict:
             ).returncode
         except subprocess.TimeoutExpired:
             rc = "timeout"
-    after = _smi(cards)
+    after = _smi(cards) if not _on_cpu() else dict(cards=[], processes=[])
     others = {p["pid"] for p in before["processes"] + after["processes"]}
     record = dict(
         tag=row["tag"],
@@ -363,7 +388,7 @@ def main() -> int:
     if args.summary:
         _summary(args.out_dir)
         return 0
-    devices = _devices()
+    devices = [str(i) for i in range(args.max_cards)] if _on_cpu() else _devices()
     ncards = min(len(devices), args.max_cards)
     rows = _matrix(args, ncards)
     print(f"{len(rows)} rows on cards {devices[:ncards]}", flush=True)

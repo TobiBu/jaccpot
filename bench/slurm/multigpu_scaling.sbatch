@@ -33,6 +33,8 @@ python bench/multigpu_scaling_matrix.py \
     --out-dir "$OUT" \
     --tiers "${TIERS:-ab,strong,weak,memory}" \
     --reps "${REPS:-2}" \
-    --disc-ic "$DISC_IC"
+    --disc-ic "$DISC_IC" \
+    ${MEMORY_PER_CARD:+--memory-per-card "$MEMORY_PER_CARD"} \
+    ${SMOKE_N:+--smoke-n "$SMOKE_N"}     # SMOKE_N: bench/slurm/h0 (every row at that N)
 # the single-card timing pins on the same node, for the record's 1-card column:
 # python bench/dce_pins.py record --pins L1,L2,L3 --tag horeka-L --root "$OUT/pins"

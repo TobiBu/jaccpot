@@ -955,6 +955,9 @@ _FORCE_ROW = ["--no-scan", "--accuracy-targets", "4096", "--eval-repeats", "5"]
 
 
 def _timed_pin(out: Path, n: int, ic: list[str], force_row: bool) -> dict:
+    # a CPU smoke test of the commands at a tiny N (bench/slurm/h0/submit_all.sh SMOKE=1)
+    if os.environ.get("DCE_PINS_SMOKE_N"):
+        n = int(os.environ["DCE_PINS_SMOKE_N"])
     meta = {
         "timing": True,
         "n": n,
