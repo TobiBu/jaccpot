@@ -285,6 +285,7 @@ def prepare_mesh_force(
     ValueError
         If the leaves are buckets (a template rebuild needs cell leaves).
     """
+    from jaccpot.distributed.multiprocess import host_value, is_multiprocess
     from jaccpot.distributed.rollout import (
         _leaf_counts,
         _mesh_devices,
@@ -310,9 +311,23 @@ def prepare_mesh_force(
     require_cell_leaves(engine)
     devices = _mesh_devices(mesh)
     ndev = len(devices)
-    counts_host = [int(c) for c in np.asarray(counts)]
+    counts_host = [int(c) for c in host_value(counts)]
     if len(counts_host) != ndev:
         raise ValueError(f"counts has {len(counts_host)} entries for {ndev} devices")
+    if is_multiprocess():
+        # one process per device (or a few): the per-device prepares run where
+        # their shards live, and what they measured is merged over the processes
+        return _prepare_mesh_force_multiprocess(
+            engine,
+            mesh,
+            positions,
+            masses,
+            counts_host,
+            leaf_size=leaf_size,
+            max_order=max_order,
+            theta=theta,
+            grow_levels=grow_levels,
+        )
     pos_d, mass_d = _by_device(positions, devices), _by_device(masses, devices)
     cap = int(pos_d[0].shape[0])
     if not engine._is_large_n_gpu_production_profile():
@@ -472,6 +487,322 @@ def prepare_mesh_force(
         live_leaves=int(max(live_leaves)),
         force_scale_seed=seed,
     )
+
+
+def _prepare_mesh_force_multiprocess(
+    engine: Any,
+    mesh: Any,
+    positions: Array,
+    masses: Array,
+    counts_host: list,
+    *,
+    leaf_size: int,
+    max_order: int,
+    theta: Optional[float],
+    grow_levels: Optional[tuple[int, int]],
+) -> MeshForceSetup:
+    """:func:`prepare_mesh_force` under ``jax.distributed`` (several processes).
+
+    The same steps, each process on ITS devices only, with every value the single
+    process derives from all devices gathered over the processes and merged in
+    mesh order (:func:`~jaccpot.distributed.multiprocess.allgather_by_device`):
+    the box (the devices' exact live extents), ``leaf_capacity="auto"`` (the
+    largest device's live leaves), the level plans and walk caps (merged as
+    :func:`~jaccpot.runtime.capacity_plan.merge_plans` /
+    :func:`~jaccpot.runtime.capacity_plan.merge_walk_caps` merge them, in mesh
+    order), the live leaf counts and the upward sweep's depth bound (the
+    maximum the prepares leave on the engine). The shape template is built from
+    this process's first device and given device 0's leaf shapes (gathered from
+    the process that holds it); its static leaves must equal device 0's, or no
+    single program serves the mesh. The force-scale seed is per device, as in one
+    process. The result is the single process's setup, value for value.
+
+    Parameters
+    ----------
+    engine : Any
+        The runtime engine.
+    mesh : Any
+        The 1-D mesh.
+    positions : Array
+        As :func:`prepare_mesh_force`.
+    masses : Array
+        As :func:`prepare_mesh_force`.
+    counts_host : list
+        Live rows per device (every process's, gathered).
+    leaf_size : int
+        As :func:`prepare_mesh_force`.
+    max_order : int
+        As :func:`prepare_mesh_force`.
+    theta : Optional[float]
+        As :func:`prepare_mesh_force`.
+    grow_levels : Optional[tuple[int, int]]
+        As :func:`prepare_mesh_force`.
+
+    Returns
+    -------
+    MeshForceSetup
+        The setup.
+
+    Raises
+    ------
+    RuntimeError
+        As :func:`prepare_mesh_force`, or if this process's template differs from
+        device 0's in more than its leaf shapes.
+    ValueError
+        As :func:`prepare_mesh_force`.
+    """
+    from jaccpot.distributed.fused import bounds_from_extents, live_extent
+    from jaccpot.distributed.multiprocess import (
+        allgather_by_device,
+        allgather_object,
+        local_device_indices,
+    )
+    from jaccpot.distributed.rollout import (
+        _leaf_counts,
+        _mesh_devices,
+        _pad_onto_live_row,
+    )
+    from jaccpot.production import _template_shapes, _template_with_shapes
+    from jaccpot.runtime import _level_shapes as level_shapes
+    from jaccpot.runtime.capacity_plan import (
+        FusedCapacityPlan,
+        _lift_registry_to_refresh_tree,
+        auto_leaf_capacity,
+        eager_live_rows,
+        fused_capacity_plan_overrides,
+        install_walk_caps,
+        live_cell_leaves,
+        merge_plans,
+        merge_walk_caps,
+        plan_from_registry,
+    )
+    from jaccpot.runtime.fused_provider import FusedForceProvider
+    from jaccpot.runtime.strict_carry import PreparedCaps
+
+    devices = _mesh_devices(mesh)
+    ndev = len(devices)
+    mine = local_device_indices(mesh)
+    if not mine:
+        raise RuntimeError("this process owns no device of the mesh")
+    shards_pos = {s.device: s.data for s in positions.addressable_shards}
+    shards_mass = {s.device: s.data for s in masses.addressable_shards}
+    pos_d = {d: shards_pos[devices[d]] for d in mine}
+    mass_d = {d: shards_mass[devices[d]] for d in mine}
+    cap = int(pos_d[mine[0]].shape[0])
+    if not engine._is_large_n_gpu_production_profile():
+        raise RuntimeError(
+            "prepare_mesh_force requires the large_n_gpu production profile."
+        )
+    if not engine._strict_fused_profile_allows_n(cap):
+        raise RuntimeError(
+            f"prepare_mesh_force: the shard capacity {cap} is not in "
+            "JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET; add it, or leave the set empty "
+            "to allow all N."
+        )
+    pos_d = {
+        d: _pad_onto_live_row(jnp.asarray(p), jnp.arange(cap) < counts_host[d])
+        for d, p in pos_d.items()
+    }
+    cubic = bool(getattr(engine, "_tree_cubic_bounds", False))
+    extents = allgather_by_device(
+        mesh,
+        {
+            d: (
+                None
+                if (e := live_extent(np.asarray(pos_d[d]), counts_host[d])) is None
+                else (np.asarray(e[0]), np.asarray(e[1]))
+            )
+            for d in mine
+        },
+    )
+    box = bounds_from_extents(extents, cubic=cubic)
+    runtime_overrides = engine._resolve_runtime_execution_overrides(num_particles=cap)
+
+    if getattr(engine, "_tree_cell_min_level_auto", None) is not None:
+        raise ValueError(
+            "TreeConfig(cell_min_level='auto') is single-card only: pass an "
+            "explicit cell_min_level on the mesh"
+        )
+    headroom = getattr(engine, "_tree_leaf_capacity_auto", None)
+    if headroom is not None and getattr(engine, "_tree_leaf_capacity", None) is None:
+        live = max(
+            allgather_by_device(
+                mesh,
+                {
+                    d: int(
+                        live_cell_leaves(
+                            jnp.asarray(pos_d[d], engine.working_dtype),
+                            leaf_size=int(leaf_size),
+                            cell_min_level=int(
+                                getattr(engine, "_tree_cell_min_level", 0)
+                            ),
+                            bounds=box,
+                            num_valid=int(counts_host[d]),
+                        )
+                    )
+                    for d in mine
+                },
+            )
+        )
+        engine._tree_leaf_capacity = auto_leaf_capacity(live, float(headroom))
+
+    plans: dict = {}
+    walks: dict = {}
+    live_leaves: dict = {}
+    seeds: list = []
+    stub_caps: Optional[PreparedCaps] = None
+    scale_carry = bool(engine._flat_walk_criterion_active())
+    for d in mine:
+        level_shapes._WIDTHS.clear()
+        level_shapes._LEVELS.clear()
+        with jax.default_device(devices[d]), eager_live_rows(int(counts_host[d])):
+            caps = engine.prepare_state_caps_only(
+                pos_d[d],
+                mass_d[d],
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta=theta,
+                jit_tree=engine._jit_tree_default,
+                runtime_overrides_override=runtime_overrides,
+                bounds=box,
+            )
+            if not isinstance(caps, PreparedCaps):
+                raise RuntimeError(
+                    "prepare_mesh_force needs the flat walk's caps-only prepare; "
+                    f"this configuration's prepare returned a {type(caps).__name__}."
+                )
+            _lift_registry_to_refresh_tree(
+                engine,
+                caps.stub.tree,
+                pos_d[d],
+                mass_d[d],
+                bounds=box,
+                num_valid=counts_host[d],
+            )
+        tree = caps.stub.tree
+        plan_d = plan_from_registry(
+            total_nodes=int(tree.node_ranges.shape[0]),
+            num_internal=int(tree.left_child.shape[0]),
+            upward_num_levels=getattr(engine, "_cells_upward_num_levels", None),
+        )
+        plans[d] = None if plan_d is None else tuple(plan_d.fingerprint())
+        validated = getattr(engine, "_strict_fused_validated_caps", None)
+        walks[d] = dict(validated) if isinstance(validated, dict) else None
+        live_leaves[d] = int(_leaf_counts(caps.stub)[1])
+        if scale_carry:
+            with jax.default_device(devices[d]):
+                seed_d = _force_scale_seed(
+                    engine, tree, pos_d[d].dtype, counts_host[d], cap
+                )
+            seeds.append(jax.device_put(seed_d, devices[d]))
+        if stub_caps is None:
+            stub_caps = caps
+        del caps, tree
+    # the engine's depth bound: the max every prepare raised it to
+    upward = [
+        v
+        for v in allgather_object(getattr(engine, "_cells_upward_num_levels", None))
+        if v is not None
+    ]
+    if upward:
+        engine._cells_upward_num_levels = max(int(v) for v in upward)
+    all_plans = allgather_by_device(mesh, plans)
+    plan = merge_plans(
+        [None if p is None else FusedCapacityPlan(*p) for p in all_plans]
+    )
+    if grow_levels is not None:
+        widest, levels = (int(v) for v in grow_levels)
+        assert stub_caps is not None
+        table_levels = int(stub_caps.stub.tree.level_offsets.shape[0]) - 1
+        plan = plan.widened_to(
+            level_batch_width=min(
+                int(plan.total_nodes), math.ceil(widest * level_shapes._HEADROOM)
+            ),
+            num_levels=min(table_levels, levels),
+            upward_num_levels=levels,
+        )
+    walk_caps = merge_walk_caps(allgather_by_device(mesh, walks))
+    install_walk_caps(engine, walk_caps)
+
+    assert stub_caps is not None
+    first = mine[0]
+    with fused_capacity_plan_overrides(plan):
+        provider, _ = FusedForceProvider(
+            engine,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            theta=theta,
+            runtime_overrides=runtime_overrides,
+        )._with_caps_template(stub_caps, pos_d[first], mass_d[first])
+    # ONE template for the mesh: device 0's (the single process builds it from
+    # device 0's prepare); its leaf shapes travel from the process that holds it
+    template = provider.template_or_raise()
+    mine_record = (_template_shapes(template), _template_statics(template))
+    shapes0, statics0 = allgather_by_device(
+        mesh, {d: mine_record if d == first else None for d in mine}
+    )[0]
+    if first != 0:
+        if _template_statics(template) != statics0:
+            raise RuntimeError(
+                "multi-process prepare: this process's shape template differs from "
+                "device 0's in its static leaves; one program cannot serve the mesh"
+            )
+        fitted = _template_with_shapes(template, shapes0)
+        if fitted is None:
+            raise RuntimeError(
+                "multi-process prepare: device 0's template shapes do not fit this "
+                "process's template structure"
+            )
+        provider = FusedForceProvider(
+            engine,
+            leaf_size=provider.leaf_size,
+            max_order=provider.max_order,
+            theta=provider.theta,
+            runtime_overrides=provider.runtime_overrides,
+            template=fitted,
+        )
+    del stub_caps, pos_d, mass_d
+    engine._topology_reuse_entry = None
+    engine._geometry_reuse_entry = None
+    engine.clear_prepared_state_cache()
+    seed = None
+    if scale_carry:
+        from jax.sharding import NamedSharding
+        from jax.sharding import PartitionSpec as P
+
+        seed = jax.make_array_from_single_device_arrays(
+            (ndev * cap,), NamedSharding(mesh, P(*mesh.axis_names)), seeds
+        )
+        engine._last_force_scale_particles = None
+        engine._last_force_scale_nodes = None
+    return MeshForceSetup(
+        provider=provider,
+        plan=plan,
+        walk_caps=walk_caps,
+        leaf_capacity=int(engine._tree_leaf_capacity),
+        box=tuple(np.asarray(b) for b in box),
+        live_leaves=int(max(allgather_by_device(mesh, live_leaves))),
+        force_scale_seed=seed,
+    )
+
+
+def _template_statics(template: Any) -> str:
+    """A shape template's structure and static leaves, as comparable text.
+
+    Parameters
+    ----------
+    template : Any
+        A :class:`~jaccpot.runtime.strict_carry.PreparedShapeTemplate`.
+
+    Returns
+    -------
+    str
+        The treedef and the non-array leaves' reprs (array leaves as ``"A"``).
+    """
+    leaves = [
+        "A" if isinstance(x, jax.ShapeDtypeStruct) else repr(x) for x in template.leaves
+    ]
+    return repr((str(template.treedef), leaves))
 
 
 def _force_scale_seed(
