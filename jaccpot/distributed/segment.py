@@ -107,6 +107,8 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array
 
 from jaccpot.distributed.fused import AXIS_NAME, reduce_flag_across_mesh
+from jaccpot.distributed.multiprocess import host_copy as mp_host_copy
+from jaccpot.distributed.multiprocess import host_value, mesh_sum, put_host_copy
 from jaccpot.runtime.dtypes import require_x64
 
 __all__ = [
@@ -1767,7 +1769,7 @@ class MeshSegmentRunner:
             acceleration=None if state.acceleration is None else a,
             force_scale=None if state.force_scale is None else f_b_new,
         )
-        return routed, {k: np.asarray(v) for k, v in diag.items()}
+        return routed, {k: host_value(v) for k, v in diag.items()}
 
     def _measure_cross(self) -> np.ndarray:
         """The cross needs of the start force at the current state (host, mesh-reduced).
@@ -2036,7 +2038,7 @@ class MeshSegmentRunner:
             # (even cuts cannot overfill a shard; declined, the rows came back
             # unchanged and the old cuts stand)
             self.splitters = cuts
-        counts = np.asarray(out[4])
+        counts = host_value(out[4])
         sent = np.zeros(self.ndev, np.int64)
         sent[0] = moved
         routed = MeshState(
@@ -2270,7 +2272,7 @@ class MeshSegmentRunner:
         """
         from jaccpot._env import env_flag
         from jaccpot.runtime.fused_topology import NEEDS_FIELDS
-        from jaccpot.runtime.strict_carry import external_field_key, host_copy
+        from jaccpot.runtime.strict_carry import external_field_key
 
         n = self.segment_index + 1
         every = self.repartition_every
@@ -2322,11 +2324,11 @@ class MeshSegmentRunner:
             # the segment consumes its start state, and a retry re-runs the segment
             # from it: one copy per segment, off the device (on a GPU asynchronous,
             # into pinned memory), as strict_run_v2's particle carry keeps it
-            start_host = host_copy(state.state)
+            start_host = mp_host_copy(state.state)
             if self.migrate:
                 # a migrating segment also consumes the rows' masses, ids, counts
                 rows_host = tuple(
-                    host_copy(a) for a in (state.masses, state.ids, state.count)
+                    mp_host_copy(a) for a in (state.masses, state.ids, state.count)
                 )
         state_new = state.state
         rows_new = (state.masses, state.ids, state.count)
@@ -2463,12 +2465,12 @@ class MeshSegmentRunner:
                 sharding = state.masses.sharding
                 if rows_host:
                     masses_r, ids_r, count_r = (
-                        jax.device_put(a, sharding) for a in rows_host
+                        put_host_copy(a, sharding) for a in rows_host
                     )
                 else:
                     masses_r, ids_r, count_r = state.masses, state.ids, state.count
                 state = MeshState(
-                    state=jax.device_put(start_host, sharding),
+                    state=put_host_copy(start_host, sharding),
                     masses=masses_r,
                     ids=ids_r,
                     count=count_r,
@@ -2517,7 +2519,7 @@ class MeshSegmentRunner:
             repartitioned=repartitioned,
             declined=bool(diag["declined"][0]) if diag else False,
             sent_off_device=int(diag["sent_off_device"].sum()) if diag else 0,
-            counts=[int(c) for c in np.asarray(self.state.count)],
+            counts=[int(c) for c in host_value(self.state.count)],
             bits=int(bits_h),
             needs=np.asarray(needs_h).tolist(),
             failures=failures,
@@ -2607,26 +2609,26 @@ class MeshSegmentRunner:
         """
         s = self.state
         cap = self.cap
-        count = np.asarray(s.count)
+        count = host_value(s.count)
         rows = np.concatenate(
             [np.arange(d * cap, d * cap + int(count[d])) for d in range(self.ndev)]
         )
-        live_ids = np.asarray(s.ids)[rows]
+        live_ids = host_value(s.ids)[rows]
         n = int(count.sum())
         if live_ids.min() < 0 or len(np.unique(live_ids)) != n or live_ids.max() >= n:
             raise ValueError(
                 "particle identity broken: ids are not exactly 0..N-1 once"
             )
-        packed = np.asarray(s.state)[rows]
+        packed = host_value(s.state)[rows]
         arrays = {
             "positions": packed[:, 0],
             "velocities": packed[:, 1],
-            "masses": np.asarray(s.masses)[rows],
+            "masses": host_value(s.masses)[rows],
         }
         if s.acceleration is not None:
-            arrays["acceleration"] = np.asarray(s.acceleration)[rows]
+            arrays["acceleration"] = host_value(s.acceleration)[rows]
         if s.force_scale is not None:
-            arrays["force_scale"] = np.asarray(s.force_scale)[rows]
+            arrays["force_scale"] = host_value(s.force_scale)[rows]
         out = {}
         for name, arr in arrays.items():
             full = np.empty((n,) + arr.shape[1:], arr.dtype)
@@ -2825,9 +2827,11 @@ class MeshSegmentRunner:
                 jnp.int32(0),
                 axis_name=axis,
             )
+            # psum in one process; in several, the same mesh-order fold
+            # (multiprocess.mesh_sum: gloo's all-reduce order differs)
             return (
-                jax.lax.psum(w_self, axis),
-                jax.lax.psum(w_ext, axis),
+                mesh_sum(w_self, axis),
+                mesh_sum(w_ext, axis),
                 ok,
                 bits,
             )

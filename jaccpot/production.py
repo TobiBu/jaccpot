@@ -1490,6 +1490,9 @@ class ProductionRunner:
         ----------
         state : Any
             ``[N, 2, 3]`` positions and velocities; ``None`` with ``restart_from``.
+            In the multi-GPU mode under several processes (``jax.distributed``)
+            also a :class:`~jaccpot.distributed.multiprocess.ProcessLocalParticles`
+            (this process's id range only; ``masses=None``).
         masses : Any
             ``[N]``; ``None`` with ``restart_from``.
         dt : Union[float, Any]
