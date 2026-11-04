@@ -129,11 +129,38 @@ These rows ran with the build probe on and one step per segment, which add their
 | the guard: bitwise where finite | CPU identity at bfa876c8: 32/36 identical; the 4 `dehnen_error` variants move their compiled runners' TEXT, every array bitwise (1302 arrays) |
 | the floor: bitwise where it does not bind | CPU lane test bitwise; at #487 it never bound |
 | S12 mesh `dehnen_error` gates | `tests/distributed/test_mesh_segment_dehnen_error.py` 4/4 (CPU, 2 devices) |
-| GPU pins S1, S6, S1p/t/e/x/g, G1 | base main 96122f63 vs A1 bfa876c8 on one shared card, with an A-vs-A control of the base (bitwise in every pin): S1, S6, S1p, S1t, S1x, S1g, G1 **bitwise**; **S1e moved**: forces bitwise, the scan's final state not (11,675 / 13,595 of 1.2M elements, rel-L2 3.2e-9 / 6.5e-9, max 8.4e-7 / 4.5e-6, state / particle carry), the far-pair count the same (3,350,146). Not attributed: either the guard bound at a NaN leaf inside S1e's traced steps, or the compiled walk-table code changed a finite value |
+| GPU pins S1, S6, S1p/t/e/x/g, G1 | base main 96122f63 vs A1 bfa876c8, with a base A-vs-A control (bitwise in every pin): S1, S6, S1p, S1t, S1x, S1g, G1 **bitwise**; S1e: forces bitwise, the final state moved, **because the guard replaced real NaN entries** (below) |
 
 Other tests: the numeric goldens (`tests/characterization`) 21/21; `tests/unit/runtime` and `tests/unit/operators`
 (not slow) 997 passed, 139 skipped; the new and touched unit files also under `JACCPOT_RUNTIME_TYPECHECK=1`. The
 constructor-state golden gained one line, `mac_force_scale_floor: None`.
+
+### S1e attributed: the guard replaced real NaN entries at 2e5
+
+S1e (`bench/dce_pins.py`: clipped Plummer 2e5, `dehnen_error` at 1e-4, 4 steps, both carries) kept its forces
+bitwise and moved its final state: 11,675 / 13,595 of 1.2M elements (state / particle carry), rel-L2 3.2e-9 /
+6.5e-9. To attribute it, the pin's bench was rerun with every walk table it builds dumped (`dehnen_walk_table`
+wrapped). Four arms ran back to back on one card (deterministic ops): main 96122f63; main + the guard alone
+(cherry-pick of bfa876c8); the A1 tip; and main again.
+- **Main has real NaN entries.** Every traced build (2-14) has 1-5 LIVE one-particle leaves (mass 5.0e-6 = 1/N)
+  with a non-finite `s_n`; the eager builds 0-1 (the first force) have none. The rest of the non-finite rows are
+  dead nodes (mass 0, threshold +inf), which the walk masks. At build 2:
+
+  | carry | node | radius | non-finite |
+  | --- | --- | --- | --- |
+  | state | 62855, 67655 | 7.45e-8 | `s_6` (`rho^6` = 1.7e-43 is subnormal, `rho^5` = 2.3e-36 is not) |
+  | state | 74323 | 7.3e-12 | `s_4`-`s_6` (`rho^4` is subnormal) |
+  | particles | 62854, 79283 | 7.45e-8 | `s_6` |
+
+- **Finite entries stay bitwise.** At build 2, the first traced build, every arm has the same inputs. Every finite
+  entry of the table is bitwise between main and the guard (and the tip), and every non-finite one became exactly
+  1.0. Inputs first differ at build 3, because the guard changed build 2's lists.
+- **The diff is the pin's.** The final states reproduce the recorded pins bitwise in both arms (the same 11,675 /
+  13,595 elements); the guard alone and the A1 tip are bitwise to each other; main against main is bitwise.
+
+So S1e moved because the guard bound, which is the intended change. No finite value was rewritten, and no code
+change followed. Scripts and dumps: the A1 scratch directory, `s1e/` (`s1e_probe.py`, `run_s1e.sh`, `analyse.py`,
+`compare.py`).
 
 ### Restoring at 1e8: a 14.9 GiB block the BFC allocator could not place
 
