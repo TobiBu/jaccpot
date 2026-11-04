@@ -2865,7 +2865,7 @@ class StrictRunMixin(_EngineBase):
         out = cross_hook(
             tree_artifacts,
             criterion=self._flat_walk_criterion(
-                tree_artifacts.upward, force_scale_nodes
+                tree_artifacts.upward, force_scale_nodes, tree_artifacts
             ),
         )
         if out is None:

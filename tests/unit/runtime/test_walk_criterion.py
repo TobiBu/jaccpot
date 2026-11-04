@@ -148,6 +148,46 @@ def test_normalised_powers_lie_in_the_unit_interval():
     assert np.max(s[spans, 1:]) > 0.1
 
 
+def test_a_rounding_residue_radius_gives_finite_normalised_powers():
+    # #487: a one-particle leaf at r ~ 25 had a MAC radius of 1.9e-9 (its float32
+    # COM's rounding residue). On a GPU, XLA folded (P_n / M) / rho / rho ... into
+    # one division by the flushed-to-zero rho^n, s_5 and s_6 became 0 / 0 = NaN,
+    # and the NaN failed eq (16a) against every node: a near row of 5.3M leaves.
+    # A non-finite s_n becomes 1, its upper bound; finite rows are untouched.
+    tree, packed, masses, centers, radii = _fixture(n=300)
+    packed = np.array(packed, np.float32)
+    radii = np.array(radii, np.float32)
+    thresholds = np.ones(radii.shape[0], np.float32)
+    want = np.asarray(_table(jnp.asarray(packed), masses, radii, thresholds))
+    # three poisoned rows: P_n / M overflowing past 1 / rho^n (inf), a NaN power,
+    # and an inf moment
+    bad = [3, 4, 5]
+    radii_bad = radii.copy()
+    radii_bad[3] = 1e-30
+    packed_bad = packed.copy()
+    packed_bad[4, -2] = np.nan
+    packed_bad[5, -1] = np.inf
+    got = np.asarray(_table(jnp.asarray(packed_bad), masses, radii_bad, thresholds))
+    s = got[:, 2 : 2 + ORDER]
+    assert np.all(np.isfinite(got))
+    # each poisoned row has an s_n that went non-finite and is now exactly 1
+    assert all(np.any(s[k] == 1.0) for k in bad)
+    keep = np.setdiff1d(np.arange(radii.shape[0]), bad)
+    assert np.array_equal(got[keep], want[keep])  # bitwise elsewhere
+    # under jit as well (where the GPU's reassociation happens)
+    jitted = jax.jit(
+        lambda pk, r: dehnen_walk_table(
+            multipole_packed=pk,
+            mass=jnp.asarray(masses),
+            radius=r,
+            threshold=jnp.asarray(thresholds),
+            gravitational_constant=1.0,
+            order=ORDER,
+        )
+    )
+    assert np.all(np.isfinite(np.asarray(jitted(jnp.asarray(packed_bad), radii_bad))))
+
+
 @pytest.mark.parametrize("theta_max", [1.0, 0.7])
 @pytest.mark.parametrize("eps", [3e-2, 1e-3])
 def test_pair_test_equals_the_policy_on_every_node_pair(eps, theta_max):

@@ -283,7 +283,7 @@ def test_sliced_placement_is_the_same_csr(slices):
 
 @pytest.mark.parametrize("long_batch, long_split", [(2, 3), (64, 1), (1, 8)])
 def test_long_rows_ranked_across_programs_are_the_same_csr(long_batch, long_split):
-    # rows past ``long_row`` are ranked with their tiles spread over programs, in
+    # rows past ``long_row`` are merge-sorted with their tiles spread over programs, in
     # batches of long rows: the same permutation as one program per row, to the bit
     # (4-lane tiles so that rows of 5-12 entries are "long" here; several batches)
     from jaccpot.pallas.csr_place import directed_csr_pallas
@@ -325,3 +325,61 @@ def test_long_rows_ranked_across_programs_are_the_same_csr(long_batch, long_spli
     )
     live = int(ref_o[-1])
     assert np.array_equal(np.asarray(split[0])[:live], ref_n[:live])
+
+
+@pytest.mark.parametrize("long_batch, long_split", [(1, 1), (2, 3), (64, 5)])
+def test_a_hub_row_merge_sorted_in_passes_is_the_sorted_csr(long_batch, long_split):
+    # #487: one leaf's near row held 70 % of all leaves. Rows past ``long_row`` are
+    # merge-sorted in ceil(log2 n) passes; here a hub row of 255 entries (8 passes,
+    # even: the last pair of passes writes the output) and rows of about 16 and 32
+    # entries (one exactly a power of two: the pass count's boundary), against the
+    # NumPy directed sort, to the bit
+    from jaccpot.pallas.csr_place import directed_csr_pallas
+
+    num_leaves = 256
+    num_internal = num_leaves - 1
+    rng = np.random.default_rng(29)
+    seen = {(0, k) for k in range(1, num_leaves)}  # the hub: row 0 meets every leaf
+    for row, n in ((7, 16), (9, 32), (11, 17), (13, 33)):
+        others = [k for k in range(num_leaves) if k not in (0, row)]
+        for k in rng.choice(others, n - 1, replace=False):
+            seen.add(tuple(sorted((row, int(k)))))
+    pairs = np.asarray(sorted(seen, key=lambda _: rng.random()), np.int64)
+    n_pairs = pairs.shape[0]
+    width = n_pairs + 13
+    pad = width - n_pairs
+    a = jnp.asarray(np.concatenate([pairs[:, 0] + num_internal, np.full(pad, 7)]))
+    b = jnp.asarray(np.concatenate([pairs[:, 1] + num_internal, np.full(pad, 3)]))
+    a, b = a.astype(jnp.int32), b.astype(jnp.int32)
+    got = directed_csr_pallas(
+        a,
+        b,
+        jnp.asarray(n_pairs, jnp.int32),
+        num_rows=num_leaves,
+        row_offset=num_internal,
+        pad_source=-1,
+        idx=jnp.int32,
+        interpret=True,
+        lanes=4,
+        long_row=8,
+        long_batch=long_batch,
+        long_split=long_split,
+    )
+    ref_n, ref_o, ref_c = _reference(
+        np.asarray(a),
+        np.asarray(b),
+        n_pairs,
+        width=width,
+        num_internal=num_internal,
+        num_leaves=num_leaves,
+    )
+    counts = np.asarray(got[2])
+    assert int(counts[0]) == num_leaves - 1
+    long_rows = counts[counts > 8]
+    assert long_rows.size >= 5  # several long rows, in several batches when batch < 5
+    assert np.any((long_rows & (long_rows - 1)) == 0)  # one exactly a power of two
+    assert np.array_equal(counts, ref_c)
+    assert np.array_equal(np.asarray(got[1]), ref_o)
+    live = int(ref_o[-1])
+    assert np.array_equal(np.asarray(got[0])[:live], ref_n[:live])
+    assert np.all(np.asarray(got[0])[live:] == -1)

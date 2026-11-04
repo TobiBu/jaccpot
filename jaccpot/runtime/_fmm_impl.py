@@ -279,6 +279,12 @@ class FMMEngine(
     mac_force_scale_fb_inflation : float
         Inflates the far-field source-to-target distance so the eq (16b) scale stays
         a strict lower bound.
+    mac_force_scale_floor : Optional[float]
+        ``mac_type='dehnen_error'`` on the fused lane: floor each node's
+        ``min_b f_b`` in eq (16a)'s threshold at this fraction (in ``(0, 1]``) of a
+        certified lower bound that a correct f_b estimate always meets
+        (:func:`~jaccpot.runtime._force_scale_levels.force_scale_floor_nodes`).
+        ``None`` (default): no floor.
     adaptive_error_model : str
         Error estimator for adaptive acceptance: ``"tail_proxy"`` (default),
         ``"dehnen_degree"``, or ``"dehnen_paper"`` -- the last being the eq (15)
@@ -389,6 +395,7 @@ class FMMEngine(
         mac_force_scale_mode: str = "prev",
         mac_force_scale_prepass_theta: Optional[float] = None,
         mac_force_scale_fb_inflation: float = 1.0,
+        mac_force_scale_floor: Optional[float] = None,
         adaptive_error_model: str = "tail_proxy",
         adaptive_eps: Optional[float] = None,
         dehnen_geometry_mode: str = "com",
@@ -564,6 +571,7 @@ class FMMEngine(
             adaptive_error_model=adaptive_error_model,
             dehnen_geometry_mode=dehnen_geometry_mode,
             mac_force_scale_fb_inflation=mac_force_scale_fb_inflation,
+            mac_force_scale_floor=mac_force_scale_floor,
             mac_force_scale_mode=mac_force_scale_mode,
             mac_force_scale_prepass_theta=mac_force_scale_prepass_theta,
             mac_theta_max=mac_theta_max,
@@ -802,6 +810,7 @@ class FMMEngine(
         adaptive_error_model: str,
         dehnen_geometry_mode: str,
         mac_force_scale_fb_inflation: Optional[float],
+        mac_force_scale_floor: Optional[float],
         mac_force_scale_mode: str,
         mac_force_scale_prepass_theta: Optional[float],
         mac_theta_max: float,
@@ -826,6 +835,10 @@ class FMMEngine(
             Passed through from ``__init__`` unchanged. Inflates the far-field
             source-to-target distance so the eq (16b) scale is a strict lower
             bound; ``None`` takes the default.
+        mac_force_scale_floor : Optional[float]
+            Passed through from ``__init__`` unchanged. The fraction of the
+            certified f_b lower bound eq (16a)'s thresholds are floored at;
+            ``None``: no floor.
         mac_force_scale_mode : str
             Passed through from ``__init__`` unchanged.
         mac_force_scale_prepass_theta : Optional[float]
@@ -876,6 +889,13 @@ class FMMEngine(
         self.mac_force_scale_fb_inflation = float(mac_force_scale_fb_inflation)
         if self.mac_force_scale_fb_inflation < 0.0:
             raise ValueError("mac_force_scale_fb_inflation must be >= 0")
+        self.mac_force_scale_floor = (
+            None if mac_force_scale_floor is None else float(mac_force_scale_floor)
+        )
+        if self.mac_force_scale_floor is not None and not (
+            0.0 < self.mac_force_scale_floor <= 1.0
+        ):
+            raise ValueError("mac_force_scale_floor must be in (0, 1]")
         adaptive_error_model_norm = str(adaptive_error_model).strip().lower()
         if adaptive_error_model_norm not in (
             "tail_proxy",

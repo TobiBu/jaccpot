@@ -25,7 +25,8 @@ which equals the paper's ``sum C(p,n) P_n rho_B^(p-n) / (M_A r^p)`` term by term
 ``s_n`` lies in ``[0, 1]`` whenever ``rho`` bounds the node's particles about its
 expansion centre (``P_n <= M rho^n`` by the triangle inequality), so the sum is
 well scaled in float32 at any node size; the paper's form needs ``r^p`` and
-``rho^n`` separately. eq (16a) then accepts when, in BOTH directions,
+``rho^n`` separately. A non-finite ``s_n`` (a radius so small that ``rho^n``
+underflows: :func:`dehnen_walk_table`) is replaced by 1. eq (16a) then accepts when, in BOTH directions,
 
     G M_A E_{A->B} / r^2 < thr_B   and   rho_A + rho_B < theta_max r.
 
@@ -136,13 +137,21 @@ def dehnen_walk_table(
         jnp.asarray(gravitational_constant, dtype) * m,
         jnp.asarray(threshold, dtype),
     ]
-    # s_n = P_n / (M rho^n), built as (P_n / M) / rho / rho ... so no rho^n is
-    # ever formed; a zero radius (all mass at the centre) has P_n = 0, n >= 1.
+    # s_n = P_n / (M rho^n), built as (P_n / M) / rho / rho ...; a zero radius
+    # (all mass at the centre) has P_n = 0, n >= 1. That form is NOT enough for a
+    # single-particle leaf whose radius is a rounding residue (1.9e-9 in #487):
+    # XLA folds the chain into one division by rho^n, which flushes to zero on a
+    # GPU once rho^n is subnormal, and 0 / 0 made s_5 and s_6 NaN. A NaN fails
+    # eq (16a) against every node, so that leaf paired with 70 % of the tree's
+    # leaves directly. s_n lies in [0, 1] whenever rho bounds the node, so a
+    # non-finite s_n becomes 1, its largest value: finite entries are untouched.
     safe_rho = jnp.where(rho > 0.0, rho, jnp.ones_like(rho))
+    one = jnp.ones((), dtype)
     for n in range(1, p + 1):
         s = power[:, n] / m
         for _ in range(n):
             s = s / safe_rho
+        s = jnp.where(jnp.isfinite(s), s, one)
         cols.append(jnp.where(rho > 0.0, s, jnp.zeros_like(s)))
     cols += [jnp.zeros_like(m)] * (width - len(cols))
     return jnp.stack(cols, axis=1)
