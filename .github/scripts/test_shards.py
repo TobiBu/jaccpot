@@ -67,6 +67,12 @@ _RUNTIME_GRAD_FILES = (
     "tests/unit/runtime/test_mass_moments_vjp.py",
 )
 
+# The forward-mode cascade tangent ops (M2M/L2L, K up to 8 at p4, interpret mode):
+# one process peaks at 11.5 GB even with each test's programs dropped (16.2 GB
+# kept), so beside the `unit` shard's second worker it shut the 16 GB runner down
+# (#500/#502, 2026-11-04). Its own shard, one worker, cold compile.
+_UNIT_FORWARD_CASCADE = "tests/unit/operators/test_cascade_real_level_jvp.py"
+
 # Single files that need their own job: forced host devices change the device
 # topology of the whole process, and nornax has to be installed for the
 # cross-repo files to collect at all.
@@ -208,8 +214,10 @@ SHARDS: dict[str, list[str]] = {
     "unit": [
         "tests/unit",
         "--ignore=tests/unit/runtime",
+        f"--ignore={_UNIT_FORWARD_CASCADE}",
         *(f"--ignore={path}" for path in _UNIT_MULTI_DEVICE),
     ],
+    "unit-forward-cascade": [_UNIT_FORWARD_CASCADE],
     "unit-runtime-mac": list(_RUNTIME_MAC_FILES),
     "unit-runtime-grad": list(_RUNTIME_GRAD_FILES),
     "unit-runtime": [

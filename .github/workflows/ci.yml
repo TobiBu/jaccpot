@@ -232,6 +232,14 @@ jobs:
           - shard: unit
             typecheck: "1"
             timeout: 45
+          # The forward-mode M2M/L2L tangent ops' tests: 11.5 GB in one process
+          # (local, -n 0, cold, 16 min, 2026-11-04) -- with the unit shard's second
+          # worker they shut the 16 GB runner down (#500).
+          - shard: unit-forward-cascade
+            typecheck: "1"
+            timeout: 40
+            workers: 1
+            jax_cache: "off"
           # tests/unit/runtime in three parts: the Dehnen-MAC / force-scale
           # criterion family (every case a full FMM solve, 26-95 s on CPU), the
           # gradients on the production layout (plan S8: jax.grad through the
