@@ -54,5 +54,10 @@ entry auto env H0_SMOKE_INTERPRET=all CUDA_VISIBLE_DEVICES="$FIRST_CARD" XLA_PYT
 # the scaling sbatch and the others swallow a row's failure: look at their own records too
 grep -lE '"rc": ([1-9-]|"timeout")' "$OUT"/scaling/*.smi.txt > /dev/null 2>&1 && echo "failed (a row's rc != 0)" > "$OUT/status/scaling"
 grep -q FAILED "$OUT/logs/grad.log" && echo "failed (a row FAILED)" > "$OUT/status/grad"
+# s1b records a kernel's failure in its row ("errors") and exits 0; on the CPU every kernel fails by design
+# (it times the GPU kernels themselves), so only a GPU run is judged by it
+if [ "${SMOKE:-}" != 1 ] && grep -q '"errors": {' "$OUT/s1b/rows.jsonl" 2> /dev/null; then
+  echo "failed (a kernel errored: $OUT/s1b/rows.jsonl)" > "$OUT/status/s1b"
+fi
 for e in "$OUT"/status/*; do echo "$(basename "$e"): $(cat "$e")"; done | tee "$OUT/status.txt"
 h0_done
