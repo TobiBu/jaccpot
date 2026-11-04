@@ -79,6 +79,18 @@ and the 1024 particles with the smallest carried f_b.
 | `dehnen_error`, without | 2.192e-4 | 7.48e-5 | 5.67e-4 | 2.08e-3 | 6.8e-6 | 3.87e-5 | 304.9M | 126.4M |
 | geometric, theta 0.7 | 2.762e-4 | 6.61e-5 | 7.30e-4 | 3.20e-3 | 6.3e-6 | 5.85e-5 | 604.0M | 174.5M |
 
+**The merger after first pericentre** (`restart_final_136.npz`, the same probe and targets, one step):
+
+| arm | rel-L2 | median | p99 | max | smallest-f_b 1024, rel-L2 | far pairs | near entries |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `dehnen_error`, with the guard | 1.941e-4 | 7.44e-5 | 5.68e-4 | 1.85e-3 | 5.54e-5 | 321.5M | 117.9M |
+| `dehnen_error`, without | 1.941e-4 | 7.44e-5 | 5.68e-4 | 1.85e-3 | 5.54e-5 | 321.4M | 127.5M |
+| geometric, theta 0.7 | 1.683e-4 | 6.57e-5 | 5.91e-4 | 1.95e-3 | 1.30e-4 | 642.2M | 185.0M |
+
+Here theta 0.7 is 1.15x lower in rel-L2 and 1.13x in the median, while `dehnen_error` is lower in p99 (1.04x), max
+(1.05x) and on the smallest-f_b particles (2.3x), from half the far pairs and 64 % of the near entries. Whether it is
+"no worse at equal time" needs the HoreKa times; at equal list volume it is not established for the bulk rel-L2.
+
 - The guard leaves the bulk unchanged. The one particle it moves goes from 6.8e-6 (summed directly against 70 %
   of the tree) to 7.8e-5, inside the 1e-4 target.
 - **Against the geometric fallback at theta 0.7**, `dehnen_error` is 1.26x lower in rel-L2, 1.29x in p99 and 1.54x
@@ -112,12 +124,12 @@ These rows ran with the build probe on and one step per segment, which add their
 | --- | --- |
 | small reproduction fixed by each fix | the NaN needs the GPU's flush-to-zero; on CPU: the guard test (inf/NaN injected, finite rows bitwise, eager and jitted), the floor's injected-f_b flood (878 -> 116 of 873 leaves), the hub-row merge sort |
 | the stalling 1e8 restart at about the pre-stall wall time | yes, with either change; the stalled steps take what the others take (tables above; contended) |
-| accuracy no worse than geometric theta 0.7 at equal time | rel-L2 / p99 / max 1.26x / 1.29x / 1.54x lower from half the far pairs; HoreKa times pending |
+| accuracy no worse than geometric theta 0.7 at equal time | bar disc: rel-L2 / p99 / max 1.26x / 1.29x / 1.54x lower from half the far pairs; merger: rel-L2 1.15x HIGHER, p99 / max 1.04x / 1.05x lower, from half the lists; equal-time verdict pending HoreKa |
 | safety net: CSR arrays bitwise | it is a sort; interpret-mode tests against the NumPy directed sort; CPU identity 36/36 at 79e42475 (the CPU lane does not lower the Pallas placement) |
 | the guard: bitwise where finite | CPU identity at bfa876c8: 32/36 identical; the 4 `dehnen_error` variants move their compiled runners' TEXT, every array bitwise (1302 arrays) |
 | the floor: bitwise where it does not bind | CPU lane test bitwise; at #487 it never bound |
 | S12 mesh `dehnen_error` gates | `tests/distributed/test_mesh_segment_dehnen_error.py` 4/4 (CPU, 2 devices) |
-| GPU pins S1, S6, S1p/t/e/x/g, G1 | <!-- PINS --> |
+| GPU pins S1, S6, S1p/t/e/x/g, G1 | base main 96122f63 vs A1 bfa876c8 on one shared card, with an A-vs-A control of the base (bitwise in every pin): S1, S6, S1p, S1t, S1x, S1g, G1 **bitwise**; **S1e moved**: forces bitwise, the scan's final state not (11,675 / 13,595 of 1.2M elements, rel-L2 3.2e-9 / 6.5e-9, max 8.4e-7 / 4.5e-6, state / particle carry), the far-pair count the same (3,350,146). Not attributed: either the guard bound at a NaN leaf inside S1e's traced steps, or the compiled walk-table code changed a finite value |
 
 Other tests: the numeric goldens (`tests/characterization`) 21/21; `tests/unit/runtime` and `tests/unit/operators`
 (not slow) 997 passed, 139 skipped; the new and touched unit files also under `JACCPOT_RUNTIME_TYPECHECK=1`. The

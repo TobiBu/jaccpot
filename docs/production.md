@@ -124,7 +124,8 @@ float32 rounding residue (~1e-9). On a GPU, its walk-table entries `s_5`, `s_6` 
   a build again whatever the MAC.
 
 At that state `dehnen_error` has rel-L2 2.19e-4 and p99 5.7e-4 against the geometric MAC's 2.76e-4 and 7.3e-4 at
-theta 0.7, from half its far pairs ([`production_2026-11.md`](production_2026-11.md), A1).
+theta 0.7, from half its far pairs; after the merger's first pericentre 1.94e-4 against theta 0.7's 1.68e-4 (p99
+5.7e-4 against 5.9e-4), again from half the lists ([`production_2026-11.md`](production_2026-11.md), A1).
 `FastMultipoleMethod(preset="galaxy", mac_force_scale_floor=0.5)` floors each node's `min_b f_b` at half a lower
 bound that a correct f_b estimate always meets. It is opt-in: it never binds on a correct estimate, and it did not
 bind at #487.
