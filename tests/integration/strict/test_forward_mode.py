@@ -92,6 +92,24 @@ def _drop_executables() -> None:
     gc.collect()
 
 
+@pytest.fixture(autouse=True)
+def _one_program_set_per_test() -> Iterator[None]:
+    """After each test, drop its compiled programs (kept data stays cached).
+
+    Each lane's forward program holds GBs on CPU; kept across tests, the module
+    peaked at 18-20 GB RSS where each test alone stays at 4-13 GB.
+
+    Yields
+    ------
+    None
+        The test runs.
+    """
+    yield
+    for key in [k for k, v in _CACHE.items() if callable(v) or k == "plan"]:
+        del _CACHE[key]  # the plan keeps its compiled programs
+    _drop_executables()
+
+
 def _primals(lane: Any) -> tuple:
     return (
         lane.positions,
@@ -297,12 +315,13 @@ def test_the_tangent_matches_finite_differences(name):
     every +-h run's lists the centre's (#316), 1e-7 relative (the G2 gate's)."""
     lane = _lane(name)
     primals = _primals(lane)
-    program = _forward(name)
     run = _recorded(lane)
     centre = primals[:6]  # the recording rollout's inputs (dt is its literal)
     _, digests0, bits0 = run(*centre)
     assert int(bits0) == 0
     assert all(int(c) > 0 for c in np.asarray(digests0)[:, -1]), "no far pairs"
+    # the differences first, then the jvp: one compiled rollout alive at a time
+    differences = {}
     for input_name, d in zip(_INPUTS[:6], _directions(lane)):
         if input_name not in _FD_STEPS[name]:
             continue
@@ -319,7 +338,11 @@ def test_the_tangent_matches_finite_differences(name):
                 "other lists"
             )
             values.append(float(value))
-        fd = (values[0] - values[1]) / (2.0 * h)
+        differences[input_name] = ((values[0] - values[1]) / (2.0 * h), d)
+    del run
+    _drop_executables()
+    program = _forward(name)
+    for input_name, (fd, d) in differences.items():
         exact = float(program(primals, d)[4])
         assert exact != 0.0, input_name
         assert abs(exact - fd) <= 1e-7 * abs(fd), (input_name, exact, fd)
@@ -332,8 +355,10 @@ def test_the_tangent_matches_finite_differences(name):
 
 def test_jacfwd_over_parameters_is_jacrev():
     """``jax.jacfwd`` of the final state's two weighted sums over ``(G, eps2, dt,
-    mass scale)`` against the reverse path's ``jax.jacrev``; and each column
-    against a single jvp."""
+    mass scale)``: its first row against the reverse path's ``jax.jacrev`` of that
+    sum (one reverse program: ``jacrev`` of both rows batches two cotangents, and
+    the shard peaked at 18 GB RSS with it), and each column against a single
+    jvp."""
     lane = _lane("plummer")
     primals = _primals(lane)
 
@@ -363,11 +388,12 @@ def test_jacfwd_over_parameters_is_jacrev():
     theta = jnp.asarray([1.0, SOFTENING**2, DT, 1.0])
     jf = np.asarray(jax.jit(jax.jacfwd(of_theta("forward", None)))(theta))
     _drop_executables()
-    jr = np.asarray(jax.jit(jax.jacrev(of_theta("reverse", "step")))(theta))
+    first_row = of_theta("reverse", "step")
+    jr = np.asarray(jax.jit(jax.jacrev(lambda t: first_row(t)[0]))(theta))
     _drop_executables()
-    assert jf.shape == jr.shape == (2, 4)
+    assert jf.shape == (2, 4) and jr.shape == (4,)
     assert np.all(jr != 0.0)
-    assert np.max(np.abs(jf - jr) / np.abs(jr)) <= 1e-11, (jf, jr)
+    assert np.max(np.abs(jf[0] - jr) / np.abs(jr)) <= 1e-11, (jf, jr)
     from jaccpot.runtime.grad_options import ad_mode_override
 
     f = of_theta("forward", None)

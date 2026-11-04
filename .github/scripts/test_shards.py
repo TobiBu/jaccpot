@@ -139,19 +139,20 @@ _STRICT_GRAD_RUNNER_START_FORCE = (
 _STRICT_GRAD_RUNNER_ARRAYS = "tests/integration/strict/test_runner_gradient_arrays.py"
 # Forward mode (ad_mode="forward") through the production lane: the F gates (jvp
 # primal bitwise, the adjoint identity against the reverse path, finite
-# differences, jacfwd == jacrev, NaN on overflow, linearize == jvp). Forward and
-# reverse programs of the whole 3-step rollout in interpret mode. The whole file
-# in one process peaked at 15.6 GB RSS (CPU, 2026-11-03, 69 min at -n 0): the two
-# gates that compile a REVERSE gradient of the rollout as well (F2's adjoint
-# identity, F5's jacrev) run in a shard of their own.
+# differences, jacfwd == jacrev, NaN on overflow, linearize == jvp, the gradient
+# plan's forward twins). Forward and reverse programs of the whole 3-step rollout
+# in interpret mode, each test's programs dropped after it (kept, the file peaked
+# at 18-20 GB RSS). In two shards of one worker, measured with the Pallas tangent
+# kernels on a loaded 64-core host (2026-11-04): the adjoint identity and finite
+# differences 50 min / 13.1 GB, the rest 57 min / 13.4 GB.
 _STRICT_GRAD_FORWARD = "tests/integration/strict/test_forward_mode.py"
 _STRICT_GRAD_FORWARD_ADJOINT: tuple[str, ...] = tuple(
-    f"{_STRICT_GRAD_FORWARD}::{test}"
+    f"{_STRICT_GRAD_FORWARD}::{test}[{lane}]"
     for test in (
-        "test_the_tangent_is_the_adjoints_transpose[plummer]",
-        "test_the_tangent_is_the_adjoints_transpose[dehnen_error]",
-        "test_jacfwd_over_parameters_is_jacrev",
+        "test_the_tangent_is_the_adjoints_transpose",
+        "test_the_tangent_matches_finite_differences",
     )
+    for lane in ("plummer", "dehnen_error")
 )
 _STRICT_GRAD_RUNNER_OPT: tuple[str, ...] = (
     _STRICT_GRAD_RUNNER_START_FORCE,
