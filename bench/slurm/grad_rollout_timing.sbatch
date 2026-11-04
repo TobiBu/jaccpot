@@ -47,6 +47,8 @@ JACCPOT=${JACCPOT:-$PWD}                                  # this jaccpot checkou
 OUT=${OUT:-${WORKSPACE:-$HOME}/grad-rollout-timing-$(date +%Y%m%d)}
 ROWS=${ROWS:-.}                                           # a regex over the row tags
 PY=${PY:-python}
+# SMOKE_N: every row at this N (bench/slurm/h0/submit_all.sh SMOKE=1, a CPU test of the commands)
+nn() { echo "${SMOKE_N:-$1}"; }
 
 # one card of the exclusive node; the others stay idle
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES%%,*}
@@ -65,13 +67,13 @@ GATE_1E8="XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
 
 # tag | allocator env | script and arguments (the row's JSON is $OUT/rows/<tag>.json)
 ROW_LIST=(
-  "s8_8e6_galaxy|$GATE|$G 8000000 --galaxy --softening 1e-3 --reps 7 --trace $OUT/traces/s8_8e6_galaxy"
-  "s8_8e6|$GATE|$G 8000000 --reps 7"
-  "s8_2p5e7|$GATE|$G 25000000 --reps 7"
-  "s8_1e8|$GATE_1E8|$G 100000000 --leaf-capacity auto --grad-only --no-forward --reps 5"
+  "s8_8e6_galaxy|$GATE|$G $(nn 8000000) --galaxy --softening 1e-3 --reps 7 --trace $OUT/traces/s8_8e6_galaxy"
+  "s8_8e6|$GATE|$G $(nn 8000000) --reps 7"
+  "s8_2p5e7|$GATE|$G $(nn 25000000) --reps 7"
+  "s8_1e8|$GATE_1E8|$G $(nn 100000000) --leaf-capacity auto --grad-only --no-forward --reps 5"
 )
 for n in 8e6 2p5e7; do
-  case $n in 8e6) N=8000000; R=7 ;; 2p5e7) N=25000000; R=5 ;; esac
+  case $n in 8e6) N=$(nn 8000000); R=7 ;; 2p5e7) N=$(nn 25000000); R=5 ;; esac
   for steps in 1 16; do
     r=r_${n}_T${steps}
     ROW_LIST+=(
@@ -88,7 +90,7 @@ for n in 8e6 2p5e7; do
     done
   done
 done
-N=100000000
+N=$(nn 100000000)
 ROW_LIST+=(
   "r_1e8_T1_fwd|$BFC|$T --n $N --steps 1 --only forward --reps 3"
   "r_1e8_T1_dfwd|$BFC|$T --n $N --steps 1 --only diffforward --reps 3 --reference $OUT/rows/r_1e8_T1_fwd.json"

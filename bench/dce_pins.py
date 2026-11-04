@@ -955,6 +955,9 @@ _FORCE_ROW = ["--no-scan", "--accuracy-targets", "4096", "--eval-repeats", "5"]
 
 
 def _timed_pin(out: Path, n: int, ic: list[str], force_row: bool) -> dict:
+    # a CPU smoke test of the commands at a tiny N (bench/slurm/h0/submit_all.sh SMOKE=1)
+    if os.environ.get("DCE_PINS_SMOKE_N"):
+        n = int(os.environ["DCE_PINS_SMOKE_N"])
     meta = {
         "timing": True,
         "n": n,
@@ -1142,7 +1145,12 @@ def _compare_timed(pin: str, ref: dict, new: dict, control: dict | None) -> dict
             "ms_new": n["ms_min"],
             "time_change": (n["ms_min"] - r["ms_min"]) / r["ms_min"],
             "time_limit": t_lim,
-            "peak_change": (n["peak_gib"] - r["peak_gib"]) / r["peak_gib"],
+            # a zero peak: no device memory statistics (a CPU smoke run)
+            "peak_change": (
+                (n["peak_gib"] - r["peak_gib"]) / r["peak_gib"]
+                if r["peak_gib"]
+                else (0.0 if n["peak_gib"] == r["peak_gib"] else float("inf"))
+            ),
             "peak_limit": p_lim,
             "lists_equal": r.get("far_pair_count") == n.get("far_pair_count"),
             "contaminated": bool(r.get("contaminated") or n.get("contaminated")),
