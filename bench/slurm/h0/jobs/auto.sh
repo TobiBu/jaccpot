@@ -16,7 +16,7 @@ BFC="XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION=0.95"
 SIZES="1e5 1e6 1e7"
 REPS=${REPS:-5}
 L=50
-[ "${SMOKE:-}" = 1 ] && SIZES="smoke" REPS=1
+if [ "${SMOKE:-}" = 1 ]; then SIZES="smoke" REPS=1; export H0_SMOKE_INTERPRET=all; fi
 mkdir -p "$OUT/rows" "$OUT/logs"
 git -C "$H0_MIMIRAX" rev-parse HEAD > "$OUT/mimirax_commit.txt" 2>/dev/null || true
 

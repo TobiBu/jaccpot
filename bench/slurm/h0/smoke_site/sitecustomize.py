@@ -24,18 +24,24 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 if os.environ.get("H0_SMOKE_CPU") == "1" and os.environ.get("JAX_PLATFORMS") == "cpu":
-    # every Pallas kernel of the lane in interpret mode, the prepacked near layout, the
-    # GPU's walk: tests/integration/strict/test_grad_rollout_differentiable.py's set
-    for _key, _val in (
-        ("JACCPOT_CASCADE_PALLAS", "1"),
-        ("JACCPOT_CASCADE_PALLAS_INTERPRET", "1"),
-        ("JACCPOT_M2L_CSR_INTERPRET", "1"),
+    # the near field's CSR lane in interpret mode (the forward lane's goldens)
+    _SWITCHES = [
         ("JACCPOT_NEARFIELD_PALLAS_INTERPRET", "1"),
         ("JACCPOT_NEARFIELD_LEAFPAIR_CSR", "1"),
-        ("JACCPOT_L2P_KERNEL", "interpret"),
         ("JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB", "0"),
-        ("JACCPOT_WALK_PALLAS_INTERPRET", "1"),
-    ):
+    ]
+    if os.environ.get("H0_SMOKE_INTERPRET") == "all":
+        # the gradient benches: every Pallas kernel of the lane in interpret mode and the
+        # GPU's walk (their reverses need them), as
+        # tests/integration/strict/test_grad_rollout_differentiable.py; ~4x slower
+        _SWITCHES += [
+            ("JACCPOT_CASCADE_PALLAS", "1"),
+            ("JACCPOT_CASCADE_PALLAS_INTERPRET", "1"),
+            ("JACCPOT_M2L_CSR_INTERPRET", "1"),
+            ("JACCPOT_L2P_KERNEL", "interpret"),
+            ("JACCPOT_WALK_PALLAS_INTERPRET", "1"),
+        ]
+    for _key, _val in _SWITCHES:
         os.environ.setdefault(_key, _val)
     # the test conftest's XLA:CPU flag: interpret-mode kernels compile minutes faster
     if "xla_backend_extra_options" not in os.environ.get("XLA_FLAGS", ""):
