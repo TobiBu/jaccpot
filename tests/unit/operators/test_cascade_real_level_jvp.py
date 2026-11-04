@@ -15,6 +15,8 @@ the operators' analytic transverse derivative.
 
 from __future__ import annotations
 
+import gc
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -47,9 +49,17 @@ _LANES_K = 8
 
 @pytest.fixture(autouse=True)
 def _x64(monkeypatch):
+    """x64 and the test lane width; after each test, drop its compiled programs.
+
+    Kept across tests, the K = 8 cascade programs (interpret mode) took this file to
+    16.2 GB RSS in one process -- more than the 16 GB CI runner, which shut the
+    `unit` shard down on #500/#502 (2026-11-04).
+    """
     monkeypatch.setenv("JACCPOT_CASCADE_LANES_K", str(_LANES_K))
     with jax.enable_x64(True):
         yield
+    jax.clear_caches()
+    gc.collect()
 
 
 def _plummer(n, seed):
