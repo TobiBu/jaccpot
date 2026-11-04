@@ -328,6 +328,7 @@ def _ladder_translation(which: str, order: int) -> Callable[[Array, Array], Arra
     Callable[[Array, Array], Array]
         ``translate(v [C], delta [3]) -> [C]``.
     """
+    from jaccpot.operators._precision import highest_matmul_precision
     from jaccpot.operators.real_harmonic_derivatives import (
         real_harmonic_lowering_matrix,
     )
@@ -343,6 +344,7 @@ def _ladder_translation(which: str, order: int) -> Callable[[Array, Array], Arra
     def translate(v: Array, delta: Array) -> Array:
         return op(v, delta, order=p)
 
+    @highest_matmul_precision
     def rule(primals: tuple, tangents: tuple) -> tuple[Array, Array]:
         v, delta = primals
         tv, td = tangents
