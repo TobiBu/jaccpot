@@ -227,3 +227,96 @@ memory: the fused lane's flat walk, whose lists are CSRs sized by the pairs foun
 retire the dense-row criterion path. **First step:** dump the buffer assignment of the program that OOMs
 (`XLA_FLAGS=--xla_dump_to=... --xla_dump_hlo_pass_re=buffer-assignment`) and confirm that the biggest buffer is the
 dense far rows. This was not done in A1 (time spent on the stall).
+
+## M2 (CPU part) — the multi-GPU mode as N processes (2026-11-03)
+
+Plan M2, first session (CPU only): `ProductionRunner(mesh=MeshRunConfig(...))` runs as N processes with one device each
+(`jax.distributed`) instead of one process driving N devices. Branch `m2/multiprocess-cpu` on main `96122f63`,
+head `9da1fedc`.
+
+### What jax 0.11.2 gives on CPU (the spike)
+| item | result |
+| --- | --- |
+| `jax.distributed.initialize` on localhost, gloo collectives | works at 2 and 4 processes x 1 CPU device |
+| `psum`/`pmax`/`pmin`, `all_gather`, `all_to_all`, `ppermute` inside `jit(shard_map)` | work; all but float `psum` bitwise the single process's |
+| float `psum` (and an eager reduction over a sharded array) | bitwise at 2 processes, NOT at 4: XLA:CPU's in-process all-reduce folds the devices in mesh order (`((a0+a1)+a2)+a3`, checked at 3/4/8), gloo does not (12,656 of 49,152 bytes differ; `sum m x` 9.3e-10) |
+| `ragged_all_to_all` | `UNIMPLEMENTED` on XLA:CPU (one process or several); yggdrax's `"buf"` exchange (all_gather based, the CPU tests' path already) is used, bitwise across processes |
+| MPI collectives | need an MPItrampoline build of MPI (none here); gloo is the CI choice |
+| `np.asarray` of a sharded array spanning other processes | raises; replicated (`P()`) arrays read locally |
+
+### What was built
+| piece | what |
+| --- | --- |
+| `jaccpot/distributed/multiprocess.py` | `initialize` (explicit coordinator or the SLURM environment; gloo on CPU), `process_info`, `global_mesh` (devices in process order), `host_value`, `allgather_object` / `allgather_by_device`, `host_copy` / `put_host_copy` (per-process shards), `mesh_sum` / `mesh_moments` (float sums folded in mesh order: bitwise the single process at any process count), `local_id_range` / `ProcessLocalParticles` (each process reads only its id range), `refuse_in_multiprocess`. Every helper is the old code path when `jax.process_count() == 1` |
+| `rollout.decompose_local` | the decomposition from each process's id range: the same per-device layout and the same repartition program as `decompose` from one host |
+| `template_force.prepare_mesh_force` | under several processes the caps-only prepares run only on a process's own devices; the box (exact live extents), auto leaf capacity, level plans, walk caps, live leaves and the upward depth bound are gathered and merged in mesh order; the template is device 0's (its leaf shapes gathered; static leaves checked) |
+| segment runner and the runner's mesh mode | host reads through `host_value`, the retry's host copy per process, the energy's sums by `mesh_sum`, the moments by `mesh_moments`, `run(ProcessLocalParticles(...))`; restart files REFUSED under several processes until M3 (orbax, U5), `restart_from=<RunResult>` works |
+
+Usage, one process per device:
+
+```python
+from jaccpot.distributed import multiprocess as mp
+mp.initialize()                          # SLURM env, or (coordinator, num_processes, process_id)
+mesh = mp.global_mesh("gpus")
+lo, hi = mp.local_id_range(N, mesh)      # read only these ids of the IC
+runner = ProductionRunner(solver, settings=..., mesh=MeshRunConfig(mesh, ...))
+res = runner.run(mp.ProcessLocalParticles(state[lo:hi], masses[lo:hi], N), None, dt=dt, num_steps=k)
+```
+
+### Gates (CPU; N processes x 1 device vs 1 process x N forced devices, same host)
+`tests/distributed/test_multiprocess_runtime.py` (marker `distributed_multiprocess`, job
+`test-distributed-multiprocess`); every side in fresh child processes (`_multiprocess_harness.py`).
+
+| case | 2 processes | 4 processes |
+| --- | --- | --- |
+| helpers: `mesh_sum`, `mesh_moments`, `host_value`, `decompose_local` == `decompose` | bitwise | bitwise |
+| runner + `DirectMeshForce` (N = 256, f64): migrating and not, a repartition before every segment, energy and moments at every edge, continued in memory; restart files refused under several processes | bitwise (state, acceleration, owner, every edge's diagnostics and plan record, every segment report) | bitwise |
+| runner + `FusedMeshForce` `dehnen`, migrating, cross capacity undersized (segment 1 re-planned and retried), energy at every edge | bitwise | bitwise (manual) |
+| runner + `FusedMeshForce` `dehnen_error`, migrating, cross capacity undersized, f_b carried | bitwise | bitwise (manual) |
+| runner + `FusedMeshForce` `dehnen_error` on the A3 collapse start: TREE re-plan (leaf capacity 44 -> 1024), the library's cross sizing at the start and the drift | bitwise | -- (the start does not fit 44 leaves on four devices, in one process either) |
+
+The file end to end (shared 64-core host, `-n 4`, manual cases on): 8 passed in 35 min (fused cases 11-24 min
+each, both sides); the CI subset under `JACCPOT_RUNTIME_TYPECHECK=1`: 6 passed, 2 skipped (manual). CI job
+`test-distributed-multiprocess` (path-gated, cap 60 min, an estimate) runs the fast cases at 2 and 4 processes
+and the two 2-process fused cases.
+
+Mutation: `mesh_sum` back to a plain `psum` -> the 4-process helper and direct-runner gates fail (`mesh_sum`,
+`moment_mass_moment`, `moment_momentum` differ; the runner's edge diagnostics differ); 2 processes still pass (why
+the gate runs 4).
+
+### Default paths
+- Single-card CPU program identity: 36/36 identical against `m2-base-cpu` (main `96122f63`).
+- The single-process MESH programs (every top-level jitted program the runner runs on two forced CPU devices,
+  `lower().as_text(debug_info=False)`, captured with `provider_hlo_identity`'s jit wrapper) and their results,
+  main `96122f63` vs the branch: direct force (migrating and not, energy at every edge) 49/49, fused `dehnen`
+  migrating 54/54, non-migrating 47/47, fused `dehnen_error` with a tree re-plan 87/87: text-identical, arrays
+  identical.
+- Existing distributed tiers on the branch (two forced CPU devices): `distributed-tier` 96 passed (7 skipped:
+  need 4 devices / opt-in), `distributed-criterion` 8, `distributed-segment` 10, `distributed-segment-criterion`
+  4, `distributed-segment-migration` 2, `distributed-segment-runner` 5; no failure.
+
+### Open (for M2 session 2 / M3)
+- GPU: NCCL `ragged_all_to_all` across processes is untested; with jax 0.11.2 the cross-process fallback is the
+  NCCL send/recv path that needs `use_barrier_with_nccl=false` (#398). First check on one HoreKa node.
+- `RunResult.state` (and `handle.gather()`) gathers the whole state to every process (`process_allgather`): test
+  scale only; per-rank output belongs to M3.
+- Callbacks run on every process; a callback that writes must check `jax.process_index() == 0`.
+- The stacked route (`setup_fused_force`) and `distributed/fmm.py` stay single-process.
+
+## H0 — the HoreKa single-node baseline bundle (2026-11-04)
+
+`bench/slurm/h0/` runs every H0 measurement on dedicated HoreKa nodes:
+- the multi-GPU scaling matrix (#480), on 1/2/4 cards;
+- the S9 gradient timing and the S1b Mosaic L2P timing;
+- the L1-L3 pins with an A-vs-A control;
+- the cost of yggdrax #104's cummax at 1e8 (A-B-A-B-A);
+- `cell_min_level="auto"` vs 8.
+
+Start with `bench/slurm/h0/README.md`. In short: edit `site.env`, then run `setup_env.sh`, `submit_all.sh` and
+`collect.sh`. The bundle pins yggdrax, nornax, mimirax and the exact runtime wheels, and stamps every row with its
+provenance.
+
+It was checked on CPU only: every job script ran locally at tiny N with the exact arguments it passes. That run found
+one bench bug, now fixed: `multigpu_segment_gate.py` crashed on every one-device mesh row.
+
+Expected cost: about 19 node-hours.
