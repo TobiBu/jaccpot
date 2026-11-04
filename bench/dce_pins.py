@@ -1145,7 +1145,12 @@ def _compare_timed(pin: str, ref: dict, new: dict, control: dict | None) -> dict
             "ms_new": n["ms_min"],
             "time_change": (n["ms_min"] - r["ms_min"]) / r["ms_min"],
             "time_limit": t_lim,
-            "peak_change": (n["peak_gib"] - r["peak_gib"]) / r["peak_gib"],
+            # a zero peak: no device memory statistics (a CPU smoke run)
+            "peak_change": (
+                (n["peak_gib"] - r["peak_gib"]) / r["peak_gib"]
+                if r["peak_gib"]
+                else (0.0 if n["peak_gib"] == r["peak_gib"] else float("inf"))
+            ),
             "peak_limit": p_lim,
             "lists_equal": r.get("far_pair_count") == n.get("far_pair_count"),
             "contaminated": bool(r.get("contaminated") or n.get("contaminated")),

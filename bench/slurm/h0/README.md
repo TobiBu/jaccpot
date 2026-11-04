@@ -108,8 +108,12 @@ SMOKE=1 bash bench/slurm/h0/submit_all.sh            # every job's commands on t
 (`SMOKE_N` / `DCE_PINS_SMOKE_N`, the scaling matrix's `--smoke-n`; reps cut where they only repeat a
 row), on forced CPU devices, through `smoke_site/sitecustomize.py` (the fused lane on the CPU as
 jaccpot's lane goldens run it). Locally it ran with `H0_LOCAL_ENV=bench/slurm/h0/local_smoke.env`.
-It takes hours on a busy CPU; `--only <jobs>` runs a subset. It checks arguments and plumbing, not
-numbers.
+It checks arguments and plumbing, not numbers, and it is slow: every Pallas kernel runs in interpret
+mode, so a forward row costs minutes and a gradient row 20-60 min of XLA:CPU compile at up to ~50 GB of
+host memory (`H0_SMOKE_INTERPRET=all`, set by the grad and auto jobs). Run it sequentially (the default;
+`--only <jobs>` runs a subset): run in parallel, the gradient compiles were OOM-killed and an XLA:CPU
+collective timed out under the load. The 2026-11-04 run on the development machine is recorded in
+track H0's report.
 
 ## Files
 

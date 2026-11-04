@@ -45,7 +45,7 @@ entry() {  # name command...
 }
 entry pins env DCE_PINS_SMOKE_N=$((N < 8192 ? 8192 : N)) "$H0_PY" bench/dce_pins.py record --pins L1,L3 --tag preflight --root "$OUT/pins"
 entry scaling env SMOKE_N=$N TIERS=weak REPS=1 OUT="$OUT/scaling" bash bench/slurm/multigpu_scaling.sbatch
-entry grad env SMOKE_N=$N H0_SMOKE_INTERPRET=all ROWS='^(s8_8e6|r_8e6_T1_fwd|r_8e6_T1_grad_offload)$' PY="$H0_PY" OUT="$OUT/grad" \
+entry grad env SMOKE_N=$N H0_SMOKE_INTERPRET=all ROWS='^(s8_8e6|r_8e6_T1_fwd|r_8e6_T1_grad_step|r_8e6_T16_grad_nested|r_8e6_T1_grad_offload)$' PY="$H0_PY" OUT="$OUT/grad" \
   bash bench/slurm/grad_rollout_timing.sbatch
 entry s1b env SIZES=$N REPS=1 INNER=1 OUT="$OUT/s1b" bash bench/slurm/s1b_mosaic_l2p.sbatch
 entry auto env H0_SMOKE_INTERPRET=all CUDA_VISIBLE_DEVICES="$FIRST_CARD" XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 \

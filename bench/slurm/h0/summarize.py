@@ -616,7 +616,7 @@ def section_auto(o: Out, run: Path, prov) -> None:
                         median_s=t.get("median_s"),
                         min_s=t.get("min_s"),
                         per_step_ms=t.get("per_step_ms"),
-                        level=cfg.get("cell_min_level"),
+                        level=cfg.get("cell_min_level") or "8 (preset)",
                         contended=rec.get("contended"),
                     )
                 )
