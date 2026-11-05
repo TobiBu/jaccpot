@@ -54,6 +54,7 @@ __all__ = [
     "ShardState",
     "StepReport",
     "decompose",
+    "decompose_local",
     "make_reference_direct_force",
     "setup_fused_force",
 ]
@@ -250,14 +251,66 @@ def decompose(
     x, v, m, i, c = (
         jax.device_put(a, sh) for a in (flat_pos, flat_vel, flat_mass, flat_id, counts)
     )
+    return _decompose_placed(
+        mesh,
+        (x, v, m, i, c),
+        cap=cap,
+        num_samples=num_samples,
+        axis_name=axis_name,
+        cubic=cubic,
+    )
+
+
+def _decompose_placed(
+    mesh: Any,
+    placed: tuple,
+    *,
+    cap: int,
+    num_samples: int,
+    axis_name: str,
+    cubic: Optional[bool],
+) -> tuple[ShardState, dict]:
+    """:func:`decompose`'s device half: the repartition of the even split.
+
+    Parameters
+    ----------
+    mesh : Any
+        The 1-D mesh.
+    placed : tuple
+        ``(x, v, m, ids, counts)`` of the even split, flat and ``P(axis)``.
+    cap : int
+        Rows per device.
+    num_samples : int
+        Pivot samples per device.
+    axis_name : str
+        Mesh axis.
+    cubic : Optional[bool]
+        As :func:`decompose`.
+
+    Returns
+    -------
+    tuple[ShardState, dict]
+        As :func:`decompose`.
+
+    Raises
+    ------
+    ValueError
+        If the decomposition was declined.
+    """
+    from jaccpot.distributed.multiprocess import host_value
+
+    ndev = len(_mesh_devices(mesh))
+    sh = NamedSharding(mesh, P(axis_name))
+    x, v, m, i, c = placed
     repart = _make_repartition(
         mesh, cap=cap, num_samples=num_samples, axis_name=axis_name, cubic=cubic
     )
     x, v, m, i, c, diag = repart(x, v, m, i, c)
-    if bool(np.asarray(diag["declined"])[0]):
+    diag_host = {k: host_value(vv) for k, vv in diag.items()}
+    if bool(diag_host["declined"][0]):
         raise ValueError(
             "the initial decomposition was declined: some device would receive "
-            f"{int(np.asarray(diag['recv_counts']).max())} rows > cap={cap}"
+            f"{int(diag_host['recv_counts'].max())} rows > cap={cap}"
         )
     state = ShardState(
         positions=x,
@@ -265,9 +318,118 @@ def decompose(
         masses=m,
         ids=i,
         count=c,
-        accel=jax.device_put(np.zeros((ndev * cap, 3), pos.dtype), sh),
+        accel=jax.device_put(np.zeros((ndev * cap, 3), x.dtype), sh),
     )
-    return state, {k: np.asarray(vv) for k, vv in diag.items()}
+    return state, diag_host
+
+
+def decompose_local(
+    mesh: Any,
+    positions: Any,
+    velocities: Any,
+    masses: Any,
+    *,
+    num_particles: int,
+    cap: int,
+    num_samples: int = 256,
+    axis_name: str = AXIS_NAME,
+    cubic: Optional[bool] = None,
+) -> tuple[ShardState, dict]:
+    """:func:`decompose` from THIS process's particles only (multi-process mode).
+
+    Each process passes the particles of ids ``lo..hi-1``
+    (:func:`~jaccpot.distributed.multiprocess.local_id_range`): its devices' chunks
+    of the even split :func:`decompose` makes on one host. They are laid out as
+    :func:`decompose` lays them (live rows first, padding on the chunk's first
+    particle), placed as this process's shards, and the same repartition program
+    runs: the result is :func:`decompose`'s from the whole set on one host, bitwise.
+
+    Parameters
+    ----------
+    mesh : Any
+        The 1-D mesh (:func:`~jaccpot.distributed.multiprocess.global_mesh`).
+    positions : Any
+        ``(hi - lo, 3)`` host positions, ids ``lo..hi-1`` in order.
+    velocities : Any
+        ``(hi - lo, 3)``.
+    masses : Any
+        ``(hi - lo,)``.
+    num_particles : int
+        N over all processes.
+    cap : int
+        Rows per device.
+    num_samples : int
+        Pivot samples per device.
+    axis_name : str
+        Mesh axis.
+    cubic : Optional[bool]
+        As :func:`decompose`.
+
+    Returns
+    -------
+    tuple[ShardState, dict]
+        As :func:`decompose`.
+
+    Raises
+    ------
+    ValueError
+        If the rows are not this process's id range, or an even split does not
+        fit ``cap``.
+    """
+    from jaccpot.distributed.multiprocess import (
+        _device_chunks,
+        local_device_indices,
+        local_id_range,
+    )
+
+    devices = _mesh_devices(mesh)
+    ndev = len(devices)
+    n = int(num_particles)
+    pos = np.asarray(positions)
+    vel = np.asarray(velocities, pos.dtype)
+    mass = np.asarray(masses, pos.dtype)
+    lo, hi = local_id_range(n, mesh)
+    if int(pos.shape[0]) != hi - lo:
+        raise ValueError(
+            f"this process provides ids {lo}..{hi - 1} ({hi - lo} rows), got "
+            f"{pos.shape[0]}"
+        )
+    if int(np.ceil(n / ndev)) > int(cap):
+        raise ValueError(f"cap={cap} cannot hold an even split of N={n} over {ndev}")
+    chunks = _device_chunks(n, ndev)
+    sh = NamedSharding(mesh, P(axis_name))
+    shards: list = [[] for _ in range(5)]
+    for d in local_device_indices(mesh):
+        a, b = chunks[d]
+        k = b - a
+        rows = slice(a - lo, b - lo)
+        flat_pos = np.zeros((cap, 3), pos.dtype)
+        flat_vel = np.zeros((cap, 3), pos.dtype)
+        flat_mass = np.zeros((cap,), pos.dtype)
+        flat_id = np.full((cap,), -1, np.int32)
+        flat_pos[:k] = pos[rows]
+        flat_vel[:k] = vel[rows]
+        flat_mass[:k] = mass[rows]
+        flat_id[:k] = np.arange(a, b, dtype=np.int32)
+        if k:
+            flat_pos[k:] = pos[a - lo]
+        count = np.asarray([k], np.int32)
+        for j, arr in enumerate((flat_pos, flat_vel, flat_mass, flat_id, count)):
+            shards[j].append(jax.device_put(arr, devices[d]))
+    placed = tuple(
+        jax.make_array_from_single_device_arrays(
+            (ndev * int(parts[0].shape[0]),) + tuple(parts[0].shape[1:]), sh, parts
+        )
+        for parts in shards
+    )
+    return _decompose_placed(
+        mesh,
+        placed,
+        cap=cap,
+        num_samples=num_samples,
+        axis_name=axis_name,
+        cubic=cubic,
+    )
 
 
 #: :func:`_make_repartition`'s programs, by (mesh, capacity, options): a jit built

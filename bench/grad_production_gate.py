@@ -148,7 +148,10 @@ def main() -> int:
     jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
 
-    assert jax.devices()[0].platform == "gpu", jax.devices()
+    # H0_SMOKE_CPU: bench/slurm/h0's CPU smoke of the commands
+    assert (
+        jax.devices()[0].platform == "gpu" or os.environ.get("H0_SMOKE_CPU") == "1"
+    ), jax.devices()
     sys.path.insert(0, str(HERE))
     from dce_pins import _plummer
     from yggdrax._cell_partition import adaptive_cell_leaf_partition_numpy

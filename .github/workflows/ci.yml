@@ -160,6 +160,12 @@ jobs:
           - shard: integration-strict-runner
             typecheck: "0"
             timeout: 65
+          # The float64 lane and caps-only prepare files out of `integration-strict`
+          # (#503, 2026-11-05): cold, the shard ran 23.6 min on main against its 25 min
+          # cap and was cancelled at it on #503. Each half ~12 min cold.
+          - shard: integration-strict-lane
+            typecheck: "0"
+            timeout: 25
           # The differentiable fused step and the rollout over it (S9, #490): every
           # Pallas kernel in interpret mode and reverse programs of the whole lane;
           # with them `integration-strict` was cancelled at its cap. Measured as
@@ -950,6 +956,56 @@ jobs:
           if grep -qE "no tests ran|collected 0 items" pytest-segment-runner-tier.txt \
              || grep -qE "^SKIPPED.*needs >= 2 devices" pytest-segment-runner-tier.txt; then
             echo "::error::the segment-runner potential/production-mode tier did not run on forced devices"
+            exit 1
+          fi
+
+  # The multi-GPU mode as N localhost processes with one CPU device each
+  # (`jax.distributed`, gloo; M2, tests/distributed/test_multiprocess_runtime.py)
+  # against ONE process with N forced devices, bitwise. Every case spawns its own
+  # child processes (a fresh port, a timeout, process groups killed on failure),
+  # so the job forces no devices itself. The fused-force cases at 4 processes are
+  # manual (JACCPOT_RUN_MANUAL_TESTS=1): four processes compiling the fused lane
+  # at once is more than a hosted runner's four cores do inside the cap.
+  #
+  # PATH-GATED: see the `changes` job. The cap is an estimate: locally the fast
+  # cases take ~1.5 min and the two 2-process fused cases 15-21 min each (both
+  # sides, a loaded 64-core host); adjust it from the first measured runs, and
+  # split the fused cases into a job of their own rather than raise it.
+  test-distributed-multiprocess:
+    name: test-distributed-multiprocess
+    needs: changes
+    if: needs.changes.outputs.gated == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install package + dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install -e ".[dev]"
+      - name: Multi-process tier (localhost processes vs forced devices)
+        # `-n 0`: each case already runs up to four processes.
+        run: |
+          set -o pipefail
+          rc=0
+          mapfile -t selection < <(python .github/scripts/test_shards.py args distributed-multiprocess)
+          pytest "${selection[@]}" -n 0 -rs --durations=10 \
+            | tee pytest-multiprocess-tier.txt || rc=$?
+          if [ "$rc" != 0 ] && [ "$rc" != 5 ]; then exit "$rc"; fi
+      - name: Fail if the tier was skipped rather than run
+        run: |
+          if grep -qE "no tests ran|collected 0 items" pytest-multiprocess-tier.txt; then
+            echo "::error::the multi-process tier did not run"
             exit 1
           fi
 

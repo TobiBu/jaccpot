@@ -81,6 +81,8 @@ _NORNAX_ADAPTER = "tests/integration/test_mutual_fmm_nornax.py"
 _NORNAX_DISTRIBUTED = "tests/integration/test_mutual_distributed_nornax.py"
 _SEGMENT_CRITERION = "tests/distributed/test_mesh_segment_dehnen_error.py"
 _SEGMENT_MIGRATION = "tests/distributed/test_mesh_segment_migration_fused.py"
+# the multi-GPU mode as N processes x 1 device against 1 process x N devices (M2)
+_MULTIPROCESS = "tests/distributed/test_multiprocess_runtime.py"
 # the mesh potential and the production runner's multi-GPU mode on the fused force
 # (S11 session 2, tracks E and D): ~11 min of compilation between them on CI
 _SEGMENT_RUNNER_FILES = (
@@ -96,6 +98,16 @@ _STRICT = "tests/integration/strict"
 _STRICT_RUNNER_FILES: tuple[str, ...] = (
     "tests/integration/strict/test_strict_runners_on_provider.py",
     "tests/integration/strict/test_production_runner.py",
+)
+# The float64 lane and the caps-only prepare: about half of the rest's compilation.
+# A cold-cache `integration-strict` ran 23.6 min against its 25 min cap on main
+# 1bb30620 (2026-11-05) and was cancelled at the cap on #503 (82 % done); a cold
+# local A/B of its three slowest tests at main and #503 was level (176-180 s vs
+# 183-184 s), so the shard had outgrown its cap, not the branch. These two files
+# were ~1360 of its ~2880 test-seconds on #503's first run (`--durations`).
+_STRICT_LANE_FILES: tuple[str, ...] = (
+    "tests/integration/strict/test_float64_lane.py",
+    "tests/integration/strict/test_caps_only_prepare.py",
 )
 # The differentiable fused step and the rollout over it (S9): every Pallas kernel in
 # interpret mode, and reverse programs of the whole lane (2-5 min of compilation
@@ -194,6 +206,7 @@ SHARDS: dict[str, list[str]] = {
             f"--ignore={path}"
             for path in (
                 *_STRICT_RUNNER_FILES,
+                *_STRICT_LANE_FILES,
                 *_STRICT_GRAD_FILES,
                 _STRICT_GRAD_ROLLOUT,
                 _STRICT_GRAD_RUNNER,
@@ -203,6 +216,7 @@ SHARDS: dict[str, list[str]] = {
         ),
     ],
     "integration-strict-runner": list(_STRICT_RUNNER_FILES),
+    "integration-strict-lane": list(_STRICT_LANE_FILES),
     "integration-strict-grad": list(_STRICT_GRAD_FILES),
     "integration-strict-grad-rollout": [
         _STRICT_GRAD_ROLLOUT,
@@ -244,7 +258,8 @@ SHARDS: dict[str, list[str]] = {
         "tests/distributed",
         *_UNIT_MULTI_DEVICE,
         "-m",
-        "not distributed_criterion and not distributed_segment",
+        "not distributed_criterion and not distributed_segment"
+        " and not distributed_multiprocess",
     ],
     "distributed-criterion": ["tests/distributed", "-m", "distributed_criterion"],
     # the fused mesh lane's segment runner (S11): minutes of compile per case
@@ -266,6 +281,9 @@ SHARDS: dict[str, list[str]] = {
     # session 2, tracks E and D): with them the segment job took ~24 of its 40
     # minutes (1,390 s of calls on this host at -n 1, ~1.2x that on CI)
     "distributed-segment-runner": [*_SEGMENT_RUNNER_FILES, "-m", "distributed_segment"],
+    # the multi-GPU mode as N localhost processes (M2): child processes against
+    # one process with N forced devices; its own job (no forced devices needed)
+    "distributed-multiprocess": [_MULTIPROCESS, "-m", "distributed_multiprocess"],
 }
 
 # The two jobs that do not run on every pull request. Each costs minutes of
@@ -279,6 +297,7 @@ GATED_SHARDS: tuple[str, ...] = (
     "distributed-segment-criterion",
     "distributed-segment-migration",
     "distributed-segment-runner",
+    "distributed-multiprocess",
     "nornax-distributed",
 )
 GATED_PATHS: tuple[str, ...] = (

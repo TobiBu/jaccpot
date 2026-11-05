@@ -1494,6 +1494,9 @@ class ProductionRunner:
         ----------
         state : Any
             ``[N, 2, 3]`` positions and velocities; ``None`` with ``restart_from``.
+            In the multi-GPU mode under several processes (``jax.distributed``)
+            also a :class:`~jaccpot.distributed.multiprocess.ProcessLocalParticles`
+            (this process's id range only; ``masses=None``).
         masses : Any
             ``[N]``; ``None`` with ``restart_from``.
         dt : Union[float, Any]
@@ -2502,6 +2505,9 @@ class ProductionRunner:
                     "theta": float(engine.theta),
                     "mac_type": str(getattr(engine, "mac_type", None)),
                     "adaptive_eps": getattr(engine, "adaptive_eps", None),
+                    "mac_force_scale_floor": getattr(
+                        engine, "mac_force_scale_floor", None
+                    ),
                     "working_dtype": jnp.dtype(engine.working_dtype).name,
                     "use_pallas": bool(getattr(engine, "use_pallas", False)),
                     "leaf_partition": str(

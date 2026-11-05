@@ -19,7 +19,10 @@ Here, in three passes and no sort:
    the row's entries (tile against tile, ``K x K`` compares) and writes it to
    ``offset + rank``. The entries of a row are distinct node ids, so the rank is a
    permutation and the result is the row sorted ascending -- the same array, bit
-   for bit, as the sorted build, whatever order the atomics left.
+   for bit, as the sorted build, whatever order the atomics left. That costs
+   ``(n / K)^2`` tile pairs per row, so rows longer than :data:`RANK_LONG_ROW` are
+   merge-sorted instead (:func:`_merge_pass_kernel`, ``log2 n`` passes of binary
+   searches): a sort, so the same array again.
 
 The live set is the pairs plus one unsorted and one sorted ``2W`` list: 16 B per
 canonical slot. At the 8e6 far list's size (2.9e7 slots, 1.96e7 live, rows of up to
@@ -61,8 +64,8 @@ def pallas_directed_csr_supported() -> bool:
     return pallas_m2l_real_csr_supported()
 
 
-#: Rows longer than this are ranked with their tiles spread over programs
-#: (:func:`_rank_long_kernel`). The standard configurations' rows are far below it
+#: Rows longer than this are merge-sorted with their tiles spread over programs
+#: (:func:`_merge_pass_kernel`). The standard configurations' rows are far below it
 #: (near lists: 85-634 at cell_min_level 8; far rows a few hundred), so they keep the
 #: one-program-per-row kernel.
 RANK_LONG_ROW = 2048
@@ -213,7 +216,7 @@ def _rank_kernel(
     num_rows : int
         ``R``. Static.
     long_row : int
-        Rows longer than this are left to :func:`_rank_long_kernel`. Static.
+        Rows longer than this are left to :func:`_merge_pass_kernel`. Static.
 
     Returns
     -------
@@ -228,7 +231,7 @@ def _rank_kernel(
         r = jnp.minimum(r0 + j, num_rows - 1)
         start = off_ref[r]
         n = jnp.where(r0 + j < num_rows, off_ref[r + 1] - start, 0)
-        # rows past ``long_row`` are the long-row kernel's (:func:`_rank_long_kernel`)
+        # rows past ``long_row`` are the long-row passes' (:func:`_merge_pass_kernel`)
         n = jnp.where(n <= long_row, n, 0)
         n_tiles = (n + (lanes - 1)) // lanes
 
@@ -292,10 +295,11 @@ def _rank_tile(
     plgpu.store(out_ref.at[dest], v, mask=ok)
 
 
-def _rank_long_kernel(
+def _merge_pass_kernel(
     src_ref: KernelRef,
     off_ref: KernelRef,
     long_ref: KernelRef,
+    run_ref: KernelRef,
     out_in: KernelRef,
     out_ref: KernelRef,
     *,
@@ -303,26 +307,33 @@ def _rank_long_kernel(
     width: int,
     split: int,
 ) -> None:
-    """Program ``(i, s)``: tiles ``s, s + split, ...`` of long row ``long_ref[i]``.
+    """One merge pass over long row ``long_ref[i]``: sorted runs of ``run`` to ``2 run``.
 
-    A row's rank costs ``(n / lanes)^2`` tile pairs, and :func:`_rank_kernel` runs a
-    whole row in one program: a near row of 101,870 entries (an outskirt cell at
-    cell_min_level 6) took 19.9 s per list build there. Here the row's tiles are
-    spread over ``split`` programs; each still ranks against the whole row, so the
-    result is the same permutation.
+    Program ``(i, s)`` takes tiles ``s, s + split, ...`` of the row. An entry at
+    row position ``pos`` lies in run ``pos // run``; its place in the merged pair of
+    runs is its offset in its own run plus its rank in the partner run, found by a
+    binary search there (``steps`` halvings). Entries of the left run count the
+    partner's entries ``<`` them, those of the right run the entries ``<=``: the
+    stable merge, a permutation even if a value repeats. ``log2(n)`` passes sort a
+    row of ``n`` in ``O(n log^2 n)`` work; the tile-against-tile rank costs
+    ``(n / lanes)^2`` tile pairs (124 s per list build for the 5.3M-entry near row
+    of #487).
 
     Parameters
     ----------
     src_ref : KernelRef
-        Whole ``[2W]`` unsorted directed list.
+        Whole ``[2W]`` list: the rows' runs, read.
     off_ref : KernelRef
         Whole ``[R + 1]`` row offsets.
     long_ref : KernelRef
         ``[B]`` this batch's long rows (``-1``: none).
+    run_ref : KernelRef
+        ``[2]`` the run length (a power of two) and its binary-search depth
+        ``log2(run) + 1``.
     out_in : KernelRef
-        The output so far, aliased to ``out_ref`` (not read).
+        The other ``[2W]`` buffer, aliased to ``out_ref`` (not read).
     out_ref : KernelRef
-        **Output** the sorted list.
+        **Output** the merged runs of the batch's rows; every other slot is kept.
     lanes : int
         Tile width. Static.
     width : int
@@ -337,12 +348,36 @@ def _rank_long_kernel(
     rs = jnp.maximum(r, 0)
     start = off_ref[rs]
     n = jnp.where(live, off_ref[rs + 1] - start, 0)
+    run = run_ref[0]
+    steps = run_ref[1]
     n_tiles = (n + (lanes - 1)) // lanes
     lane = lax.broadcasted_iota(jnp.int32, (lanes,), 0)
     trips = jnp.maximum(n_tiles - s + (split - 1), 0) // split
 
     def tile(k: Array, c: Array) -> Array:
-        _rank_tile(src_ref, out_ref, start, n, n_tiles, s + k * split, lane, width)
+        pos = (s + k * split) * lanes + lane
+        ok = pos < n
+        v = src_ref[jnp.where(ok, start + pos, start)]
+        own = (pos // run) * run  # the own run's first position
+        left = ((pos // run) % 2) == 0
+        p0 = jnp.minimum(jnp.where(left, own + run, own - run), n)
+        p1 = jnp.minimum(p0 + run, n)
+
+        def halve(_: Array, bounds: tuple) -> tuple:
+            lo, hi = bounds
+            open_ = lo < hi
+            mid = (lo + hi) // 2
+            w = src_ref[jnp.where(ok & open_, start + mid, start)]
+            up = jnp.where(left, w < v, w <= v)
+            return (
+                jnp.where(open_ & up, mid + 1, lo),
+                jnp.where(open_ & ~up, mid, hi),
+            )
+
+        lo, _ = lax.fori_loop(0, steps, halve, (p0, p1))
+        dest = jnp.where(left, own, own - run) + (pos - own) + (lo - p0)
+        dest = jnp.where(ok, start + dest, 2 * width + lane)
+        plgpu.store(out_ref.at[dest], v, mask=ok)
         return c
 
     lax.fori_loop(0, trips, tile, jnp.int32(0))
@@ -405,8 +440,8 @@ def directed_csr_pallas(
         The rank pass orders every row afterwards, so the result does not
         depend on it. Static.
     long_row : int | None
-        Rows longer than this are ranked by :func:`_rank_long_kernel`, their
-        tiles spread over ``long_split`` programs, ``long_batch`` rows a launch,
+        Rows longer than this are merge-sorted by :func:`_merge_pass_kernel`,
+        their tiles spread over ``long_split`` programs, ``long_batch`` rows a launch,
         under a ``lax.cond`` that skips it when no row is that long. ``None``:
         :data:`RANK_LONG_ROW`. Static.
     long_batch : int
@@ -511,36 +546,61 @@ def directed_csr_pallas(
         name=f"directed_csr_rank_k{int(lanes)}",
         **rank_kwargs,
     )(unsorted, offsets, out0)
-    # rows past L: their tiles spread over programs (a whole row in one program costs
-    # (n / lanes)^2 tile pairs serially -- 19.9 s for one row of 101,870 entries)
+    # rows past L: merge-sorted in log2(n) passes, their tiles spread over programs
+    # (the in-row rank costs (n / lanes)^2 tile pairs: 124 s per build for one near
+    # row of 5.3M entries, #487). The passes ping-pong between the unsorted list and
+    # the output, touching only the long rows' slots; the first reads the placed
+    # entries, the last writes the output.
     max_long = (2 * W) // (L + 1)  # rows longer than L, at most
     if max_long > 0:
         Bb, S = max(1, int(long_batch)), max(1, int(long_split))
         is_long = counts > jnp.asarray(L, idx)
         n_long = jnp.sum(is_long, dtype=idx)
         n_ids = -(-max_long // Bb) * Bb
-        long_call = pl.pallas_call(
-            functools.partial(_rank_long_kernel, lanes=int(lanes), width=W, split=S),
+        merge_call = pl.pallas_call(
+            functools.partial(_merge_pass_kernel, lanes=int(lanes), width=W, split=S),
             grid=(Bb, S),
             in_specs=[_full(unsorted), _full(offsets), _full(jnp.zeros((Bb,), idx))]
-            + [_full(out0)],
+            + [_full(jnp.zeros((2,), idx)), _full(out0)],
             out_specs=_full(out0),
             out_shape=jax.ShapeDtypeStruct(out0.shape, out0.dtype),
-            input_output_aliases={3: 0},
+            input_output_aliases={4: 0},
             interpret=bool(interpret),
-            name=f"directed_csr_rank_long_k{int(lanes)}",
+            name=f"directed_csr_merge_long_k{int(lanes)}",
             **rank_kwargs,
         )
 
-        def _long_rows(out: Array) -> Array:
+        def _merge(src: Array, ids: Array, j: Array, dst: Array) -> Array:
+            # runs of 2^j entries merged into runs of 2^(j+1)
+            run = jnp.stack([jnp.left_shift(jnp.ones((), idx), j), j + 1]).astype(idx)
+            return merge_call(src, offsets, ids, run, dst)
+
+        def _long_rows(bufs: tuple) -> tuple:
             # inside the branch: the row scan runs only when a long row exists
+            out, scratch = bufs
             long_ids = jnp.nonzero(is_long, size=n_ids, fill_value=-1)[0].astype(idx)
+            longest = jnp.max(jnp.where(is_long, counts, 0)).astype(jnp.int32)
+            # passes: ceil(log2(longest)); one, then pairs, so the last writes `out`
+            passes = 32 - lax.clz(longest - 1)
+            pairs = passes // 2
+            zero = jnp.zeros((), idx)
 
-            def _batch(b: Array, out_b: Array) -> Array:
+            def _batch(b: Array, bb: tuple) -> tuple:
+                out_b, scr = bb
                 ids = lax.dynamic_slice(long_ids, (b * Bb,), (Bb,))
-                return long_call(unsorted, offsets, ids, out_b)
+                out_b = _merge(scr, ids, zero, out_b)
 
-            return lax.fori_loop(0, (n_long + (Bb - 1)) // Bb, _batch, out)
+                def _pair(k: Array, pp: tuple) -> tuple:
+                    o, sc = pp
+                    j = (2 * k + 1).astype(idx)
+                    sc = _merge(o, ids, j, sc)
+                    return _merge(sc, ids, j + 1, o), sc
 
-        sources = lax.cond(n_long > 0, _long_rows, lambda out: out, sources)
+                return lax.fori_loop(0, pairs, _pair, (out_b, scr))
+
+            return lax.fori_loop(0, (n_long + (Bb - 1)) // Bb, _batch, (out, scratch))
+
+        sources, _ = lax.cond(
+            n_long > 0, _long_rows, lambda bufs: bufs, (sources, unsorted)
+        )
     return sources, offsets, counts

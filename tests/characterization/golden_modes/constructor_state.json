@@ -194,6 +194,7 @@
   "m2l_chunk_size": "None",
   "m2l_impl": "'rot_scale'",
   "mac_force_scale_fb_inflation": "1.0",
+  "mac_force_scale_floor": "None",
   "mac_force_scale_mode": "'prev'",
   "mac_force_scale_prepass_theta": "None",
   "mac_theta_max": "1.0",

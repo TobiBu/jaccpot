@@ -36,6 +36,15 @@ exact without a mask. The energy is ``K + W_self + W_ext`` from
 segment, so step 0's ``E0`` is evaluated AT step 0 (one card waits for the first
 segment's provider).
 
+**Several processes** (``jax.distributed``, one process per device; M2,
+:mod:`jaccpot.distributed.multiprocess`): the same loop and programs on a mesh
+over every process's devices (``multiprocess.global_mesh``). Each process may
+pass only its id range (``ProcessLocalParticles``); host reads of sharded arrays
+are gathered over the processes, float reductions folded in mesh order, so the
+run is bitwise the single process's on the same devices. Callbacks run on every
+process. Restart files are refused (one ``.npz`` through one host; sharded
+checkpoints are track M3); ``restart_from=<RunResult>`` continues in memory.
+
 **Restart files** hold the state, masses, total acceleration and (under the
 criterion) f_b BY ID, the layout (ids per row, the padding rows' positions) and the
 force's plan. On the mesh that wrote it, a restore rebuilds the identical layout
@@ -63,6 +72,13 @@ from jax.sharding import PartitionSpec as P
 
 __all__ = ["MeshBackend", "gather_by_id"]
 
+#: why a multi-process run refuses restart files until M3 (user decision U5)
+_MULTIPROCESS_RESTART = (
+    "the restart file is one .npz gathered through one host. Sharded per-rank "
+    "checkpoints (orbax, plan track M3) replace it; until then continue a "
+    "multi-process run in memory (restart_from=<its RunResult>)"
+)
+
 
 def _host(arr: Any) -> np.ndarray:
     """A device array on the host (all shards).
@@ -70,14 +86,18 @@ def _host(arr: Any) -> np.ndarray:
     Parameters
     ----------
     arr : Any
-        A (sharded) device array.
+        A (sharded) device array; under several processes (``jax.distributed``)
+        every process gets the global value
+        (:func:`~jaccpot.distributed.multiprocess.host_value`).
 
     Returns
     -------
     np.ndarray
         The host copy.
     """
-    return np.asarray(jax.device_get(arr))
+    from jaccpot.distributed.multiprocess import host_value
+
+    return host_value(arr)
 
 
 def _live_rows(count: np.ndarray, cap: int) -> np.ndarray:
@@ -226,7 +246,10 @@ class MeshBackend:
         Parameters
         ----------
         state : Any
-            ``[N, 2, 3]`` in input (id) order; ``None`` with ``restart_from``.
+            ``[N, 2, 3]`` in input (id) order; ``None`` with ``restart_from``. Under
+            several processes also a
+            :class:`~jaccpot.distributed.multiprocess.ProcessLocalParticles` (this
+            process's ids, ``masses=None``).
         masses : Any
             ``[N]``; ``None`` with ``restart_from``.
         dt : Any
@@ -265,6 +288,12 @@ class MeshBackend:
             message names the last restart file.
         """
         from jaccpot._env import env_text
+        from jaccpot.distributed.multiprocess import (
+            ProcessLocalParticles,
+            is_multiprocess,
+            mesh_moments,
+            refuse_in_multiprocess,
+        )
         from jaccpot.production import (
             MeshSegmentEdge,
             RunResult,
@@ -282,17 +311,35 @@ class MeshBackend:
                 "the multi-GPU mode has no in-scan step_callback; use a callback "
                 "at the segment edges"
             )
+        if int(runner.segment.restart_every) > 0 or isinstance(
+            restart_from, (str, os.PathLike)
+        ):
+            refuse_in_multiprocess(
+                "a restart file (SegmentConfig.restart_every, restart_from=<file>)",
+                _MULTIPROCESS_RESTART,
+            )
         started = time.perf_counter()
         dt_value = float(np.asarray(dt))
         restored: Optional[dict] = None
         if restart_from is None:
-            if state is None or masses is None:
+            if state is None or (
+                masses is None and not isinstance(state, ProcessLocalParticles)
+            ):
                 raise ValueError("a fresh run needs state and masses")
             self._check_force_params(force_params, self.config.force)
-            host_state = _host(state)
-            host_masses = _host(masses)
-            external_arg = self._external_arg(external_params, host_state.dtype)
-            msr = self._fresh(host_state, host_masses)
+            if isinstance(state, ProcessLocalParticles):
+                # multi-process input: this process's id range only
+                host_state = np.asarray(state.state)
+                host_masses = np.asarray(state.masses)
+                external_arg = self._external_arg(external_params, host_state.dtype)
+                msr = self._fresh(
+                    host_state, host_masses, num_particles=int(state.num_particles)
+                )
+            else:
+                host_state = _host(state)
+                host_masses = _host(masses)
+                external_arg = self._external_arg(external_params, host_state.dtype)
+                msr = self._fresh(host_state, host_masses)
             del host_state, host_masses
             step, segment_done = 0, 0
             t0_run = float(t0)
@@ -359,7 +406,11 @@ class MeshBackend:
             if every == 0 or not due:
                 return None
             layout = msr.state
-            moments = _moments(layout.state, layout.masses)
+            moments = (
+                mesh_moments(layout.state, layout.masses, self.mesh, self.axis_name)
+                if is_multiprocess()
+                else _moments(layout.state, layout.masses)
+            )
             if baselines is None:
                 baselines = dict(_baselines(moments, time_at(step_now)), step=step_now)
             energy_due = every_energy > 0 and segment_done % every_energy == 0
@@ -574,7 +625,11 @@ class MeshBackend:
         )
 
     def _decomposed(
-        self, state: np.ndarray, masses: np.ndarray, force: Any
+        self,
+        state: np.ndarray,
+        masses: np.ndarray,
+        force: Any,
+        num_particles: Optional[int] = None,
     ) -> tuple[Any, Optional[dict]]:
         """The host by-id particles decomposed over the mesh.
 
@@ -592,6 +647,11 @@ class MeshBackend:
             ``[N]``.
         force : Any
             The run's force (its box shape).
+        num_particles : Optional[int]
+            ``None``: ``state`` is the whole set. Else N over all processes, and
+            ``state`` this process's ids
+            (:class:`~jaccpot.distributed.multiprocess.ProcessLocalParticles`,
+            :func:`~jaccpot.distributed.rollout.decompose_local`).
 
         Returns
         -------
@@ -601,21 +661,34 @@ class MeshBackend:
             <its cuts>}`` for :meth:`_segment_runner` (``None`` otherwise).
         """
         from jaccpot.distributed.migration import ownership_splitters
-        from jaccpot.distributed.rollout import decompose
+        from jaccpot.distributed.rollout import decompose, decompose_local
         from jaccpot.distributed.segment import MeshState, _force_box_cubic
 
         migrate = bool(self.config.migrate)
         cubic = _force_box_cubic(force) if migrate else None
-        shard, _ = decompose(
-            self.mesh,
-            state[:, 0],
-            state[:, 1],
-            masses,
-            cap=self._cap(int(state.shape[0])),
-            num_samples=int(self.config.num_samples),
-            axis_name=self.axis_name,
-            cubic=cubic,
-        )
+        if num_particles is None:
+            shard, _ = decompose(
+                self.mesh,
+                state[:, 0],
+                state[:, 1],
+                masses,
+                cap=self._cap(int(state.shape[0])),
+                num_samples=int(self.config.num_samples),
+                axis_name=self.axis_name,
+                cubic=cubic,
+            )
+        else:
+            shard, _ = decompose_local(
+                self.mesh,
+                state[:, 0],
+                state[:, 1],
+                masses,
+                num_particles=int(num_particles),
+                cap=self._cap(int(num_particles)),
+                num_samples=int(self.config.num_samples),
+                axis_name=self.axis_name,
+                cubic=cubic,
+            )
         migration = None
         if migrate:
             migration = {
@@ -630,15 +703,23 @@ class MeshBackend:
         layout = MeshState.from_shard_state(shard, self.mesh, axis_name=self.axis_name)
         return layout, migration
 
-    def _fresh(self, state: np.ndarray, masses: np.ndarray) -> Any:
+    def _fresh(
+        self,
+        state: np.ndarray,
+        masses: np.ndarray,
+        num_particles: Optional[int] = None,
+    ) -> Any:
         """A fresh run's segment runner: decomposed, its force prepared.
 
         Parameters
         ----------
         state : np.ndarray
-            ``[N, 2, 3]`` host state in input order.
+            ``[N, 2, 3]`` host state in input order (or this process's ids, with
+            ``num_particles``).
         masses : np.ndarray
             ``[N]`` host masses.
+        num_particles : Optional[int]
+            As :meth:`_decomposed`.
 
         Returns
         -------
@@ -646,7 +727,7 @@ class MeshBackend:
             The segment runner.
         """
         force = self._force()
-        layout, migration = self._decomposed(state, masses, force)
+        layout, migration = self._decomposed(state, masses, force, num_particles)
         return self._segment_runner(layout, force, migration)
 
     def _sharded(self, arr: Optional[np.ndarray]) -> Any:
@@ -889,6 +970,7 @@ class MeshBackend:
         RuntimeError
             Before the first segment (step 0 is the run's own input).
         """
+        from jaccpot.distributed.multiprocess import refuse_in_multiprocess
         from jaccpot.production import (
             RESTART_FORMAT,
             _atomic_savez,
@@ -898,6 +980,7 @@ class MeshBackend:
         )
         from jaccpot.runtime.strict_carry import external_field_key
 
+        refuse_in_multiprocess("save_restart", _MULTIPROCESS_RESTART)
         runner = self.runner
         current = runner._current
         msr = None if current is None else current["handle"]
