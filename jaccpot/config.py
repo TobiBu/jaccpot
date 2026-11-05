@@ -21,6 +21,11 @@ MEMORY_OBJECTIVE_DOC = (
 Basis = Literal["solidfmm", "real"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 GradNearFieldLane = Literal["auto", "bucketed", "fast_lane"]
+#: Which automatic-differentiation mode the gradient path's programs are built for
+#: (:attr:`GradConfig.ad_mode`).
+GradAdMode = Literal["reverse", "forward"]
+#: Which tangent kernels forward mode runs (:attr:`GradConfig.forward_tangent_kernels`).
+GradForwardTangentKernels = Literal["auto", "pallas", "jnp"]
 #: How the runtime should trade peak memory against throughput when it resolves
 #: chunk sizes, streaming and schedule precomputation. ``"balanced"`` is the default;
 #: ``"minimum_memory"`` is what ``FMMPreset.LARGE_N_GPU`` canonicalizes to, and is
@@ -560,6 +565,27 @@ class GradConfig:
     reverse_block_tile : Optional[int]
         Reverse-pass block tile size (default 8). Same reasoning as
         ``reverse_leaf_batch``.
+    ad_mode : Optional[GradAdMode]
+        The automatic-differentiation mode the gradient path is built for.
+        ``"reverse"`` (the default): every fast kernel is a ``custom_vjp`` with a
+        hand-written reverse, for ``jax.grad`` / ``jax.vjp``; JAX refuses
+        ``jax.jvp`` of it. ``"forward"``: the large-N seam's kernels run as
+        ``custom_jvp`` siblings (the same primal kernels, bitwise; tangent
+        kernels for the derivative), for ``jax.jvp``, ``jax.jacfwd`` and
+        ``jax.linearize`` -- first order only; ``jax.grad`` of a forward-mode
+        program refuses. ``None`` defers to an enclosing
+        :func:`~jaccpot.runtime.grad_options.grad_option_overrides`, then to
+        ``JACCPOT_GRAD_AD_MODE``, then to ``"reverse"``.
+    forward_tangent_kernels : Optional[GradForwardTangentKernels]
+        Which tangent kernels forward mode runs. ``"auto"`` (the default): a
+        seam's Pallas tangent kernel where one exists (it lowers wherever the
+        seam's primal Pallas kernel does), else its pure-``jnp`` reference.
+        ``"jnp"``: the jnp references everywhere (slow, test scale; the parity
+        oracle).
+        ``"pallas"``: the Pallas tangent kernels, raising at trace time where a
+        seam has none. ``None`` defers as ``ad_mode`` does, to
+        ``JACCPOT_GRAD_FORWARD_TANGENT_KERNELS``, then to ``"auto"``. Ignored in
+        reverse mode.
     """
 
     nearfield_lane: GradNearFieldLane = "auto"
@@ -573,8 +599,22 @@ class GradConfig:
     reverse_skip_empty_tiles: Optional[bool] = None
     reverse_leaf_batch: Optional[int] = None
     reverse_block_tile: Optional[int] = None
+    ad_mode: Optional[GradAdMode] = None
+    forward_tangent_kernels: Optional[GradForwardTangentKernels] = None
 
     def __post_init__(self) -> None:
+        if self.ad_mode is not None and self.ad_mode not in ("reverse", "forward"):
+            raise ValueError(
+                "GradConfig.ad_mode must be 'reverse', 'forward' or None; got "
+                f"{self.ad_mode!r}"
+            )
+        if self.forward_tangent_kernels is not None and (
+            self.forward_tangent_kernels not in ("auto", "pallas", "jnp")
+        ):
+            raise ValueError(
+                "GradConfig.forward_tangent_kernels must be 'auto', 'pallas', "
+                f"'jnp' or None; got {self.forward_tangent_kernels!r}"
+            )
         lane = str(self.nearfield_lane).strip().lower()
         if lane not in ("auto", "bucketed", "fast_lane"):
             raise ValueError(
@@ -642,7 +682,9 @@ __all__ = [
     "FMMAdvancedConfig",
     "FMMPreset",
     "FarFieldConfig",
+    "GradAdMode",
     "GradConfig",
+    "GradForwardTangentKernels",
     "GradNearFieldLane",
     "MACTypeInput",
     "MemoryObjective",

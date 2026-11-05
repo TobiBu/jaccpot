@@ -1122,6 +1122,42 @@ def _leaf_layout_inverse(
     return jnp.asarray(inverse)
 
 
+def _forward_mode() -> bool:
+    """Whether the gradient path traces its forward-mode (``custom_jvp``) seams.
+
+    Returns
+    -------
+    bool
+        :func:`~jaccpot.runtime.grad_options.forward_mode_enabled`.
+    """
+    from jaccpot.runtime.grad_options import forward_mode_enabled
+
+    return forward_mode_enabled()
+
+
+def _refuse_forward_mode(layout: str) -> None:
+    """Refuse ``ad_mode="forward"`` on a near-field layout with no tangent rule.
+
+    Parameters
+    ----------
+    layout : str
+        The layout, for the message.
+
+    Raises
+    ------
+    NotImplementedError
+        In forward mode: only the production direct CSR layout has a forward-mode
+        seam (JAX would refuse this layout's ``custom_vjp`` less clearly).
+    """
+    if _forward_mode():
+        raise NotImplementedError(
+            f"ad_mode='forward' has no tangent rule for {layout}: forward mode "
+            "covers the production near field (the direct CSR layout, "
+            "JACCPOT_NEARFIELD_LEAFPAIR_CSR=1 with leaf ranges, accum='input') "
+            "and the pure-JAX routes. Use ad_mode='reverse' here."
+        )
+
+
 @jax.custom_vjp
 def _leaf_layout_gather(values: Array, safe_ids: Array, inverse: Array) -> Array:
     """``values[safe_ids]`` whose reverse is a gather through ``inverse``.
@@ -1597,6 +1633,16 @@ def _csr_direct_near(
         if differentiable and not want_potential
         else nearfield_leafpair_csr_sorted_direct_pallas
     )
+    if differentiable and not want_potential:
+        from jaccpot.runtime.grad_options import forward_mode_enabled
+
+        if forward_mode_enabled():
+            # ad_mode="forward": the custom_jvp sibling (the same call)
+            from jaccpot.runtime._forward_seams import (
+                nearfield_leafpair_csr_sorted_direct_forward,
+            )
+
+            direct_call = nearfield_leafpair_csr_sorted_direct_forward
     pair_acc, pair_pot = direct_call(
         positions,
         masses,
@@ -1915,10 +1961,11 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     leaf_masses = masses[safe_target_particle_ids]
     leaf_mask = target_particle_mask
     leaf_particle_idx = safe_target_particle_ids
-    if differentiable:
+    if differentiable and not _forward_mode():
         # Each particle sits in exactly one leaf slot, so the transpose of this
         # gather is a gather too; plain autodiff makes it a 1M-row scatter-add
         # (2.7 ms for positions + masses at N = 2x10^5, plan fast-gradients).
+        # (ad_mode="forward": the plain gather, which jvps natively.)
         inverse = _leaf_layout_inverse(target_particle_ids, target_particle_mask)
         if inverse is not None:
             leaf_positions = _leaf_layout_gather(
@@ -2041,6 +2088,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
             offsets, counts, chunk=chunk, capacity=capacity
         )
         if differentiable:
+            _refuse_forward_mode("the CSR near field's table layout")
             # Positional (a custom_vjp primal), so the trailing defaults are easy to
             # drop: without `softening_kernel` the forward AND the reverse ran the
             # default kernel whatever the solver's, 4.2e-2 off the production
@@ -2130,6 +2178,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
 
         if pallas_prepacked:
             if differentiable and not want_potential:
+                _refuse_forward_mode("the prepacked rectangle near-field lane")
                 # Differentiable prepacked lane: the SAME Pallas forward wrapped in
                 # a custom_vjp whose reverse is autodiff of this lane's own tiled
                 # pure-JAX fallback. Forward is byte-identical, so the grad path

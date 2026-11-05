@@ -2067,13 +2067,27 @@ def _evaluate_local_expansions_particle_major(
         return jnp.zeros((n, 3), dtype=dtype)
     leaf_ranges = node_ranges[leaf_nodes]
     counts = jnp.maximum(leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0)
+    if kernel in ("mosaic", "mosaic_select", "mosaic_interpret"):
+        from jaccpot.runtime.grad_options import forward_mode_enabled
+
+        if forward_mode_enabled():
+            # ad_mode="forward": the Mosaic port has no tangent kernel; the Triton
+            # forward (the same to float rounding) and its sibling run instead
+            kernel = "interpret" if kernel == "mosaic_interpret" else "pallas"
     if kernel in ("pallas", "interpret"):
         from jaccpot.pallas.l2p_real import l2p_real_particles_pallas_cvjp
+        from jaccpot.runtime.grad_options import forward_mode_enabled
 
+        l2p_seam: Any = l2p_real_particles_pallas_cvjp
+        if forward_mode_enabled():
+            # ad_mode="forward": the custom_jvp sibling (the same launch)
+            from jaccpot.runtime._forward_seams import l2p_real_particles_forward
+
+            l2p_seam = l2p_real_particles_forward
         # the custom_vjp seam: the forward is the plain launch (the same program),
         # and jax.grad reaches the particle-major reverse kernel, which reduces the
         # coefficient and centre cotangents per leaf in the kernel
-        grads = l2p_real_particles_pallas_cvjp(
+        grads = l2p_seam(
             local_data.coefficients,
             local_data.centers,
             positions,
@@ -2112,20 +2126,43 @@ def _evaluate_local_expansions_particle_major(
     num_chunks = -(-n // k)
     p = int(order)
 
-    def _chunk(c: Array, out: Array) -> Array:
-        # the last chunk overlaps the previous one instead of padding: it recomputes
-        # identical values for the overlap
-        s = jnp.minimum(c * k, n - k)
-        idx = s + jnp.arange(k, dtype=INDEX_DTYPE)
-        node = leaf_nodes[leaf_of[idx]]
-        delta = local_data.centers[node] - positions[idx]
-        grads, _ = jax.vmap(
-            lambda coeff, offset: evaluate_local_real_with_grad(coeff, offset, order=p)
-        )(local_data.coefficients[node], delta)
-        grads = jnp.where(live[idx][:, None], grads.astype(dtype), 0.0)
-        return lax.dynamic_update_slice(out, grads, (s, 0))
+    def _sweep(
+        coefficients: Array,
+        centers: Array,
+        positions: Array,
+        leaf_nodes: Array,
+        leaf_of: Array,
+        live: Array,
+    ) -> Array:
+        def _chunk(c: Array, out: Array) -> Array:
+            # the last chunk overlaps the previous one instead of padding: it
+            # recomputes identical values for the overlap
+            s = jnp.minimum(c * k, n - k)
+            idx = s + jnp.arange(k, dtype=INDEX_DTYPE)
+            node = leaf_nodes[leaf_of[idx]]
+            delta = centers[node] - positions[idx]
+            grads, _ = jax.vmap(
+                lambda coeff, offset: evaluate_local_real_with_grad(
+                    coeff, offset, order=p
+                )
+            )(coefficients[node], delta)
+            grads = jnp.where(live[idx][:, None], grads.astype(dtype), 0.0)
+            return lax.dynamic_update_slice(out, grads, (s, 0))
 
-    return lax.fori_loop(0, num_chunks, _chunk, jnp.zeros((n, 3), dtype=dtype))
+        return lax.fori_loop(0, num_chunks, _chunk, jnp.zeros((n, 3), dtype=dtype))
+
+    from jaccpot.runtime._forward_seams import jnp_stage
+
+    # ad_mode="forward": JAX's jvp, the primal kept bitwise
+    return jnp_stage(
+        _sweep,
+        local_data.coefficients,
+        local_data.centers,
+        positions,
+        leaf_nodes,
+        leaf_of,
+        live,
+    )
 
 
 def _evaluate_local_potential_particle_major(
