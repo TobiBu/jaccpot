@@ -301,6 +301,13 @@ def _args() -> argparse.Namespace:
     )
     ap.add_argument("--runner-restart-at", type=int, default=0)
     ap.add_argument(
+        "--runner-scheme",
+        default="builtin",
+        choices=("builtin", "nornax_kdk"),
+        help="with --runner: the integration scheme (multi-node plan I1): the "
+        "runner's built-in KDK, or nornax.schemes.LeapfrogKDK (needs nornax)",
+    )
+    ap.add_argument(
         "--runner-resume",
         default=None,
         metavar="NPZ",
@@ -1039,6 +1046,12 @@ def _run_through_runner(result: dict, solver, state0, masses, dt, ext, saved) ->
     """
     from jaccpot.production import GalaxySettings, ProductionRunner, SegmentConfig
 
+    scheme = None
+    if ARGS.runner_scheme == "nornax_kdk":
+        from nornax.schemes import LeapfrogKDK
+
+        scheme = LeapfrogKDK()
+    result["runner_scheme"] = ARGS.runner_scheme
     s = int(ARGS.steps)
     targets = [1, 1 + s] + [1 + s * (2 + i) for i in range(ARGS.reps)]
     if ARGS.runner_once:
@@ -1065,6 +1078,7 @@ def _run_through_runner(result: dict, solver, state0, masses, dt, ext, saved) ->
         ),
         segment=segment,
         external_acceleration_fn=ext,
+        scheme=scheme,
     )
     res = None
     if ARGS.runner_resume:
