@@ -1558,13 +1558,15 @@ def _m2l_tangent_lanes_kernel(
     k_lanes: int,
     tables: dict,
     k_tangents: int,
+    tpp: int,
     live_mult: bool,
     live_cent: bool,
 ) -> None:
-    """One program per target; ``k_lanes`` pairs per iteration; ``K`` tangents.
+    """One program per (target, tangent group); ``k_lanes`` pairs per iteration.
 
     :func:`_m2l_lanes_kernel`'s grid, loop and accumulation order, the pair body
-    replaced by :func:`_m2l_pair_tangent_lanes`.
+    replaced by :func:`_m2l_pair_tangent_lanes` over the ``tpp`` tangents of this
+    program's group (grid axis 1, :mod:`jaccpot.pallas._tangent_grid`).
 
     Parameters
     ----------
@@ -1583,7 +1585,7 @@ def _m2l_tangent_lanes_kernel(
     tcent_ref : KernelRef
         Padded centre tangents ``[K, n, 4]`` (unread when not ``live_cent``).
     out_ref : KernelRef
-        This target's local tangents ``[K, 1, C]``.
+        This target's local tangents ``[K, 1, C]`` (this group writes its rows).
     p : int
         Order. Static.
     k_lanes : int
@@ -1591,7 +1593,10 @@ def _m2l_tangent_lanes_kernel(
     tables : dict
         :func:`_lane_tables`. Static.
     k_tangents : int
-        ``K``. Static.
+        ``K``, the tangents of the launch. Static.
+    tpp : int
+        Tangents per program: tangents ``g tpp .. g tpp + tpp - 1`` of group ``g``,
+        those past ``K`` clamped on load and not stored. Static.
     live_mult : bool
         The multipole tangent is not known zero. Static.
     live_cent : bool
@@ -1600,11 +1605,16 @@ def _m2l_tangent_lanes_kernel(
     Returns
     -------
     None
-        Writes the row's ``K`` tangents.
+        Writes the row's tangents of this group.
     """
     dtype = out_ref.dtype
     packed = tables["packed"]
     tgt = pl.program_id(0)
+    group = pl.program_id(1)
+    tails = int(k_tangents) % int(tpp) != 0
+    js = [group * tpp + jj for jj in range(tpp)]
+    # a partial last group reads tangent K - 1 in its spare slots, stores none
+    jl = [jnp.minimum(j, k_tangents - 1) for j in js] if tails else js
     start = off_ref[tgt]
     cnt = cnt_ref[tgt]
     ctx = cent_ref[tgt, 0]
@@ -1614,11 +1624,11 @@ def _m2l_tangent_lanes_kernel(
     n_tiles = (cnt + (k_lanes - 1)) // k_lanes
     keys = [(ell, m) for ell in range(p + 1) for m in range(-ell, ell + 1)]
     n_keys = len(keys)
-    acc0 = tuple(jnp.zeros((k_lanes,), dtype) for _ in range(k_tangents * n_keys))
+    acc0 = tuple(jnp.zeros((k_lanes,), dtype) for _ in range(tpp * n_keys))
     # the target's centre tangents, once per program
     ttc: list = []
     if live_cent:
-        ttc = [tuple(tcent_ref[k, tgt, a] for a in range(3)) for k in range(k_tangents)]
+        ttc = [tuple(tcent_ref[j, tgt, a] for a in range(3)) for j in jl]
 
     def body(t: Array, accs: tuple[Array, ...]) -> tuple[Array, ...]:
         pos = t * k_lanes + lane
@@ -1634,34 +1644,41 @@ def _m2l_tangent_lanes_kernel(
         if live_mult:
             tvs = [
                 tuple(
-                    jnp.where(valid, tmult_ref[k, sid, packed[key]], zero)
+                    jnp.where(valid, tmult_ref[j, sid, packed[key]], zero)
                     for key in keys
                 )
-                for k in range(k_tangents)
+                for j in jl
             ]
         tdeltas = None
         if live_cent:
             tdeltas = [
                 tuple(
-                    jnp.where(valid, ttc[k][a] - tcent_ref[k, sid, a], zero)
+                    jnp.where(valid, ttc[jj][a] - tcent_ref[j, sid, a], zero)
                     for a in range(3)
                 )
-                for k in range(k_tangents)
+                for jj, j in enumerate(jl)
             ]
         tws = _m2l_pair_tangent_lanes(
             keys, vs, (dx, dy, dz_), tvs, tdeltas, valid, p=p, tables=tables
         )
         mask = valid.astype(dtype)
         out = []
-        for k in range(k_tangents):
-            row = accs[k * n_keys : (k + 1) * n_keys]
-            out.extend(a + tw * mask for a, tw in zip(row, tws[k]))
+        for jj in range(tpp):
+            row = accs[jj * n_keys : (jj + 1) * n_keys]
+            out.extend(a + tw * mask for a, tw in zip(row, tws[jj]))
         return tuple(out)
 
     accs = lax.fori_loop(0, n_tiles, body, acc0)
-    for k in range(k_tangents):
+
+    def _store(jj: int) -> None:
         for i, key in enumerate(keys):
-            out_ref[k, 0, packed[key]] = jnp.sum(accs[k * n_keys + i])
+            out_ref[jl[jj], 0, packed[key]] = jnp.sum(accs[jj * n_keys + i])
+
+    for jj in range(tpp):
+        if tails:
+            pl.when(js[jj] < k_tangents)(functools.partial(_store, jj))
+        else:
+            _store(jj)
 
 
 def _m2l_tangent_csr(
@@ -1723,8 +1740,9 @@ def _m2l_tangent_impl(
     symmetric: bool = False,
     has_active_count: bool = True,
     live: tuple[bool, ...] = (True, True),
+    tangents_per_program: Optional[int] = None,
 ) -> list:
-    """The Pallas tangent kernel for one ``K`` bucket (see :func:`m2l_real_csr_lanes_pallas_tangent`).
+    """The Pallas tangent kernel for any ``K`` (see :func:`m2l_real_csr_lanes_pallas_tangent`).
 
     Parameters
     ----------
@@ -1762,6 +1780,9 @@ def _m2l_tangent_impl(
         ``active_pair_count`` is real.
     live : tuple[bool, ...]
         ``(multipoles, centers)`` tangent liveness.
+    tangents_per_program : Optional[int]
+        Tangents per program (``None``: ``JACCPOT_TANGENT_TPP_M2L``; see
+        :func:`~jaccpot.pallas._tangent_grid.tangents_per_program`). Static.
 
     Returns
     -------
@@ -1773,6 +1794,9 @@ def _m2l_tangent_impl(
     ValueError
         On a shape mismatch or an ``n_targets`` outside ``[0, n]``.
     """
+    from jaccpot.pallas._tangent_grid import tangent_groups
+    from jaccpot.pallas._tangent_grid import tangents_per_program as _tpp
+
     del symmetric
     p = int(order)
     tables = _lane_tables(p)
@@ -1809,12 +1833,14 @@ def _m2l_tangent_impl(
     cent_p = jnp.pad(jnp.asarray(centers, dtype), ((0, 0), (0, 1)))
     tmult = jnp.asarray(t_multipoles, dtype)
     tcent_p = jnp.pad(jnp.asarray(t_centers, dtype), ((0, 0), (0, 0), (0, 1)))
+    tpp = _tpp("M2L", k_tan, tangents_per_program)
     kernel = functools.partial(
         _m2l_tangent_lanes_kernel,
         p=p,
         k_lanes=int(k_lanes),
         tables=tables,
         k_tangents=k_tan,
+        tpp=tpp,
         live_mult=live_mult,
         live_cent=live_cent,
     )
@@ -1832,12 +1858,14 @@ def _m2l_tangent_impl(
     live_tag = ("m" if live_mult else "") + ("c" if live_cent else "")
     out = pl.pallas_call(
         kernel,
-        grid=(nt,),
+        grid=(nt, tangent_groups(k_tan, tpp)),
         in_specs=[bs_full(o) for o in operands],
-        out_specs=pl.BlockSpec((k_tan, 1, C), lambda t: (0, t, 0)),
+        out_specs=pl.BlockSpec((k_tan, 1, C), lambda t, g: (0, t, 0)),
         out_shape=jax.ShapeDtypeStruct((k_tan, nt, C), dtype),
         interpret=bool(interpret),
-        name=f"m2l_tan_real_csr_lanes_p{p}_k{int(k_lanes)}_K{k_tan}_{live_tag}",
+        name=(
+            f"m2l_tan_real_csr_lanes_p{p}_k{int(k_lanes)}_K{k_tan}_tpp{tpp}_{live_tag}"
+        ),
         **backend_kwargs,
     )(*operands)
     return [out]
@@ -1889,7 +1917,9 @@ def _m2l_tangent_abstract(
 #: the forward-mode plan): ``op(multipoles, centers, sources, targets,
 #: active_pair_count, t_multipoles [K, n, C], t_centers [K, n, 3], *, order,
 #: k_lanes, interpret, backend, num_warps, n_targets, presorted, symmetric,
-#: has_active_count, live) -> (t_locals [K, n_targets, C],)``. ``active_pair_count``
+#: has_active_count, live[, tangents_per_program]) -> (t_locals [K, n_targets, C],)``
+#: for any ``K`` (the kernel's tangent-group grid axis masks a partial last group).
+#: ``active_pair_count``
 #: is a dummy ``int32 [1]`` when ``has_active_count`` is False (the seam's ``None``).
 #: The reference is :func:`m2l_real_csr_lanes_pallas_tangent_jnp`.
 m2l_real_csr_lanes_pallas_tangent = make_tangent_op(
