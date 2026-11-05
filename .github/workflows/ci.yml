@@ -160,6 +160,12 @@ jobs:
           - shard: integration-strict-runner
             typecheck: "0"
             timeout: 65
+          # The float64 lane and caps-only prepare files out of `integration-strict`
+          # (#503, 2026-11-05): cold, the shard ran 23.6 min on main against its 25 min
+          # cap and was cancelled at it on #503. Each half ~12 min cold.
+          - shard: integration-strict-lane
+            typecheck: "0"
+            timeout: 25
           # The differentiable fused step and the rollout over it (S9, #490): every
           # Pallas kernel in interpret mode and reverse programs of the whole lane;
           # with them `integration-strict` was cancelled at its cap. Measured as

@@ -99,6 +99,16 @@ _STRICT_RUNNER_FILES: tuple[str, ...] = (
     "tests/integration/strict/test_strict_runners_on_provider.py",
     "tests/integration/strict/test_production_runner.py",
 )
+# The float64 lane and the caps-only prepare: about half of the rest's compilation.
+# A cold-cache `integration-strict` ran 23.6 min against its 25 min cap on main
+# 1bb30620 (2026-11-05) and was cancelled at the cap on #503 (82 % done); a cold
+# local A/B of its three slowest tests at main and #503 was level (176-180 s vs
+# 183-184 s), so the shard had outgrown its cap, not the branch. These two files
+# were ~1360 of its ~2880 test-seconds on #503's first run (`--durations`).
+_STRICT_LANE_FILES: tuple[str, ...] = (
+    "tests/integration/strict/test_float64_lane.py",
+    "tests/integration/strict/test_caps_only_prepare.py",
+)
 # The differentiable fused step and the rollout over it (S9): every Pallas kernel in
 # interpret mode, and reverse programs of the whole lane (2-5 min of compilation
 # each on CPU). With them `integration-strict` was cancelled at its cap on #490
@@ -189,6 +199,7 @@ SHARDS: dict[str, list[str]] = {
             f"--ignore={path}"
             for path in (
                 *_STRICT_RUNNER_FILES,
+                *_STRICT_LANE_FILES,
                 *_STRICT_GRAD_FILES,
                 _STRICT_GRAD_ROLLOUT,
                 _STRICT_GRAD_RUNNER,
@@ -198,6 +209,7 @@ SHARDS: dict[str, list[str]] = {
         ),
     ],
     "integration-strict-runner": list(_STRICT_RUNNER_FILES),
+    "integration-strict-lane": list(_STRICT_LANE_FILES),
     "integration-strict-grad": list(_STRICT_GRAD_FILES),
     "integration-strict-grad-rollout": [
         _STRICT_GRAD_ROLLOUT,
