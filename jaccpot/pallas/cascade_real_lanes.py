@@ -1471,7 +1471,7 @@ def _m2m_tan_lanes_kernel(
     cent_ref : KernelRef
         Padded centres ``[nodes, 4]``.
     tcent_ref : KernelRef
-        Padded centre tangents ``[K, nodes, 4]``.
+        Centre tangents ``[K, nodes, 3]``.
     left_ref : KernelRef
         Left child per internal node ``[internal]``.
     right_ref : KernelRef
@@ -1610,7 +1610,7 @@ def _l2l_tan_lanes_kernel(
     cent_ref : KernelRef
         Padded centres ``[nodes, 4]``.
     tcent_ref : KernelRef
-        Padded centre tangents ``[K, nodes, 4]``.
+        Centre tangents ``[K, nodes, 3]``.
     parent_ref : KernelRef
         Parent per node ``[nodes]`` (``-1`` at the root).
     nbl_ref : KernelRef
@@ -1791,14 +1791,15 @@ def _tangent_level_operands(
     Returns
     -------
     tuple[Array, Array, Array, Array]
-        ``(cent [nodes, 4], tcent [K, nodes, 4], nbl, offs)``.
+        ``(cent [nodes, 4], tcent [K, nodes, 3], nbl, offs)``: the centre
+        tangents as given (no padded copy; the kernels read columns 0..2).
     """
     idx = level_offsets.dtype
     nbl = jnp.concatenate(
         [jnp.asarray(nodes_by_level, idx), jnp.full((width + k_lanes,), -1, idx)]
     )
     cent = jnp.pad(jnp.asarray(centers, dtype), ((0, 0), (0, 1)))
-    tcent = jnp.pad(jnp.asarray(t_centers, dtype), ((0, 0), (0, 0), (0, 1)))
+    tcent = jnp.asarray(t_centers, dtype)
     return cent, tcent, nbl, jnp.asarray(level_offsets, idx)
 
 

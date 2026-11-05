@@ -1583,7 +1583,7 @@ def _m2l_tangent_lanes_kernel(
     tmult_ref : KernelRef
         Multipole tangents ``[K, n, C]`` (unread when not ``live_mult``).
     tcent_ref : KernelRef
-        Padded centre tangents ``[K, n, 4]`` (unread when not ``live_cent``).
+        Centre tangents ``[K, n, 3]`` (unread when not ``live_cent``).
     out_ref : KernelRef
         This target's local tangents ``[K, 1, C]`` (this group writes its rows).
     p : int
@@ -1832,7 +1832,8 @@ def _m2l_tangent_impl(
         return [jnp.zeros((k_tan, nt, C), dtype)]
     cent_p = jnp.pad(jnp.asarray(centers, dtype), ((0, 0), (0, 1)))
     tmult = jnp.asarray(t_multipoles, dtype)
-    tcent_p = jnp.pad(jnp.asarray(t_centers, dtype), ((0, 0), (0, 0), (0, 1)))
+    # the centre tangents as given: the kernel reads columns 0..2 (no padded copy)
+    tcent_p = jnp.asarray(t_centers, dtype)
     tpp = _tpp("M2L", k_tan, tangents_per_program)
     kernel = functools.partial(
         _m2l_tangent_lanes_kernel,
