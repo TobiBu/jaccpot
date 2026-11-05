@@ -84,6 +84,8 @@ from typing import Any, Callable, Iterator, Literal, Optional, Sequence, Union
 import numpy as np
 from yggdrax import TreeDepthError
 
+from jaccpot.scheme import check_scheme, scheme_record
+
 __all__ = [
     "DIAGNOSTICS",
     "GALAXY_SETTINGS",
@@ -1462,12 +1464,21 @@ class ProductionRunner:
         restricted to rows: a per-particle field works unchanged), ``dt`` and
         the field's parameters are program arguments, ``G`` and the softening
         the force's own, and there is no ``step_callback``.
+    scheme : Any
+        The integration scheme (multi-node plan I1: nornax owns the schemes).
+        ``None`` (the default): the built-in velocity-Verlet KDK, unchanged. A
+        :class:`jaccpot.scheme.SplitStepScheme` -- ``nornax.schemes.LeapfrogKDK``
+        is the KDK, bitwise to the built-in -- does each step's drift and kick
+        around its one force evaluation inside the segment scan; segments,
+        retries, restarts and diagnostics stay the runner's. One card only (the
+        multi-GPU mode takes one in I2), and not in the gradient mode. Anything
+        else is a ``TypeError`` (:func:`jaccpot.scheme.check_scheme`).
 
     Raises
     ------
     ValueError
         If ``settings.carry`` is not ``"particles"``, or with ``mesh`` and a
-        ``step_callback``.
+        ``step_callback`` or a ``scheme``.
 
     Notes
     -----
@@ -1495,6 +1506,7 @@ class ProductionRunner:
         step_callback: Optional[Callable[[Any, Any], None]] = None,
         step_callback_stride: int = 1,
         mesh: Any = None,
+        scheme: Any = None,
     ) -> None:
         if settings.carry != "particles":
             raise ValueError(
@@ -1510,6 +1522,8 @@ class ProductionRunner:
         self.callbacks = tuple(callbacks)
         self.step_callback = step_callback
         self.step_callback_stride = int(step_callback_stride)
+        #: the integration scheme (``None``: the built-in KDK)
+        self.scheme = check_scheme(scheme)
         #: (steps, remainder) plans already warned about
         self._warned: set = set()
         #: the run's position at its last edge (what save_restart writes)
@@ -1535,6 +1549,11 @@ class ProductionRunner:
                     "the multi-GPU mode has no in-scan step_callback (the mesh "
                     "segment runner's scan streams nothing); use a callback at the "
                     "segment edges"
+                )
+            if scheme is not None:
+                raise ValueError(
+                    "the multi-GPU mode runs the built-in KDK only (its scheme seam "
+                    "is the multi-node plan's I2); pass scheme=None"
                 )
             self.mesh = mesh if isinstance(mesh, MeshRunConfig) else MeshRunConfig(mesh)
             self._mesh_backend = MeshBackend(self)
@@ -1854,6 +1873,7 @@ class ProductionRunner:
                     donate_state=owned or index > 0,
                     force_params=force_arg,
                     carry_total_acceleration=True,
+                    scheme=self.scheme,
                 )
             except TreeDepthError as exc:
                 # the eager prepare's: say what the box is, with the outliers
@@ -1989,13 +2009,20 @@ class ProductionRunner:
         Raises
         ------
         ValueError
-            In the multi-GPU mode (single card only), or when the run does no
-            segment.
+            In the multi-GPU mode (single card only), with a ``scheme`` (the
+            built-in KDK only), or when the run does no segment.
         """
         if self._mesh_backend is not None:
             raise ValueError(
                 "the gradient mode runs on one card (mesh=None): the multi-GPU "
                 "lane has no differentiable step"
+            )
+        if self.scheme is not None:
+            raise ValueError(
+                "the gradient mode differentiates the built-in KDK (its reverse "
+                "replays jaccpot's rollout): build the runner with scheme=None, or "
+                "differentiate nornax's leapfrog_kdk_rollout over "
+                "nornax.adapters.FusedProviderForce"
             )
         from jaccpot.production_grad import _Recorder
 
@@ -2572,6 +2599,9 @@ class ProductionRunner:
             },
             "fingerprint": self._fingerprint(current["state"], current["masses"]),
         }
+        if self.scheme is not None:
+            # only with one: the built-in's files are as they were
+            meta["scheme"] = scheme_record(self.scheme)
         # UTF-8 bytes (a numpy str array would hold 4 bytes per character)
         arrays["meta"] = np.frombuffer(json.dumps(meta).encode("utf-8"), np.uint8)
         _atomic_savez(str(path), **arrays)
@@ -2708,6 +2738,8 @@ class ProductionRunner:
             mismatches.append("force_params")
         if dt_value != float(meta["counters"]["dt"]):
             mismatches.append("dt")
+        if meta.get("scheme") != scheme_record(self.scheme):
+            mismatches.append("scheme")
         self_acceleration = jnp.asarray(arrays["self_acceleration"])
         field = self.external_acceleration_fn
         external = meta["external"]
@@ -2834,6 +2866,7 @@ def run(
     force_params: Any = None,
     external_params: Any = None,
     mesh: Any = None,
+    scheme: Any = None,
 ) -> RunResult:
     """One-shot :class:`ProductionRunner` run.
 
@@ -2872,6 +2905,9 @@ def run(
     mesh : Any
         As :class:`ProductionRunner`: ``None`` (one card), a 1-D mesh or a
         :class:`MeshRunConfig` (the multi-GPU mode).
+    scheme : Any
+        As :class:`ProductionRunner`: ``None`` (the built-in KDK) or a
+        :class:`jaccpot.scheme.SplitStepScheme`.
 
     Returns
     -------
@@ -2888,6 +2924,7 @@ def run(
         step_callback=step_callback,
         step_callback_stride=step_callback_stride,
         mesh=mesh,
+        scheme=scheme,
     ).run(
         state,
         masses,

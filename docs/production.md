@@ -384,6 +384,50 @@ external field with traced parameters, traced force parameters). Not equal, the 
 warns, records the mismatches in `RunResult.restored`, and continues: correct, not
 bitwise.
 
+## Integration schemes (multi-node plan I1)
+
+nornax owns the integration schemes, jaccpot the force and the run (decision U1).
+`ProductionRunner(scheme=...)` takes a scheme through the structural protocol
+`jaccpot.scheme.SplitStepScheme`; jaccpot does not import nornax.
+
+```python
+from nornax import LeapfrogKDK                 # nornax.schemes.LeapfrogKDK
+runner = ProductionRunner(solver, settings=GALAXY_SETTINGS, scheme=LeapfrogKDK())
+```
+
+A step of the segment scan is cut at its one force evaluation:
+
+```
+state_open = scheme.open_step(state, acceleration, dt)          # nornax
+acceleration_new = self-gravity + external field at state_open[:, 0]   # jaccpot
+state_new = scheme.close_step(state_open, acceleration, acceleration_new, dt)  # nornax
+```
+
+`state` is the packed `[N, 2, 3]` carry, `acceleration` the total acceleration at its
+positions. The tree refresh, the capacity verdict, the walk/tree re-plan and segment
+retry, donation, restarts and diagnostics all stay the runner's; a scheme changes only
+the two expressions around the force. The carry's acceleration is the field at the
+carried positions (first same as last), so the protocol hosts every scheme with one
+force evaluation per step at its end: the KDK leapfrog, and later the P3T-style hybrid
+Hermite (U6), whose `open_step` integrates the direct-sum subsystems. Block steps and
+multi-stage schemes are not split steps.
+
+- `scheme=None` (the default) is the built-in velocity-Verlet KDK: the same programs
+  as before (identity vs the wave-2 base, 36/36).
+- `LeapfrogKDK()` writes the built-in's expressions operand for operand (nornax's
+  `drift_positions` / `kick_velocities`, which its own rollouts call), so it is the
+  built-in, bit for bit (`tests/integration/strict/test_runner_scheme.py`: literal and
+  traced parameters, an external field, the tree-order carry; nornax's
+  `tests/integration/test_jaccpot_provider_rollout.py` with the real one).
+- The scheme's `key()` joins the scan's compile key: its programs are its own.
+- `rowwise`: the tree-order carry (`JACCPOT_STRICT_CARRY_ORDER=tree`) hands the
+  scheme permuted rows; a scheme that is not rowwise keeps the input order.
+- A restart file records the scheme (`meta["scheme"]`, only when there is one);
+  continuing it under another scheme warns `"scheme"` in the mismatches.
+- Refused: the multi-GPU mode (`mesh=`; its seam is I2), the gradient mode (it
+  differentiates the built-in; nornax's `leapfrog_kdk_rollout` over
+  `FusedProviderForce` is the differentiable route), and `strict_run_v2(carry="state")`.
+
 ## Gradient mode (S9 session 2)
 
 A gradient of a production rollout, segments, re-plans and all, in two passes

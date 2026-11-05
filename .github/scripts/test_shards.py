@@ -117,6 +117,10 @@ _STRICT_A2_FILES: tuple[str, ...] = (
     "tests/integration/strict/test_energy_replan.py",
     "tests/integration/strict/test_escapers.py",
 )
+# The runner's integration-scheme seam (multi-node plan I1, 2026-11-05): runner pairs
+# (built-in and scheme) at the production-runner operating point, kept out of
+# `integration-strict`, which is near its cap (12.4 min at `-n 2`, loaded host).
+_STRICT_SCHEME = "tests/integration/strict/test_runner_scheme.py"
 # The differentiable fused step and the rollout over it (S9): every Pallas kernel in
 # interpret mode, and reverse programs of the whole lane (2-5 min of compilation
 # each on CPU). With them `integration-strict` was cancelled at its cap on #490
@@ -209,6 +213,7 @@ SHARDS: dict[str, list[str]] = {
                 *_STRICT_RUNNER_FILES,
                 *_STRICT_LANE_FILES,
                 *_STRICT_A2_FILES,
+                _STRICT_SCHEME,
                 *_STRICT_GRAD_FILES,
                 _STRICT_GRAD_ROLLOUT,
                 _STRICT_GRAD_RUNNER,
@@ -220,6 +225,7 @@ SHARDS: dict[str, list[str]] = {
     "integration-strict-runner": list(_STRICT_RUNNER_FILES),
     "integration-strict-lane": list(_STRICT_LANE_FILES),
     "integration-strict-a2": list(_STRICT_A2_FILES),
+    "integration-strict-scheme": [_STRICT_SCHEME],
     "integration-strict-grad": list(_STRICT_GRAD_FILES),
     "integration-strict-grad-rollout": [
         _STRICT_GRAD_ROLLOUT,
