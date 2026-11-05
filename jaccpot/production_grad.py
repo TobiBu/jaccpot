@@ -559,6 +559,16 @@ class GradientPlan:
     forward: Any
     _programs: dict = dataclasses.field(default_factory=dict, repr=False)
 
+    def __post_init__(self) -> None:
+        """Apply the opt-in persistent compilation cache.
+
+        ``JACCPOT_COMPILATION_CACHE_DIR`` (:mod:`jaccpot.runtime.compile_cache`):
+        the plan's programs compile for minutes; a no-op when unset or applied.
+        """
+        from jaccpot.runtime.compile_cache import maybe_enable_compilation_cache
+
+        maybe_enable_compilation_cache()
+
     def inputs(self) -> dict:
         """The pre-pass's inputs, on device: what the gradient run starts from.
 

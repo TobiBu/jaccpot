@@ -88,6 +88,7 @@ _ENV_KEYS = (
     "XLA_PYTHON_CLIENT_ALLOCATOR",
     "CUDA_VISIBLE_DEVICES",
     "JACCPOT_GRAD_FORWARD_TANGENT_KERNELS",
+    "JACCPOT_COMPILATION_CACHE_DIR",
     "XLA_FLAGS",
 )
 _INTERPRET_ENV = {
@@ -611,10 +612,7 @@ def summarize(directory: str) -> dict:
                 "bits": rec["bits"],
                 "finite": rec["finite"],
                 "a_vs_a": rec["a_vs_a_bitwise"],
-                **{
-                    key: (rec.get("topology") or {}).get(key)
-                    for key in TOPOLOGY_KEYS
-                },
+                **{key: (rec.get("topology") or {}).get(key) for key in TOPOLOGY_KEYS},
             }
         )
     rows.sort(key=lambda r: (r["n"], r["steps"], PROGRAMS.index(r["program"]), r["k"]))
@@ -704,6 +702,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.cpu_interpret:
         jax.default_backend = lambda: "gpu"  # the large-N profile's backend gate
     jax.config.update("jax_enable_x64", True)
+    from jaccpot.runtime.compile_cache import maybe_enable_compilation_cache
+
+    maybe_enable_compilation_cache()  # opt-in: JACCPOT_COMPILATION_CACHE_DIR
     rec = run(args)
     os.makedirs(args.out_dir, exist_ok=True)
     with open(path + ".tmp", "w") as fh:
