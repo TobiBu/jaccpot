@@ -330,6 +330,91 @@ the gate runs 4).
 - Callbacks run on every process; a callback that writes must check `jax.process_index() == 0`.
 - The stacked route (`setup_fused_force`) and `distributed/fmm.py` stay single-process.
 
+## M2 (GPU part) — N processes x 1 GPU on NCCL (2026-11-05)
+
+Plan M2, second session: the multi-process runtime of the CPU part on GPUs. Branch `m2/multiprocess-gpu` on main
+`f868c393`. Local cards are shared A100-PCIE-40GB (selected by autocvd, other users' jobs on them): functional,
+bitwise and memory results only, no timing. The timing and the 4-GPU / 2-node runs are prepared for HoreKa
+(`bench/slurm/m2g/`, not run).
+
+### What jax 0.11.2 gives on GPUs across processes (the spike)
+`tests/distributed/_multiprocess_scenarios.collectives` inside `jit(shard_map)`, three calls each with new data,
+2 processes x 1 GPU against 1 process x 2 GPUs on the same two cards, each side run twice:
+
+| XLA flags | result |
+| --- | --- |
+| production (`RAGGED_EXCHANGE_XLA_FLAGS`: NCCL send/recv ragged fallback, `use_barrier_with_nccl=false`) | `psum` f32/f64/int32, `pmax`, `pmin`, `all_gather`, `all_to_all`, `ppermute`, `jax.lax.ragged_all_to_all` (600-900 rows of 56 f32 per message, above the #398 threshold) and yggdrax's `ragged_all_to_all_exchange` all equal the host references, both arms bitwise, each arm A-vs-A clean; the same with each process given its card by its own `CUDA_VISIBLE_DEVICES` (as SLURM's per-task binding does) |
+| XLA's default (the one-shot kernel, no ragged flags) | works across processes too, the same bits |
+| the NCCL fallback with `use_barrier_with_nccl` at its 0.11 default (on) | **hangs** across processes, as in one process (#398): 300 s, every main thread in `BlockUntilReady` (py-spy, no compile frames). yggdrax's exchange refuses this flag set before tracing (`RuntimeError`) |
+
+So the flag is needed across processes exactly as in one process, and the production flag set already has it. The
+mesh evaluator's warning (`fused._warn_if_slow_ragged_exchange`) covers both; `bench/multiprocess_gate.py` sets the
+flags like every multi-GPU bench.
+
+**Float all-reduce order.** At two devices every order is `a0 + a1`, so the 2-GPU gate cannot see an order
+difference (the probe reports the `psum` against the mesh-order fold: 0 differing elements, both arms). The force
+path has no float all-reduce (verdicts are integer `pmax`/`pmin`, the exchanges move rows). The diagnostics' float
+sums are `mesh_sum`/`mesh_moments`: a psum (XLA's partitioned reduction, NCCL on a GPU) in one process, the
+all-gathered mesh-order fold under several. From three GPUs on, NCCL's in-process order may differ from that fold
+in the last bits of the moments and the energy (never of the state or forces); the HoreKa `node1` job's
+collectives probe measures it at 4 (`psum_*_mesh_order_differs`) and its compares report the edges' diagnostics
+separately from the arrays. If it differs, the fix is to fold in mesh order in one process too (a change to the
+single-process mesh programs: the user's call).
+
+### Gates (2 processes x 1 GPU vs 1 process x 2 GPUs, the same cards, production flags unless noted)
+`tests/distributed/test_multiprocess_gpu.py` (manual: `JACCPOT_RUN_MANUAL_TESTS=1`, two cards in
+`CUDA_VISIBLE_DEVICES`); `_multiprocess_harness.run_side(..., platform="gpu")`: process `r` owns card `r`
+(`JAX_LOCAL_DEVICE_IDS`). Every case: each side twice (A-vs-A), then the sides.
+
+| case | A-vs-A (sp / mp) | sp vs mp |
+| --- | --- | --- |
+| helpers (`mesh_sum`, `mesh_moments`, `host_value`, `decompose_local` == `decompose`) | clean / clean | bitwise |
+| runner + `DirectMeshForce` (N = 256, f64), migrating and not, energy and moments at every edge | clean / clean | bitwise (only `restart_refused` differs, by design) |
+| runner + fused `dehnen`, N = 2048, the real GPU lane, migrating, undersized cross capacity (segment 1 re-planned and retried) | clean / clean | bitwise |
+| runner + fused `dehnen_error`, A3 collapse start: TREE re-plan (leaf capacity 44 -> 1024, retries [1, 1]), f_b carried, energy at every edge | clean / clean | bitwise (state, acceleration, owner, force_scale, every edge, every report) |
+| `bench/multiprocess_gate.py` (the HoreKa entry point) under a simulated SLURM step, `initialize()` without arguments: galaxy preset `dehnen_error`, Plummer 1e5 per GPU, 2 segments x 2 steps, migration, energy at every edge, 2 repeats in the process; every task seeing both cards (jax's `[SLURM_LOCALID]`) and each task bound to one card (`slurm_bound_device_ids` -> `[0]`) | clean (sp) | bitwise, both bindings (state, acceleration, owner, every edge's diagnostics) |
+| runner + fused `dehnen`, galaxy preset (leaf 64, p6), Plummer 2e5 per GPU (4e5), 3 segments x 2 steps, migration (4x the equilibrium speeds), cross capacity far too small at the start (segment 1: 3 re-plans), energy at every edge | clean / clean | bitwise |
+| the same with `dehnen_error` (1e-4), f_b carried | NOT clean on the production flags: one float32 velocity component differs by 1 ulp from run to run (one process and two alike), so the edges' moments differ in the last bits; clean with `--xla_gpu_deterministic_ops=true` | bitwise with deterministic ops (both pairs); on the production flags each sp/mp pair happened to agree bitwise too |
+
+Only `dehnen_error` at 2e5 per GPU needed `--xla_gpu_deterministic_ops=true` for its A-vs-A control: the lane's
+known run-to-run variation on the production flags (`bench/multigpu_runner_gate.py` attributes it to the
+`dehnen_error` seed's scatter-add and the cross field's), present in one process, not something the processes add.
+
+**Discarded attempts.** A segment attempt that overflows a capacity is re-planned and rerun. The counts it reported
+past the overflowing buffer (`SegmentReport.failures[*]["needs"]`: 2 of 25 cross-field counters, at 4e5) vary from
+run to run in one process and two, also with deterministic ops (a kernel's slot counting past capacity, not an XLA
+scatter). Their flag bits, the kept attempt's needs and the re-planned capacities are bitwise; the gate compares
+those (`test_multiprocess_gpu._kept`).
+
+**Memory** (peak bytes in use per card, `memory_stats`): fused 2e5 per GPU 0.136 GiB (`dehnen`) and 0.262 GiB
+(`dehnen_error`, deterministic ops), the same in both arms (process 0's card in the mp arm); the HoreKa entry point at
+1e5 per GPU (`dehnen_error`) 0.14 GiB. Contended cards: no timings.
+
+### What was built
+| piece | what |
+| --- | --- |
+| `multiprocess.initialize` | under SLURM with nothing naming the devices and ONE card in `CUDA_VISIBLE_DEVICES` (`--gpus-per-task=1` with binding), passes `local_device_ids=[0]` (`slurm_bound_device_ids`): jax's own rule, `[SLURM_LOCALID]`, names a missing device from local rank 1 on. Otherwise jax's rule (right when every task sees the node's cards) |
+| `SnapshotWriter`, `DiagnosticsLog` | write their files on process 0 only (every process still takes part in the state gather, a collective, and keeps the rows); `all_processes=True` writes on each. One process: unchanged |
+| `_multiprocess_harness` | `platform="gpu"` (the first n cards of `CUDA_VISIBLE_DEVICES`; `gpu_binding="local_device_ids"` or `"visible"`), `launcher="slurm"` (a simulated SLURM step, `initialize()` without arguments), a py-spy dump of every child before a timeout kills it |
+| scenarios | `collectives`, `fused_runner_large` (the galaxy preset at 2e5 per device, Plummer), `writers`, `launch`; `fused_runner` runs the real lane on a GPU |
+| `bench/multiprocess_gate.py`, `bench/slurm/m2g/` | the HoreKa jobs: `node1` (1 node: 4 processes x 1 GPU vs 1 x 4, both MACs at 2e6 per GPU, A-vs-A, per-task binding arm, deterministic-ops arms; bitwise + timing) and `node2` (2 nodes x 4: functional, A-vs-A across nodes, collectives at 8, the barrier probe across nodes); README documents jax's SLURM detection and the binding choice |
+
+CPU tests (in the `distributed-multiprocess` CI shard): the writers write on process 0 only (and on each with
+`all_processes=True`); `initialize()` from a simulated SLURM step; `slurm_bound_device_ids` (4 cases).
+
+### Default paths
+- Single-card CPU program identity: `w2-base-cpu` vs `m2g-tip-cpu` (`4300467e`): **36/36 identical**.
+- `distributed-multiprocess` shard (CPU): 12 passed, 2 skipped (manual) in 45 min (shared host); with
+  `JACCPOT_RUNTIME_TYPECHECK=1` the fast cases 10 passed. `tests/unit` top level: 517 passed, 32 skipped.
+  `test_shards.py check` rc 0.
+
+### Open
+- Edge 0's energy is `None` when the start's cross capacity is too small (the fused `dehnen` 2048 case): the
+  potential at step 0 reports not-ok and is not re-planned, so there is no `E0` and `energy_drift` stays `None` for
+  the whole run. Also in one process; not changed here.
+- The float reduction order at >= 3 GPUs (above): HoreKa `node1`.
+- `RunResult.state` and the snapshots gather the whole state to every process (M3: per-rank output).
+
 ## H0 — the HoreKa single-node baseline bundle (2026-11-04)
 
 `bench/slurm/h0/` runs every H0 measurement on dedicated HoreKa nodes:

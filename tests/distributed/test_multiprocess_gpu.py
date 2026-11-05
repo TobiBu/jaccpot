@@ -9,10 +9,12 @@ sides means nothing unless each side reproduces itself), then compares them.
 
 The XLA flags are the production ones (the fusion autotuner off, XLA's NCCL
 ragged fallback with ``use_barrier_with_nccl=false``). Measured 2026-11-05 on
-two shared A100-PCIE: every case below reproduces itself on them (A-vs-A clean)
-and the two sides agree bitwise; ``JACCPOT_MP_GPU_DETERMINISTIC=1`` adds
-``--xla_gpu_deterministic_ops=true`` (for sizes whose scatter-adds do not
-reproduce on the production flags).
+two shared A100-PCIE: every case reproduces itself on them except
+``dehnen_error`` at 2e5 per GPU, where one float32 element of the state (and so
+the edges' moments) varies by an ulp from run to run in ONE process as in two;
+that case adds ``--xla_gpu_deterministic_ops=true`` (then both sides reproduce
+themselves and agree bitwise). ``JACCPOT_MP_GPU_DETERMINISTIC=1`` adds it to
+every case.
 
     eval "$(autocvd -q -e -l -n 2)"   # two free cards
     JACCPOT_RUN_MANUAL_TESTS=1 pytest -n 0 -m distributed_multiprocess \\
@@ -55,6 +57,7 @@ PROD = (
 )
 if os.environ.get("JACCPOT_MP_GPU_DETERMINISTIC") == "1":
     PROD += " --xla_gpu_deterministic_ops=true"
+DET = PROD + " --xla_gpu_deterministic_ops=true"
 
 #: JSON values that are per process by construction
 _LOCAL = ("peak_bytes",)
@@ -67,10 +70,30 @@ def _side(mode, name, out, env, timeout):
     return harness.load_side(out, mode)
 
 
+def _kept(values):
+    """``values`` without the counters of DISCARDED attempts.
+
+    A segment attempt that overflows a capacity is re-planned and rerun; the
+    counts it reported past the overflowing buffer (``failures[*]["needs"]``)
+    vary from run to run on a GPU, in one process too (measured: two of 25
+    cross-field counters at 4e5 particles). Its flag bits, the kept attempt's
+    needs and everything the run keeps are compared.
+    """
+    out = dict(values)
+    if "reports" in out:
+        out["reports"] = [
+            {k: v for k, v in r.items() if k != "failures"}
+            | {"failure_bits": [f["bits"] for f in r.get("failures", [])]}
+            for r in out["reports"]
+        ]
+    return out
+
+
 def _same(a, b, what):
     (xa, ja), (xb, jb) = a, b
     differ = harness.differing(xa, xb)
     assert not differ, f"{what}: elements differing {differ}"
+    ja, jb = _kept(ja), _kept(jb)
     for key in sorted((set(ja) | set(jb)) - set(_LOCAL)):
         assert ja.get(key) == jb.get(key), (what, key, str(ja.get(key))[:1500])
 
@@ -116,7 +139,7 @@ CASES = [
     pytest.param(
         "fused_runner_large",
         {"M2_MAC": "dehnen_error"},
-        PROD,
+        DET,
         id="dehnen_error-2e5-per-gpu",
     ),
 ]
