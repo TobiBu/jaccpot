@@ -82,6 +82,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Literal, Optional, Sequence, Union
 
 import numpy as np
+from yggdrax import TreeDepthError
 
 __all__ = [
     "DIAGNOSTICS",
@@ -251,6 +252,15 @@ class SegmentConfig:
     restart_path : Optional[str]
         Where; ``{step}`` and ``{segment}`` are formatted in, otherwise each restart
         replaces the last (written to a temporary file and renamed).
+    domain_guard : Literal["warn", "error", "off"]
+        The IC guard (A2, :func:`jaccpot.domain.domain_guard`), before a run's
+        first segment: ``"warn"`` (default) warns when a few far particles set
+        the Morton box (more than 20x the diameter holding 99.9 % of the
+        particles), with the box, the level-21 cell, the farthest particle and
+        the tree-depth bound; ``"error"`` refuses the run instead; ``"off"``
+        measures nothing. It reads the state only (device reductions and a
+        strided subsample of 2**20 rows): no program changes. A tree deeper than
+        64 levels raises at the first prepare whatever the mode.
     """
 
     steps: int = 50
@@ -261,6 +271,7 @@ class SegmentConfig:
     diagnostics_every_energy: int = 10
     restart_every: int = 0
     restart_path: Optional[str] = None
+    domain_guard: Literal["warn", "error", "off"] = "warn"
 
     def __post_init__(self) -> None:
         if int(self.steps) < 1:
@@ -275,6 +286,11 @@ class SegmentConfig:
             )
         if int(self.restart_every) > 0 and not self.restart_path:
             raise ValueError("SegmentConfig.restart_every needs a restart_path")
+        if self.domain_guard not in ("warn", "error", "off"):
+            raise ValueError(
+                "SegmentConfig.domain_guard must be 'warn', 'error' or 'off', got "
+                f"{self.domain_guard!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -822,8 +838,9 @@ def _energy_fields(kinetic: float, potential: Optional[dict], base: dict) -> dic
     -------
     dict
         ``potential_self``, ``potential_external``, ``potential``, ``energy``,
-        ``energy_drift`` (``(E - E0) / |E0|``) and ``energy_ok`` (the potential's
-        rebuild fitted its capacities); ``None`` where unknown or not fitted.
+        ``energy_drift`` (``(E - E0) / |E0|``), ``energy_ok`` (the potential's
+        rebuild fitted its capacities) and ``energy_replans`` (the energy-only
+        re-plans it needed, #488); ``None`` where unknown or not fitted.
     """
     fields: dict = dict(
         potential_self=None,
@@ -832,6 +849,7 @@ def _energy_fields(kinetic: float, potential: Optional[dict], base: dict) -> dic
         energy=None,
         energy_drift=None,
         energy_ok=None if potential is None else bool(potential["ok"]),
+        energy_replans=None if potential is None else int(potential.get("replans", 0)),
     )
     if potential is None or not fields["energy_ok"]:
         return fields
@@ -919,7 +937,33 @@ def _diagnostics_row(
         )
     if "energy" in names and energy_due:
         row.update(_energy_fields(float(moments["kinetic"]), potential, base))
+        if row["energy_ok"] is False:
+            _warn_blind_energy(time_now, potential)
     return row
+
+
+def _warn_blind_energy(time_now: float, potential: Optional[dict]) -> None:
+    """Say that an energy row is blind (#488): never a silent ``None``.
+
+    Parameters
+    ----------
+    time_now : float
+        The edge's time.
+    potential : Optional[dict]
+        The edge's potential energies (``ok`` False).
+    """
+    potential = potential or {}
+    bits = potential.get("bits")
+    warnings.warn(
+        f"ProductionRunner: the energy at t={float(time_now):.6g} is UNKNOWN: the "
+        "potential's rebuild overflowed its plan"
+        + ("" if bits is None else f" (overflow bits {int(bits):#x})")
+        + f" after {int(potential.get('replans') or 0)} energy re-plan(s); the "
+        "row's energy, energy_drift and potential are None (energy_ok=False). The "
+        "force segments are not affected.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
 
 
 def _plan_record(engine: Any, handle: Any) -> dict:
@@ -957,6 +1001,28 @@ def _plan_record(engine: Any, handle: Any) -> dict:
         "upward_num_levels": getattr(engine, "_cells_upward_num_levels", None),
         "force_key": None if force_key is None else [float(v) for v in force_key],
     }
+
+
+def _level_registry_key() -> tuple:
+    """The level registry as a compile-key fragment (#488).
+
+    The level loops' batch widths and depth counts (``_level_shapes``) are read
+    from a process-level registry when a program traces, and no provider key holds
+    them: a program cached before a re-plan widened them keeps the old widths. The
+    engine's own runners are cleared on a tree re-plan; the energy programs carry
+    this fragment in their key instead.
+
+    Returns
+    -------
+    tuple
+        ``(widths, levels)``, each the registry's sorted items.
+    """
+    from jaccpot.runtime import _level_shapes
+
+    return (
+        tuple(sorted(_level_shapes._WIDTHS.items())),
+        tuple(sorted(_level_shapes._LEVELS.items())),
+    )
 
 
 @contextlib.contextmanager
@@ -1449,8 +1515,13 @@ class ProductionRunner:
         #: the run's position at its last edge (what save_restart writes)
         self._current: Optional[dict] = None
         self._last_restart: Optional[str] = None
+        #: the IC guard's last report (jaccpot.domain.domain_check), or None
+        self._domain: Optional[dict] = None
         #: the energy programs, by plan (potential_energy)
         self._energy_programs: dict = {}
+        #: the energy programs compiled on an energy-only re-plan, by the plan
+        #: they replace (potential_energy, #488)
+        self._energy_grown: dict = {}
         #: the gradient mode's pre-pass recorder (gradient_plan); ``None``: off
         self._grad_recorder: Any = None
         #: the multi-GPU mode's configuration and backend (``None``: one card)
@@ -1530,6 +1601,9 @@ class ProductionRunner:
         RuntimeError
             When a segment fails after ``strict_run_v2``'s own re-plan; the message
             names the last restart file.
+        TreeDepthError
+            When the eager prepare's tree is deeper than yggdrax's
+            ``MAX_TREE_LEVELS``; the message adds the IC guard's report.
         """
         if self._mesh_backend is not None:
             return self._mesh_backend.run(
@@ -1607,6 +1681,15 @@ class ProductionRunner:
         _warn_fusion_autotuner(
             next(iter(state_now.devices())).platform, env_text("XLA_FLAGS")
         )
+        if self.segment.domain_guard != "off":
+            from jaccpot.domain import domain_guard
+
+            self._domain = domain_guard(
+                state_now,
+                mode=self.segment.domain_guard,
+                leaf_size=int(self.settings.leaf_size),
+                cubic_bounds=bool(self.settings.cubic_bounds),
+            )
         dt_arg, force_arg, external_arg = self._call_args(
             dt, force_params, external_params, state_now.dtype
         )
@@ -1658,6 +1741,22 @@ class ProductionRunner:
                         w0 = start["self"] + start["external"]
                         baselines["potential"] = w0
                         baselines["energy"] = float(baselines["kinetic"]) + w0
+                    else:
+                        # no E0: every later drift is None -- say so (#488)
+                        warnings.warn(
+                            "ProductionRunner: the start state's potential "
+                            "overflowed its plan"
+                            + (
+                                ""
+                                if start.get("bits") is None
+                                else f" (overflow bits {int(start['bits']):#x})"
+                            )
+                            + f" after {int(start.get('replans') or 0)} energy "
+                            "re-plan(s): E0 is unknown and every energy_drift of "
+                            "this run is None",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
                 start_state = None
                 if energy_due:
                     potential = self.potential_energy(
@@ -1756,6 +1855,24 @@ class ProductionRunner:
                     force_params=force_arg,
                     carry_total_acceleration=True,
                 )
+            except TreeDepthError as exc:
+                # the eager prepare's: say what the box is, with the outliers
+                # (the guard's report from this run's start: the state itself may
+                # have been donated to the failed segment)
+                from jaccpot.domain import format_domain_check
+
+                extra = (
+                    ""
+                    if self._domain is None
+                    else " At the run's start: " + format_domain_check(self._domain)
+                )
+                raise TreeDepthError(
+                    f"ProductionRunner: segment {segment_done + 1} (steps {step} to "
+                    f"{step + int(steps)}): {exc}{extra}",
+                    depth=exc.depth,
+                    bound=exc.bound,
+                    report=exc.report,
+                ) from exc
             except RuntimeError as exc:
                 raise RuntimeError(
                     f"ProductionRunner: segment {segment_done + 1} (steps {step} to "
@@ -2044,55 +2161,228 @@ class ProductionRunner:
         -------
         dict
             Host values: ``self`` (fp64 ``W_self``), ``external`` (``W_ext``, ``0``
-            without ``external_potential_fn``) and ``ok`` (the rebuild fitted its
-            capacities; the energies are meaningless otherwise).
+            without ``external_potential_fn``), ``ok`` (the rebuild fitted its
+            capacities; the energies are meaningless otherwise), ``replans`` (the
+            energy-only re-plans this evaluation ran, below) and ``bits`` (the
+            failed rebuild's overflow bits, ``None`` when it fitted).
+
+        Notes
+        -----
+        THE PLAN (#488). The program's key holds the provider's key and the level
+        registry (:func:`_level_registry_key`): the level loops' batch width is
+        read from that registry when the program TRACES and is in no provider key
+        -- a tree re-plan clears the engine's compiled runners for that reason --,
+        so a program cached before a width-only re-plan kept the old width and
+        reported ``ok=False`` at every later edge whose widest level outgrew it.
+
+        A rebuild that still does not fit is re-planned for the ENERGY only
+        (:meth:`_potential_energy_replanned`): the provider's ``replanned`` from
+        the rebuild's own needs at these positions, at most twice
+        (``_segment_retry_mode``), inside :func:`_trace_state_kept`, so the force's
+        plan, programs and trace-time state are the ones the run had. The grown
+        program is kept for this plan and tried first at the next edges.
         """
         import jax
-        import jax.numpy as jnp
-
-        from jaccpot.runtime.fused_topology import ForceParams
 
         prov = handle.provider
         field = self.external_potential_fn
         force_key = handle.force_key
-        params = (
-            None
-            if force_key is None
-            else ForceParams(G=float(force_key[0]), eps2=float(force_key[1]))
+        key = (
+            prov.key(),
+            force_key,
+            None if field is None else id(field),
+            _level_registry_key(),
         )
-        key = (prov.key(), force_key, None if field is None else id(field))
         program = self._energy_programs.get(key)
         if program is None:
-
-            def energy(
-                state_in: Any, masses_in: Any, scale_in: Any, external_in: Any
-            ) -> tuple:
-                topology = prov.rebuild(state_in[:, 0], masses_in, force_scale=scale_in)
-                phi = prov.potential(topology, params)
-                m = jnp.asarray(masses_in).astype(jnp.float64)
-                w_self = 0.5 * jnp.sum(m * phi.astype(jnp.float64))
-                if field is None:
-                    w_ext = jnp.zeros((), jnp.float64)
-                else:
-                    ext = (
-                        field(state_in)
-                        if external_in is None
-                        else field(state_in, external_in)
-                    )
-                    w_ext = jnp.sum(m * jnp.asarray(ext).astype(jnp.float64))
-                return w_self, w_ext, prov.capacity_ok(topology)
-
-            program = jax.jit(energy)
+            program = jax.jit(self._energy_body(prov, force_key))
             self._energy_programs[key] = program
         scale = handle.force_scale if prov.scale_carry else None
         # one placement for every call: step 0's state comes committed (a host copy
         # put back on the device), the segments' states do not, and jit compiles
         # one executable per commitment -- a second ~50 s compile at 25M and 1e8
         state = jax.device_put(state, masses.sharding)
+        args = (state, masses, scale, external_params)
+        grown = self._energy_grown.get(key)
+        if grown is not None:
+            w_self, w_ext, ok = jax.device_get(grown[0](*args))
+            if bool(ok):
+                return {
+                    "self": float(w_self),
+                    "external": float(w_ext),
+                    "ok": True,
+                    "replans": int(grown[1]),
+                    "bits": None,
+                }
+            del self._energy_grown[key]
         with _trace_state_kept(self.engine):
-            out = program(state, masses, scale, external_params)
+            out = program(*args)
         w_self, w_ext, ok = jax.device_get(out)
-        return {"self": float(w_self), "external": float(w_ext), "ok": bool(ok)}
+        if bool(ok):
+            return {
+                "self": float(w_self),
+                "external": float(w_ext),
+                "ok": True,
+                "replans": 0,
+                "bits": None,
+            }
+        return self._potential_energy_replanned(key, prov, force_key, args)
+
+    def _energy_body(self, prov: Any, force_key: Any) -> Callable:
+        """The energy program's body on ``prov``: rebuild, potential, both sums.
+
+        Parameters
+        ----------
+        prov : Any
+            The ``FusedForceProvider`` whose template the rebuild materialises.
+        force_key : Any
+            The handle's force parameters as host floats, or ``None``.
+
+        Returns
+        -------
+        Callable
+            ``(state, masses, f_b, external_params) -> (W_self, W_ext, ok)``.
+        """
+        import jax.numpy as jnp
+
+        from jaccpot.runtime.fused_topology import ForceParams
+
+        field = self.external_potential_fn
+        params = (
+            None
+            if force_key is None
+            else ForceParams(G=float(force_key[0]), eps2=float(force_key[1]))
+        )
+
+        def energy(
+            state_in: Any, masses_in: Any, scale_in: Any, external_in: Any
+        ) -> tuple:
+            topology = prov.rebuild(state_in[:, 0], masses_in, force_scale=scale_in)
+            phi = prov.potential(topology, params)
+            m = jnp.asarray(masses_in).astype(jnp.float64)
+            w_self = 0.5 * jnp.sum(m * phi.astype(jnp.float64))
+            if field is None:
+                w_ext = jnp.zeros((), jnp.float64)
+            else:
+                ext = (
+                    field(state_in)
+                    if external_in is None
+                    else field(state_in, external_in)
+                )
+                w_ext = jnp.sum(m * jnp.asarray(ext).astype(jnp.float64))
+            return w_self, w_ext, prov.capacity_ok(topology)
+
+        return energy
+
+    def _potential_energy_replanned(
+        self, key: tuple, prov: Any, force_key: Any, args: tuple
+    ) -> dict:
+        """The energy at ``args`` on a plan grown for it alone (#488).
+
+        The rebuild's needs at these positions (a small program: the rebuild and
+        :meth:`~jaccpot.runtime.fused_topology.FusedTopology.needs`), the
+        provider's ``replanned`` from them (caps-only re-prepare at these
+        positions), the energy program on the grown provider, compiled ahead of
+        time; then once more for the walk after a tree re-plan, as a segment
+        retry does (``_segment_retry_mode``). All of it inside
+        :func:`_trace_state_kept`: the engine's walk caps, tree bounds, compiled
+        runners and the level registry are put back, so the force runs on the
+        plan it had, bitwise.
+
+        Parameters
+        ----------
+        key : tuple
+            The energy program's key (the grown program is kept under it).
+        prov : Any
+            The handle's provider.
+        force_key : Any
+            The handle's force parameters, or ``None``.
+        args : tuple
+            ``(state, masses, f_b, external_params)``.
+
+        Returns
+        -------
+        dict
+            As :meth:`potential_energy`; ``ok=False`` when no re-plan fits (the
+            segment retry is off, a named cap overflowed, or two re-plans did not
+            fit), with the last rebuild's overflow bits.
+        """
+        import jax
+
+        from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+        state, masses = args[0], args[1]
+        engine = self.engine
+        replans, tree_first, bits = 0, False, None
+        with _trace_state_kept(engine):
+            current = prov
+            while True:
+                needs, bits = self._energy_needs(current, args)
+                mode = engine._segment_retry_mode(needs, replans, tree_first)
+                if mode is None:
+                    break
+                if replans == 0:
+                    tree_first = bool(needs[NEEDS_FIELDS.index("tree_overflow")])
+                replanned = current.replanned(
+                    needs,
+                    state[:, 0, :],
+                    masses,
+                    walk_only=mode == "walk",
+                    caps_only=True,
+                )
+                if replanned is None:
+                    break
+                current = replanned[0]
+                del replanned
+                replans += 1
+                compiled = (
+                    jax.jit(self._energy_body(current, force_key))
+                    .lower(*args)
+                    .compile()
+                )
+                w_self, w_ext, ok = jax.device_get(compiled(*args))
+                if bool(ok):
+                    self._energy_grown[key] = (compiled, replans)
+                    return {
+                        "self": float(w_self),
+                        "external": float(w_ext),
+                        "ok": True,
+                        "replans": replans,
+                        "bits": None,
+                    }
+        return {
+            "self": float("nan"),
+            "external": float("nan"),
+            "ok": False,
+            "replans": replans,
+            "bits": None if bits is None else int(bits),
+        }
+
+    @staticmethod
+    def _energy_needs(prov: Any, args: tuple) -> tuple:
+        """What the energy's rebuild on ``prov`` needs at ``args``' positions.
+
+        Parameters
+        ----------
+        prov : Any
+            The provider (the engine's trace-time state is the caller's).
+        args : tuple
+            ``(state, masses, f_b, external_params)``.
+
+        Returns
+        -------
+        tuple
+            ``(needs, bits)``: host ``int64[len(NEEDS_FIELDS)]`` and the overflow
+            bits (``FusedTopology.overflow_bits``).
+        """
+        import jax
+
+        def needs_of(state_in: Any, masses_in: Any, scale_in: Any) -> tuple:
+            topology = prov.rebuild(state_in[:, 0], masses_in, force_scale=scale_in)
+            return topology.needs(), topology.overflow_bits()
+
+        needs, bits = jax.device_get(jax.jit(needs_of)(*args[:3]))
+        return np.asarray(needs).astype(np.int64), int(bits)
 
     # ------------------------------------------------------------------
     # Helpers.
