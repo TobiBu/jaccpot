@@ -330,6 +330,59 @@ the gate runs 4).
 - Callbacks run on every process; a callback that writes must check `jax.process_index() == 0`.
 - The stacked route (`setup_fused_force`) and `distributed/fmm.py` stay single-process.
 
+## I1 — nornax owns the integration scheme (2026-11-05)
+
+Decision U1: nornax owns the integration schemes, jaccpot the force, decomposition and orchestration, Odisseo the
+science. The design note (`mn-scratch/i1/I1-DESIGN.md`) is summarised in `docs/production.md`, "Integration schemes".
+
+### What was built
+- **jaccpot.** `jaccpot/scheme.py` holds the structural protocol `SplitStepScheme`: `rowwise`, `key()`, `open_step`,
+  `close_step`. Each step of the particle carry's scan is cut at its one force evaluation:
+  `open_step` -> refresh + self + external force -> `close_step`. Refresh, verdict, re-plan/retry, restart and
+  diagnostics stay the runner's. jaccpot does not import nornax.
+  - `strict_run_v2(scheme=None)`: `None` takes the old inline expressions, so default programs are unchanged.
+  - `ProductionRunner(scheme=None)` and `production.run(scheme=)`.
+  - A scheme's `key()` joins the scan's compile key.
+  - A non-rowwise scheme keeps the input order under the tree-order carry.
+  - A restart file records `meta["scheme"]` only when a scheme is set; a restore under another scheme reports
+    `"scheme"`.
+  - Refused: `mesh=` (I2), the gradient mode, and `carry="state"`.
+- **nornax.** `nornax.schemes.LeapfrogKDK`. Its expressions, `drift_positions` and `kick_velocities`, now live in
+  one place, `leapfrog_kdk.py`, and `leapfrog_kdk_step` / `leapfrog_kdk_rollout` call them too.
+- **Odisseo.** `SimulationConfig.fmm_scheme` takes `None`, `"nornax_kdk"` or a scheme object.
+  - It selects lane `fmm_runner` for fixed-step `FMM_ACC` runs.
+  - The block-step, differentiable and older mesh lanes refuse it; `fmm_mesh_runner` refuses it until I2.
+  - Odisseo's FMM leapfrog loop (`integrate_leapfrog_jaccpot_active`, lane `fmm_forward` with fixed steps) and the
+    older mesh lane's KDK are deprecated with a `DeprecationWarning` naming the replacement. Through `integrate()`
+    the warning is issued once, on the caller's line.
+- **Bench.** `fused_memory_budget.py --runner-scheme nornax_kdk`; pins `R1pN` / `R1xN` in `dce_pins.py`.
+- **CI.** Shard `integration-strict-scheme`.
+
+### Gates (CPU unless noted)
+- Identity: `i1-tip-cpu` vs `w2-base-cpu`, 36/36 variants identical.
+- `tests/integration/strict/test_runner_scheme.py`: 9 passed. The KDK scheme is the built-in runner bit for bit
+  (literal and traced parameters, an NFW halo with traced parameters, the tree-order carry). A dt/2 scheme is the
+  built-in at dt/2. Restart and refusals pass. The shard ran 12.4 min at `-n 2` with coverage on a loaded host.
+- nornax: `ProductionRunner(scheme=LeapfrogKDK())` is the built-in runner bit for bit (static, traced, halo).
+  - The scheme's scan over the direct sum is `leapfrog_kdk_rollout` bit for bit.
+  - Suite: 360 passed, coverage 95.5 %; type-check smoke 61 passed.
+- Odisseo: `fmm_scheme="nornax_kdk"` is the built-in runner lane bit for bit (N = 512, NFW halo, 6 steps).
+  - Suite (`-m 'not slow'`): 291 passed, 11 skipped (2-device), 2 xfailed.
+  - The 2-device mesh files on forced devices: 43 passed.
+- Notebook `jaccpot_fmm_first_integration.ipynb`: cells 1-4, 7 and 9 were run on the base stack and the I1 stack.
+  The 4 arrays are bitwise equal and the printed numbers are identical. Cells 7 and 9 fail on both stacks
+  (Odisseo's `E_pot` has no `FMM_ACC` branch; this predates I1).
+- Also passed: `test_shards.py check`; `tests/unit` top level 517 passed; bench-tooling 117; gated
+  `distributed-segment-runner` 5 (2 forced devices).
+- GPU (R1p/R1x A-vs-A, then R1pN/R1xN): see `mn-scratch/i1/REPORT.md`.
+
+### Open
+- I2: the mesh runner's seam.
+- U6: the hybrid Hermite scheme (`rowwise=False`; it needs a per-step scheme carry and the `target_points=`
+  exclusion).
+- Retiring the deprecated loops.
+- Whether the default fixed-step FMM lane should switch to the runner. That changes numerics and is a user decision.
+
 ## H0 — the HoreKa single-node baseline bundle (2026-11-04)
 
 `bench/slurm/h0/` runs every H0 measurement on dedicated HoreKa nodes:
