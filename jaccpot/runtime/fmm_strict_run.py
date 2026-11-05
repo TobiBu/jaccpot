@@ -341,9 +341,15 @@ class StrictRunMixin(_EngineBase):
         Optional[str]
             ``"full"`` (walk and tree), ``"walk"`` (walk only), or ``None``.
         """
+        from yggdrax import MAX_TREE_LEVELS
+
         from jaccpot.runtime.fused_topology import NEEDS_FIELDS
 
         if not env_flag("JACCPOT_STRICT_SEGMENT_RETRY", True):
+            return None
+        if int(needs[NEEDS_FIELDS.index("depth_needed")]) > int(MAX_TREE_LEVELS):
+            # past the radix tree's own level tables: no bound a re-plan grows
+            # covers it (_raise_scan_capacity_saturated says what does)
             return None
         if retries == 0:
             return "full"
@@ -423,7 +429,11 @@ class StrictRunMixin(_EngineBase):
         return "full" if int(needs[index("tree_overflow")]) else "walk"
 
     def _raise_scan_capacity_saturated(
-        self, needs: Optional[np.ndarray], *, retries: int = 0
+        self,
+        needs: Optional[np.ndarray],
+        *,
+        retries: int = 0,
+        positions: Optional[Any] = None,
     ) -> None:
         """Raise the fused scan's capacity error (after any retry was spent).
 
@@ -437,6 +447,10 @@ class StrictRunMixin(_EngineBase):
         retries : int
             Retries the segment ran before this failure (each a re-plan and a
             re-run from its start); the bounds named are then the grown ones.
+        positions : Optional[Any]
+            ``[N, 3]`` positions at the segment's start: a tree deeper than
+            ``MAX_TREE_LEVELS`` is then explained by the Morton box, the level-21
+            cell and the outliers (``yggdrax.domain_report``).
 
         Raises
         ------
@@ -493,6 +507,7 @@ class StrictRunMixin(_EngineBase):
         )
         if not named.get("tree_overflow"):
             raise RuntimeError(saturated + ran + walk)
+        self._raise_if_too_deep(named, positions, walk)
         # the cell-leaf tree first -- what overflowed, against which bound -- then
         # the walk's saturation when its lists saturated in the same segment
         walk_saturated = any(
@@ -554,6 +569,58 @@ class StrictRunMixin(_EngineBase):
             + (" In the same segment, " + saturated if walk_saturated else "")
             + ran
             + walk
+        )
+
+    def _raise_if_too_deep(
+        self, named: dict, positions: Optional[Any], walk: str
+    ) -> None:
+        """Raise when a step's tree was deeper than the radix tree's level tables.
+
+        ``MAX_TREE_LEVELS`` (64) is yggdrax's own bound, not a capacity: no
+        re-plan or ``TreeConfig`` setting covers a deeper tree. It comes from a
+        Morton box too large for the dense centre (many leaves in one level-21
+        cell), i.e. a few far outliers -- the 1e8 Sgr IC's sampler tails.
+
+        Parameters
+        ----------
+        named : dict
+            The segment's needs by name.
+        positions : Optional[Any]
+            ``[N, 3]`` positions at the segment's start, or ``None``.
+        walk : str
+            The needs sentence of the message.
+
+        Raises
+        ------
+        RuntimeError
+            If ``depth_needed`` exceeds ``MAX_TREE_LEVELS``.
+        """
+        from yggdrax import MAX_TREE_LEVELS, domain_report, format_domain_report
+
+        depth = int(named.get("depth_needed", 0))
+        if depth <= int(MAX_TREE_LEVELS):
+            return
+        detail = ""
+        if positions is not None:
+            try:
+                detail = (
+                    " At the segment's start: "
+                    + format_domain_report(domain_report(positions))
+                    + "."
+                )
+            except Exception:  # noqa: BLE001 -- the message must not mask the error
+                detail = ""
+        raise RuntimeError(
+            f"the cell-leaf tree overflowed inside the compiled velocity-Verlet "
+            f"scan: a step's rebuild needed a tree {depth} levels deep, past "
+            f"yggdrax's MAX_TREE_LEVELS ({int(MAX_TREE_LEVELS)}), which no re-plan "
+            "or TreeConfig setting raises: the forces from that step on would be "
+            "wrong. Many leaves share one level-21 Morton cell because the box is "
+            f"too large for the dense centre (far outliers or escapers).{detail} "
+            "Clip or remove the outliers, or run with the escaper policy "
+            "(GalaxySettings(r_escape=...)); ProductionRunner's IC guard "
+            "(SegmentConfig(domain_guard=...)) reports this before the first "
+            "force." + walk
         )
 
     def refresh_prepared_state(
@@ -2598,7 +2665,19 @@ class StrictRunMixin(_EngineBase):
                 else None
             )
             if mode is None:
-                self._raise_scan_capacity_saturated(needs, retries=retries)
+                self._raise_scan_capacity_saturated(
+                    needs,
+                    retries=retries,
+                    positions=(
+                        start_host[:, 0]
+                        if start_host is not None
+                        else (
+                            None
+                            if donate_state_now and ran_scan
+                            else state_now[:, 0, :]
+                        )
+                    ),
+                )
             failures.append((self._strict_particle_failed_step, needs))
             if retries == 0:
                 tree_first = bool(needs[NEEDS_FIELDS.index("tree_overflow")])
