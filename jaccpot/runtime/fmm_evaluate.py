@@ -1168,11 +1168,8 @@ class EvaluateMixin(_EngineBase):
         NotImplementedError
             For options this lane does not support, including a target subset.
         """
-        from ._large_n_grad import (
-            evaluate_large_n_state_at_positions_and_masses_sorted,
-            prepare_large_n_grad_plan,
-            resolve_grad_force_params,
-        )
+        from ._forward_group import forward_tangent_group, grouped_jvp
+        from ._large_n_grad import prepare_large_n_grad_plan, resolve_grad_force_params
 
         if target_indices is not None:
             raise NotImplementedError(
@@ -1197,6 +1194,63 @@ class EvaluateMixin(_EngineBase):
             else prepare_large_n_grad_plan(self, state)
         )
         force = resolve_grad_force_params(self, force_params)
+        group = forward_tangent_group()
+        if group is not None:
+            # forward mode, tangent directions in groups (_forward_group.py): the
+            # same evaluation below, its tangent applied g directions at a time
+            return grouped_jvp(
+                partial(
+                    self._differentiable_large_n_eval,
+                    state,
+                    plan=plan,
+                    return_force_scale=return_force_scale,
+                ),
+                (positions, masses, force),
+                group=group,
+            )
+        return self._differentiable_large_n_eval(
+            state,
+            positions,
+            masses,
+            force,
+            plan=plan,
+            return_force_scale=return_force_scale,
+        )
+
+    def _differentiable_large_n_eval(
+        self,
+        state: LargeNPreparedState,
+        positions: Array,
+        masses: Array,
+        force: Optional[ForceParams],
+        *,
+        plan: "LargeNGradPlan",
+        return_force_scale: bool,
+    ) -> Any:
+        """:meth:`_differentiable_accelerations_large_n`'s evaluation, validated inputs.
+
+        Parameters
+        ----------
+        state : LargeNPreparedState
+            Frozen large-N topology.
+        positions : Array
+            Live positions ``[N, 3]``, input order.
+        masses : Array
+            Live masses ``[N]``, input order.
+        force : Optional[ForceParams]
+            Resolved force parameters (``None``: the solver's own).
+        plan : LargeNGradPlan
+            The gradient plan.
+        return_force_scale : bool
+            Also return eq (16b)'s f_b per particle.
+
+        Returns
+        -------
+        Any
+            Accelerations ``(N, 3)`` in input order, or ``(accelerations, f_b)``.
+        """
+        from ._large_n_grad import evaluate_large_n_state_at_positions_and_masses_sorted
+
         positions_sorted, masses_sorted = self._sorted_inputs(state, positions, masses)
         if return_force_scale:
             accelerations_sorted, scale_sorted = (
