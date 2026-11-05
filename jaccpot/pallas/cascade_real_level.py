@@ -1143,7 +1143,7 @@ l2l_real_levels_fb_pallas_cvjp.defvjp(_l2l_fb_cvjp_fwd, _l2l_fb_cvjp_bwd)
 # derivative (``operators/_transverse_degeneracy_jvp.py``).
 
 
-def _m2m_tangent_impl(
+def _m2m_tangent_out_impl(
     packed: Array,
     centers: Array,
     left_child: Array,
@@ -1151,6 +1151,7 @@ def _m2m_tangent_impl(
     parent: Array,
     nodes_by_level: Array,
     level_offsets: Array,
+    out_packed: Array,
     t_packed: Array,
     t_centers: Array,
     *,
@@ -1164,12 +1165,12 @@ def _m2m_tangent_impl(
     live: tuple[bool, ...],
     tangents_per_program: int | None = None,
 ) -> list[Array]:
-    """The ``K``-tangent M2M cascade (any ``K``; see the op).
+    """The ``K``-tangent M2M cascade from the forward's output (any ``K``; see the op).
 
     Parameters
     ----------
     packed : Array
-        ``[nodes, C]`` packed multipoles with the leaves filled.
+        ``[nodes, C]`` the seam's input (not read: the output carries every row).
     centers : Array
         ``[nodes, 3]`` expansion centres.
     left_child : Array
@@ -1182,6 +1183,8 @@ def _m2m_tangent_impl(
         Level-major node ids.
     level_offsets : Array
         ``[levels + 1]`` starts.
+    out_packed : Array
+        ``[nodes, C]`` the seam's OUTPUT (the primal the seam already computed).
     t_packed : Array
         ``[K, nodes, C]`` tangents of ``packed``.
     t_centers : Array
@@ -1212,13 +1215,13 @@ def _m2m_tangent_impl(
     """
     from jaccpot.pallas.cascade_real_lanes import m2m_real_levels_lanes_tangent_pallas
 
-    del parent, num_warps
+    del packed, parent, num_warps
     if not (bool(live[0]) or bool(live[1])):
-        return [jnp.zeros(t_packed.shape, jnp.asarray(packed).dtype)]
+        return [jnp.zeros(t_packed.shape, jnp.asarray(out_packed).dtype)]
     k = _cascade_lanes_k()
     return [
         m2m_real_levels_lanes_tangent_pallas(
-            packed,
+            out_packed,
             centers,
             left_child,
             right_child,
@@ -1240,7 +1243,7 @@ def _m2m_tangent_impl(
     ]
 
 
-def _l2l_tangent_impl(
+def _l2l_tangent_out_impl(
     coeffs_local: Array,
     centers: Array,
     parent: Array,
@@ -1248,6 +1251,7 @@ def _l2l_tangent_impl(
     right_child: Array,
     nodes_by_level: Array,
     level_offsets: Array,
+    out_locals: Array,
     t_coeffs_local: Array,
     t_centers: Array,
     *,
@@ -1260,12 +1264,12 @@ def _l2l_tangent_impl(
     live: tuple[bool, ...],
     tangents_per_program: int | None = None,
 ) -> list[Array]:
-    """The ``K``-tangent L2L cascade (any ``K``; see the op).
+    """The ``K``-tangent L2L cascade from the forward's output (any ``K``; see the op).
 
     Parameters
     ----------
     coeffs_local : Array
-        ``[nodes, C]`` packed locals after M2L.
+        ``[nodes, C]`` the seam's input (not read: the tangent needs the output).
     centers : Array
         ``[nodes, 3]`` expansion centres.
     parent : Array
@@ -1278,6 +1282,8 @@ def _l2l_tangent_impl(
         Level-major node ids.
     level_offsets : Array
         ``[levels + 1]`` starts.
+    out_locals : Array
+        ``[nodes, C]`` the seam's OUTPUT (the primal the seam already computed).
     t_coeffs_local : Array
         ``[K, nodes, C]`` tangents of ``coeffs_local``.
     t_centers : Array
@@ -1306,13 +1312,13 @@ def _l2l_tangent_impl(
     """
     from jaccpot.pallas.cascade_real_lanes import l2l_real_levels_lanes_tangent_pallas
 
-    del left_child, right_child, num_warps
+    del coeffs_local, left_child, right_child, num_warps
     if not (bool(live[0]) or bool(live[1])):
-        return [jnp.zeros(t_coeffs_local.shape, jnp.asarray(coeffs_local).dtype)]
+        return [jnp.zeros(t_coeffs_local.shape, jnp.asarray(out_locals).dtype)]
     k = _cascade_lanes_k()
     return [
         l2l_real_levels_lanes_tangent_pallas(
-            coeffs_local,
+            out_locals,
             centers,
             parent,
             nodes_by_level,
@@ -1332,13 +1338,169 @@ def _l2l_tangent_impl(
     ]
 
 
+def _m2m_tangent_impl(
+    packed: Array,
+    centers: Array,
+    left_child: Array,
+    right_child: Array,
+    parent: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    t_packed: Array,
+    t_centers: Array,
+    **params: Any,
+) -> list[Array]:
+    """The seven-primal M2M tangent: the forward again, then :func:`_m2m_tangent_out_impl`.
+
+    For callers that do not hand over the seam's output; the forward-mode seams
+    should use :data:`m2m_real_levels_pallas_tangent_out` and skip this second
+    forward.
+
+    Parameters
+    ----------
+    packed : Array
+        ``[nodes, C]`` packed multipoles with the leaves filled.
+    centers : Array
+        ``[nodes, 3]`` expansion centres.
+    left_child : Array
+        ``[internal]`` left children.
+    right_child : Array
+        ``[internal]`` right children.
+    parent : Array
+        ``[nodes]`` parent per node.
+    nodes_by_level : Array
+        Level-major node ids.
+    level_offsets : Array
+        ``[levels + 1]`` starts.
+    t_packed : Array
+        ``[K, nodes, C]`` tangents of ``packed``.
+    t_centers : Array
+        ``[K, nodes, 3]`` tangents of ``centers``.
+    **params : Any
+        :func:`_m2m_tangent_out_impl`'s static parameters.
+
+    Returns
+    -------
+    list[Array]
+        ``[K, nodes, C]`` tangent of the output table.
+    """
+    live = params["live"]
+    out = packed
+    if bool(live[0]) or bool(live[1]):
+        out = _m2m_forward(
+            packed,
+            centers,
+            left_child,
+            right_child,
+            nodes_by_level,
+            level_offsets,
+            order=params["order"],
+            num_internal=params["num_internal"],
+            num_levels=params["num_levels"],
+            level_batch_width=params["level_batch_width"],
+            interpret=params["interpret"],
+            backend=params["backend"],
+            num_warps=params["num_warps"],
+        )
+    return _m2m_tangent_out_impl(
+        packed,
+        centers,
+        left_child,
+        right_child,
+        parent,
+        nodes_by_level,
+        level_offsets,
+        out,
+        t_packed,
+        t_centers,
+        **params,
+    )
+
+
+def _l2l_tangent_impl(
+    coeffs_local: Array,
+    centers: Array,
+    parent: Array,
+    left_child: Array,
+    right_child: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    t_coeffs_local: Array,
+    t_centers: Array,
+    **params: Any,
+) -> list[Array]:
+    """The seven-primal L2L tangent: the forward again, then :func:`_l2l_tangent_out_impl`.
+
+    For callers that do not hand over the seam's output; the forward-mode seams
+    should use :data:`l2l_real_levels_pallas_tangent_out` and skip this second
+    forward.
+
+    Parameters
+    ----------
+    coeffs_local : Array
+        ``[nodes, C]`` packed locals after M2L.
+    centers : Array
+        ``[nodes, 3]`` expansion centres.
+    parent : Array
+        ``[nodes]`` parent per node.
+    left_child : Array
+        ``[internal]`` left children.
+    right_child : Array
+        ``[internal]`` right children.
+    nodes_by_level : Array
+        Level-major node ids.
+    level_offsets : Array
+        ``[levels + 1]`` starts.
+    t_coeffs_local : Array
+        ``[K, nodes, C]`` tangents of ``coeffs_local``.
+    t_centers : Array
+        ``[K, nodes, 3]`` tangents of ``centers``.
+    **params : Any
+        :func:`_l2l_tangent_out_impl`'s static parameters.
+
+    Returns
+    -------
+    list[Array]
+        ``[K, nodes, C]`` tangent of the cascaded locals.
+    """
+    live = params["live"]
+    out: Any = coeffs_local
+    if bool(live[0]) or bool(live[1]):
+        out = _l2l_forward(
+            coeffs_local,
+            centers,
+            parent,
+            nodes_by_level,
+            level_offsets,
+            order=params["order"],
+            num_levels=params["num_levels"],
+            level_batch_width=params["level_batch_width"],
+            interpret=params["interpret"],
+            backend=params["backend"],
+            num_warps=params["num_warps"],
+        )
+    return _l2l_tangent_out_impl(
+        coeffs_local,
+        centers,
+        parent,
+        left_child,
+        right_child,
+        nodes_by_level,
+        level_offsets,
+        out,
+        t_coeffs_local,
+        t_centers,
+        **params,
+    )
+
+
 def _cascade_tangent_shapes(*specs: Any, **params: Any) -> list[jax.ShapeDtypeStruct]:
     """Closed-form output shape of a cascade tangent op: the first tangent's.
 
     Parameters
     ----------
     *specs : Any
-        The operands' shape/dtype structs (seven primals, then the tangents).
+        The operands' shape/dtype structs (the primals, then the two tangents).
     **params : Any
         The op's static parameters (unused).
 
@@ -1348,31 +1510,52 @@ def _cascade_tangent_shapes(*specs: Any, **params: Any) -> list[jax.ShapeDtypeSt
         ``[K, nodes, C]`` in the coefficients' dtype.
     """
     del params
-    return [jax.ShapeDtypeStruct(tuple(specs[7].shape), specs[0].dtype)]
+    return [jax.ShapeDtypeStruct(tuple(specs[-2].shape), specs[0].dtype)]
 
 
-def _make_cascade_tangent_op(which: str) -> Any:
+def _make_cascade_tangent_op(which: str, *, from_output: bool) -> Any:
     from jaccpot.pallas._tangent import make_tangent_op
 
-    impl = _m2m_tangent_impl if which == "m2m" else _l2l_tangent_impl
+    if from_output:
+        impl = _m2m_tangent_out_impl if which == "m2m" else _l2l_tangent_out_impl
+    else:
+        impl = _m2m_tangent_impl if which == "m2m" else _l2l_tangent_impl
     return make_tangent_op(
-        f"{which}_real_levels",
+        f"{which}_real_levels" + ("_out" if from_output else ""),
         impl,
-        num_primals=7,
+        num_primals=8 if from_output else 7,
         abstract_eval=_cascade_tangent_shapes,
     )
 
 
 #: Forward-mode tangent op of :func:`m2m_real_levels_pallas_cvjp`: operands the
 #: seam's seven arrays in its order, then ``(t_packed, t_centers)`` ``K``-stacked;
-#: params the seam's statics by name plus ``live``; returns ``([K, nodes, C],)``.
-m2m_real_levels_pallas_tangent = _make_cascade_tangent_op("m2m")
+#: params the seam's statics by name plus ``live`` (and optionally
+#: ``tangents_per_program``); returns ``([K, nodes, C],)``. It runs the forward
+#: again for the primal rows the tangent reads; a seam that has the forward's
+#: output should call :data:`m2m_real_levels_pallas_tangent_out` instead.
+m2m_real_levels_pallas_tangent = _make_cascade_tangent_op("m2m", from_output=False)
 
 #: Forward-mode tangent op of :func:`l2l_real_levels_pallas_cvjp`: operands the
 #: seam's seven arrays in its order, then ``(t_coeffs_local, t_centers)``
-#: ``K``-stacked; params the seam's statics by name plus ``live``; returns
-#: ``([K, nodes, C],)``.
-l2l_real_levels_pallas_tangent = _make_cascade_tangent_op("l2l")
+#: ``K``-stacked; params the seam's statics by name plus ``live`` (and optionally
+#: ``tangents_per_program``); returns ``([K, nodes, C],)``. It runs the forward
+#: again for the primal rows the tangent reads; a seam that has the forward's
+#: output should call :data:`l2l_real_levels_pallas_tangent_out` instead.
+l2l_real_levels_pallas_tangent = _make_cascade_tangent_op("l2l", from_output=False)
+
+#: The M2M tangent op reading the seam's OUTPUT: operands the seam's seven arrays
+#: in its order, then the forward's output ``out_packed`` ``[nodes, C]`` (the eighth
+#: primal, read-only), then ``(t_packed, t_centers)`` ``K``-stacked; params as
+#: :data:`m2m_real_levels_pallas_tangent`. The tangent cascade neither recomputes
+#: nor stores the primal. Any ``K``.
+m2m_real_levels_pallas_tangent_out = _make_cascade_tangent_op("m2m", from_output=True)
+
+#: The L2L tangent op reading the seam's OUTPUT: operands the seam's seven arrays
+#: in its order, then the forward's output ``out_locals`` ``[nodes, C]`` (the eighth
+#: primal, read-only), then ``(t_coeffs_local, t_centers)`` ``K``-stacked; params
+#: as :data:`l2l_real_levels_pallas_tangent`. Any ``K``.
+l2l_real_levels_pallas_tangent_out = _make_cascade_tangent_op("l2l", from_output=True)
 
 
 def m2m_real_levels_jnp(
@@ -1684,3 +1867,47 @@ def l2l_real_levels_pallas_tangent_jnp(
         return jax.jvp(f, (coeffs_local, centers), (tx, tc))[1]
 
     return (jax.vmap(one)(t_coeffs_local, t_centers),)
+
+
+def _m2m_tangent_out_jnp(*operands: Array, **params: Any) -> tuple[Array]:
+    """Reference of :data:`m2m_real_levels_pallas_tangent_out` (the eighth primal dropped).
+
+    Parameters
+    ----------
+    *operands : Array
+        The op's operands: seven seam arrays, ``out_packed``, two tangents.
+    **params : Any
+        :func:`m2m_real_levels_pallas_tangent_jnp`'s parameters.
+
+    Returns
+    -------
+    tuple[Array]
+        ``([K, nodes, C],)``.
+    """
+    params.pop("tangents_per_program", None)
+    return m2m_real_levels_pallas_tangent_jnp(*operands[:7], *operands[8:], **params)
+
+
+def _l2l_tangent_out_jnp(*operands: Array, **params: Any) -> tuple[Array]:
+    """Reference of :data:`l2l_real_levels_pallas_tangent_out` (the eighth primal dropped).
+
+    Parameters
+    ----------
+    *operands : Array
+        The op's operands: seven seam arrays, ``out_locals``, two tangents.
+    **params : Any
+        :func:`l2l_real_levels_pallas_tangent_jnp`'s parameters.
+
+    Returns
+    -------
+    tuple[Array]
+        ``([K, nodes, C],)``.
+    """
+    params.pop("tangents_per_program", None)
+    return l2l_real_levels_pallas_tangent_jnp(*operands[:7], *operands[8:], **params)
+
+
+#: The ``<op>_jnp`` fallback of :data:`m2m_real_levels_pallas_tangent_out`.
+m2m_real_levels_pallas_tangent_out_jnp = _m2m_tangent_out_jnp
+#: The ``<op>_jnp`` fallback of :data:`l2l_real_levels_pallas_tangent_out`.
+l2l_real_levels_pallas_tangent_out_jnp = _l2l_tangent_out_jnp

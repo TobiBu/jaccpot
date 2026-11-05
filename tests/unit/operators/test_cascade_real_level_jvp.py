@@ -33,10 +33,12 @@ from jaccpot.pallas.cascade_real_level import (  # noqa: E402
     l2l_real_levels_pallas_cvjp,
     l2l_real_levels_pallas_tangent,
     l2l_real_levels_pallas_tangent_jnp,
+    l2l_real_levels_pallas_tangent_out,
     m2m_real_levels_jnp,
     m2m_real_levels_pallas_cvjp,
     m2m_real_levels_pallas_tangent,
     m2m_real_levels_pallas_tangent_jnp,
+    m2m_real_levels_pallas_tangent_out,
     pallas_cascade_level_supported,
 )
 
@@ -386,6 +388,43 @@ def test_tangents_per_program_grid(plummer_tree, which, tpp, k):
     assert got.shape == (k, tree.tot, (order + 1) ** 2)
     assert _rel_max(got, want) < 1e-11, _rel_max(got, want)
     assert _rel_max(got, _TPP_ONE[key]) < 1e-14
+
+
+@pytest.mark.parametrize("which", ["m2m", "l2l"])
+def test_the_output_reading_op_equals_the_reference(plummer_tree, which):
+    """``*_pallas_tangent_out`` reads the seam's OUTPUT as an eighth primal and
+    neither recomputes nor stores the primal cascade: both halves, ``K = 3``."""
+    order = 3
+    tree = plummer_tree
+    coef, cent, t_coef, t_cent = _inputs(tree, which, order, jnp.float64, 3, 9)
+    out = _forward(tree, which, order, coef, cent)
+    op = (
+        m2m_real_levels_pallas_tangent_out
+        if which == "m2m"
+        else l2l_real_levels_pallas_tangent_out
+    )
+    topo = tree.m2m_topo() if which == "m2m" else tree.l2l_topo()
+    static = tree.m2m_static(order) if which == "m2m" else tree.l2l_static(order)
+    for tc, tx in (
+        (t_coef, jnp.zeros_like(t_cent)),
+        (jnp.zeros_like(t_coef), t_cent),
+    ):
+        (got,) = op(
+            coef,
+            cent,
+            *topo,
+            out,
+            tc,
+            tx,
+            **static,
+            interpret=True,
+            backend="triton",
+            num_warps=4,
+            live=(True, True),
+        )
+        want = _call(tree, which, order, coef, cent, tc, tx, ref=True)
+        assert np.linalg.norm(np.asarray(want)) > 0
+        assert _rel_max(got, want) < 1e-11, _rel_max(got, want)
 
 
 def _seam_for(tree, which, order):
