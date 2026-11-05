@@ -617,8 +617,8 @@ class StrictRunMixin(_EngineBase):
             "or TreeConfig setting raises: the forces from that step on would be "
             "wrong. Many leaves share one level-21 Morton cell because the box is "
             f"too large for the dense centre (far outliers or escapers).{detail} "
-            "Clip or remove the outliers, or run with the escaper policy "
-            "(GalaxySettings(r_escape=...)); ProductionRunner's IC guard "
+            "Clip or remove the outliers, or move them off the tree (the escaper "
+            "prototype, jaccpot.escapers.EscaperPolicy); ProductionRunner's IC guard "
             "(SegmentConfig(domain_guard=...)) reports this before the first "
             "force." + walk
         )
