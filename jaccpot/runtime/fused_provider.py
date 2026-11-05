@@ -1423,6 +1423,7 @@ class FusedForceProvider:
         *,
         plan: "LargeNGradPlan",
         force_scale: bool = False,
+        cross: Any = None,
     ) -> Any:
         """The self-gravity on ``topology`` at LIVE positions and masses.
 
@@ -1450,6 +1451,12 @@ class FusedForceProvider:
             Also return eq (16b)'s f_b per particle (input order), as
             :meth:`accelerations` does: the near kernel's force-scale lane plus the
             rebuild's far half; not differentiated.
+        cross : Any
+            On a multi-GPU device: the cross far sources its rebuild's hook
+            imported (:class:`~jaccpot.runtime._large_n_grad.LargeNCrossFar`), for
+            the far chain -- the cross near term is the caller's
+            (:func:`jaccpot.distributed.grad.mesh_differentiable_force_shard`).
+            ``None`` (default): one domain.
 
         Returns
         -------
@@ -1485,6 +1492,7 @@ class FusedForceProvider:
                 options=options,
                 force_params=force,
                 return_force_scale=bool(force_scale),
+                cross=cross,
             )
 
     def differentiable_step(

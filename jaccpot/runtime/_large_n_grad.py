@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -52,6 +52,7 @@ from .kernels.core import (
 )
 
 __all__ = [
+    "LargeNCrossFar",
     "LargeNGradPlan",
     "LargeNGradStatics",
     "evaluate_large_n_state_at_positions_and_masses_sorted",
@@ -132,6 +133,39 @@ class LargeNGradPlan:
     num_far_pairs: int
     far_pairs_target_sorted: bool = False
     far_pairs_symmetric: bool = False
+
+
+class LargeNCrossFar(NamedTuple):
+    """A multi-GPU device's cross-domain far sources for the differentiable far chain.
+
+    What the production refresh hands its downward sweep beside the local list
+    (``fmm_strict_run._call_cross_hook`` -> ``_prepare_state_dual_and_downward``'s
+    ``cross_far``): the imported multipoles and expansion centres behind the local
+    nodes, and the cross far pairs as indices into ``[local ; imported]``. The
+    imports are the topology rebuild's, gradients stopped: what reaches the other
+    devices' sources is the M2L seam's reverse (``reverse``), never a transpose of
+    the exchange.
+
+    Attributes
+    ----------
+    multipoles : Array
+        ``(K, C)`` imported packed multipoles (stopped).
+    centers : Array
+        ``(K, 3)`` their expansion centres (stopped).
+    sources : Array
+        ``(P,)`` cross pair sources, ``n_local``-offset, ``-1``-padded.
+    targets : Array
+        ``(P,)`` cross pair targets (local nodes), ``-1``-padded.
+    reverse : Optional[Callable[..., Array]]
+        The M2L seam on the merged CSR (``prepare_downward_sweep``'s
+        ``cross_reverse``); ``None``: the production seam (forward only).
+    """
+
+    multipoles: Array
+    centers: Array
+    sources: Array
+    targets: Array
+    reverse: Optional[Callable[..., Array]] = None
 
 
 def _require(condition: bool, message: str) -> None:
@@ -824,6 +858,7 @@ def large_n_farfield_locals_at(
     masses_sorted: Array,
     *,
     plan: LargeNGradPlan,
+    cross: Optional[LargeNCrossFar] = None,
 ) -> Any:
     """Re-run P2M -> M2M -> M2L -> L2L on live inputs at frozen topology.
 
@@ -858,6 +893,12 @@ def large_n_farfield_locals_at(
         Live masses, same order.
     plan : LargeNGradPlan
         Frozen discriminators from :func:`prepare_large_n_grad_plan`.
+    cross : Optional[LargeNCrossFar]
+        A multi-GPU device's cross far sources: concatenated behind the local
+        nodes and merged into the local CSR rows exactly as the production
+        refresh passes them (``cross_far``), its M2L through ``cross.reverse``.
+        The imports enter with their gradients stopped. ``None`` (default): the
+        single-domain chain.
 
     Returns
     -------
@@ -913,8 +954,40 @@ def large_n_farfield_locals_at(
         ),
         adaptive_order=True,
         p_gears=(plan.order,),
+        **_cross_far_kwargs(cross),
     )
     return downward.locals
+
+
+def _cross_far_kwargs(cross: Optional[LargeNCrossFar]) -> dict:
+    """``prepare_downward_sweep``'s cross keywords for :func:`large_n_farfield_locals_at`.
+
+    Parameters
+    ----------
+    cross : Optional[LargeNCrossFar]
+        The cross far sources, or ``None``.
+
+    Returns
+    -------
+    dict
+        Empty without ``cross`` (the single-domain call, unchanged); else
+        ``cross_far`` (the imports' gradients stopped, as the production
+        refresh's tuple) and, with a seam, ``cross_reverse``.
+    """
+    if cross is None:
+        return {}
+    stop = jax.lax.stop_gradient
+    out: dict = {
+        "cross_far": (
+            stop(cross.multipoles),
+            stop(cross.centers),
+            cross.sources,
+            cross.targets,
+        )
+    }
+    if cross.reverse is not None:
+        out["cross_reverse"] = cross.reverse
+    return out
 
 
 def large_n_farfield_l2p_at(
@@ -1048,6 +1121,7 @@ def evaluate_large_n_state_at_positions_and_masses_sorted(
     include_far: bool = True,
     force_params: Any = None,
     return_force_scale: bool = False,
+    cross: Optional[LargeNCrossFar] = None,
 ) -> Any:
     """Fixed-topology large-N re-evaluation at live inputs, in SORTED order.
 
@@ -1103,6 +1177,11 @@ def evaluate_large_n_state_at_positions_and_masses_sorted(
         ``custom_vjp``, whose reverse drops that lane's cotangent) plus the far half
         the topology's walk stored (``state.force_scale_far_sorted``). A topology
         input of the next walk, not differentiated: the caller stops its gradient.
+    cross : Optional[LargeNCrossFar]
+        A multi-GPU device's cross far sources, for the far chain
+        (:func:`large_n_farfield_locals_at`). The cross NEAR term is the caller's
+        (``jaccpot.distributed.grad``), added in input order as production adds
+        it. ``None`` (default): the single-domain evaluation.
 
     Returns
     -------
@@ -1165,7 +1244,7 @@ def evaluate_large_n_state_at_positions_and_masses_sorted(
         )
     if include_far:
         locals_live = large_n_farfield_locals_at(
-            engine, state, positions, masses, plan=plan
+            engine, state, positions, masses, plan=plan, cross=cross
         )
         far_acc = -g_far * large_n_farfield_l2p_at(state, locals_live, positions)
     if return_force_scale:

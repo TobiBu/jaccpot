@@ -1119,6 +1119,7 @@ class EvaluateMixin(_EngineBase):
         options: Any,
         force_params: Optional[ForceParams] = None,
         return_force_scale: bool = False,
+        cross: Any = None,
     ) -> Any:
         """Differentiable evaluation on the ``large_n_gpu`` production state.
 
@@ -1156,6 +1157,10 @@ class EvaluateMixin(_EngineBase):
             Also return eq (16b)'s f_b per particle in the same order, as the
             production evaluation does (the fused provider's differentiable step,
             under ``mac_type='dehnen_error'``); not differentiated.
+        cross : Any
+            A multi-GPU device's cross far sources
+            (:class:`~jaccpot.runtime._large_n_grad.LargeNCrossFar`) for the far
+            chain; ``None`` (default): the single-domain evaluation.
 
         Returns
         -------
@@ -1208,6 +1213,7 @@ class EvaluateMixin(_EngineBase):
                     plan=plan,
                     force_params=force,
                     return_force_scale=True,
+                    cross=cross,
                 )
             )
             dtype = self._grad_output_dtype(state)
@@ -1223,6 +1229,7 @@ class EvaluateMixin(_EngineBase):
             masses_sorted,
             plan=plan,
             force_params=force,
+            cross=cross,
         )
         return jnp.asarray(accelerations_sorted)[state.inverse_permutation].astype(
             self._grad_output_dtype(state)
