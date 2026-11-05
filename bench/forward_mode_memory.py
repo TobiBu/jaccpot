@@ -36,7 +36,10 @@ values. Programs:
   :class:`~jaccpot.production.ProductionRunner` pre-pass of one segment of ``T``
   steps -- the user API's program (with its start force and chain glue).
 
-Per row: the compiled program's ``memory_analysis()`` (temporaries, arguments,
+Per row: the static sizes the program was traced at (``topology``: ``total_nodes``,
+``num_levels`` -- the cascades' static level count --, ``leaf_capacity`` -- the near
+field's padded leaf width ``W`` --, the expansion ``order`` and its coefficient count,
+the far list's capacity); the compiled program's ``memory_analysis()`` (temporaries, arguments,
 outputs) and the allocator's ``bytes_in_use`` before / ``peak_bytes_in_use`` after,
 each also per particle; the verdict bits; finiteness; A-vs-A (two calls of the same
 executable, the tangents / gradients' sha256 equal); the allocator environment
@@ -75,6 +78,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 PROGRAMS = ("jvp", "jacfwd", "reverse", "plan_jvp")
+#: the static sizes every row records (``_topology``) and the summary carries
+TOPOLOGY_KEYS = ("total_nodes", "num_levels", "leaf_capacity", "order")
 PARAMETERS = ("dx", "dy", "dz", "dvx", "dvy", "dvz", "mass_scale", "dt")
 DEFAULT_OUT = "/export/scratch/tbuck/fwd-scratch/gpu/f8"
 _ENV_KEYS = (
@@ -384,6 +389,10 @@ def _plan_row(args: argparse.Namespace, rec: dict, device: Any) -> None:
     gc.collect()
     rec["prepare_s"] = time.perf_counter() - t0
     rec["after_prepare"] = _alloc(device)
+    rec["topology"] = _topology(plan.segments[0].provider)
+    upward = plan.segments[0].plan.get("upward_num_levels")
+    if upward is not None:
+        rec["topology"]["num_levels"] = int(upward)
     w_dev = jnp.asarray(w)
 
     def loss(result: Any, inputs: dict) -> Any:
@@ -411,6 +420,53 @@ def _plan_row(args: argparse.Namespace, rec: dict, device: Any) -> None:
     rec["bits"] = outs[0][2]
     rec["finite"] = bool(np.isfinite(outs[0][0]))
     rec["a_vs_a_bitwise"] = outs[0][1] == outs[1][1]
+
+
+def _topology(prov: Any) -> dict:
+    """The static sizes the row's program was traced at (for attributing W(K)).
+
+    ``total_nodes`` / ``num_internal`` / ``num_leaves`` from the provider template's
+    tree, ``leaf_capacity`` the near field's padded leaf width ``W`` (the template's
+    ``nearfield_leaf_particle_indices``; else the grad statics' slot capacity),
+    ``num_levels`` the cascades' static level count (the engine's planned upward
+    depth bound, ``_cells_upward_num_levels``; else the tree's ``level_offsets``
+    bound), ``order`` the expansion order and ``num_far_pairs`` the far list's
+    capacity.
+    """
+    import jax
+
+    out: dict[str, Any] = {
+        "order": getattr(prov, "max_order", None),
+        "leaf_size": getattr(prov, "leaf_size", None),
+    }
+    statics = getattr(prov, "grad_statics", None)
+    if statics is not None:
+        out["order"] = int(statics.order)
+        out["max_leaf_size"] = int(statics.max_leaf_size)
+        out["num_far_pairs"] = int(statics.num_far_pairs)
+    tpl = getattr(prov, "template", None)
+    if tpl is not None:
+        state = jax.tree_util.tree_unflatten(tpl.treedef, list(tpl.leaves))
+        tree = state.tree
+        out["total_nodes"] = int(tree.parent.shape[0])
+        out["num_internal"] = int(tree.left_child.shape[0])
+        out["num_leaves"] = out["total_nodes"] - out["num_internal"]
+        out["level_offsets_bound"] = int(tree.level_offsets.shape[0]) - 1
+        idx = getattr(state, "nearfield_leaf_particle_indices", None)
+        if idx is not None:
+            out["leaf_capacity"] = int(idx.shape[-1])
+    if "leaf_capacity" not in out and "max_leaf_size" in out:
+        out["leaf_capacity"] = out["max_leaf_size"]
+    engine = getattr(prov, "engine", None)
+    levels = None
+    for holder in (engine, getattr(engine, "_impl", None)):
+        levels = getattr(holder, "_cells_upward_num_levels", None) or levels
+    if levels is None:
+        levels = out.get("level_offsets_bound")
+    out["num_levels"] = None if levels is None else int(levels)
+    if out.get("order") is not None:
+        out["coefficients"] = (int(out["order"]) + 1) ** 2
+    return out
 
 
 def _memory(rec: dict, compiled: Any) -> None:
@@ -446,6 +502,7 @@ def run(args: argparse.Namespace) -> dict:
         prov, host = _prepare(args)
         rec["prepare_s"] = time.perf_counter() - t0
         rec["after_prepare"] = _alloc(device)
+        rec["topology"] = _topology(prov)
         pos, vel, mass, fb, w = host
         s = _subset_mask(pos, args.subset)
         p0 = np.asarray([0, 0, 0, 0, 0, 0, 1.0, args.dt], np.float32)
@@ -554,6 +611,10 @@ def summarize(directory: str) -> dict:
                 "bits": rec["bits"],
                 "finite": rec["finite"],
                 "a_vs_a": rec["a_vs_a_bitwise"],
+                **{
+                    key: (rec.get("topology") or {}).get(key)
+                    for key in TOPOLOGY_KEYS
+                },
             }
         )
     rows.sort(key=lambda r: (r["n"], r["steps"], PROGRAMS.index(r["program"]), r["k"]))
@@ -563,7 +624,8 @@ def summarize(directory: str) -> dict:
             f"N {r['n']:>11,} T {r['steps']:>3} {r['program']:>8} K {r['k']}  "
             f"temp {r['temp_bpp']:8.1f} B/p ({r['temp_GiB']} GiB)  peak {peak} B/p "
             f"({r['peak_GiB']} GiB)  bits {r['bits']:#x} finite {r['finite']} "
-            f"A-vs-A {r['a_vs_a']}"
+            f"A-vs-A {r['a_vs_a']}  nodes {r['total_nodes']} levels "
+            f"{r['num_levels']} W {r['leaf_capacity']} p {r['order']}"
         )
     fits: dict = {}
     forward = [r for r in rows if r["program"] in ("jvp", "jacfwd")]
