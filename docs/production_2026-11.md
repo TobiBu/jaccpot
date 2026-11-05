@@ -472,3 +472,26 @@ Scope of the prototype:
   wired in.
 - Production wiring (the `n_b` cut and the coupling inside `strict_run_v2`'s scan, as a gated program variant) is
   the follow-up.
+
+**Sgr gate (local A100, shared card: functional only).** The 1e8 light-Sgr IC was re-assembled with the same seed
+and inputs but **no clip** (`assemble_sgr.py --r-clip 1e12 --r-clip-sgr 1e12`: 100,000,001 rows, a 45.7 Mpc box).
+A downsampled copy keeps every original tail particle beyond 800 kpc of the origin (182,859) plus a stride-49 sample
+of the rest, with the sample's masses scaled up: 2,219,944 rows.
+
+It ran on the escaper path with `r_escape` 80 (800 kpc), the production settings (geometric MAC theta 0.7,
+softening 1.5e-3, dt 1e-3) and 2 segments of 5 steps:
+
+- 182,828 to 182,833 escapers, no clip;
+- every row fitted;
+- `E - Σ jumps` within 5.6e-7 of `E0`;
+- total momentum moved by 4.6e-8, absolute.
+
+The full 1e8 unclipped run needs a free 40 GB card. It was queued when this was written
+(`mn-scratch/a2/sgr/gpu_gate.sh`).
+
+### Gates
+
+- Identity: `provider_hlo_identity compare w2-base-cpu a2-tip-cpu` is **36/36**.
+- CI shards run locally with CI's arguments, all rc 0: `unit`, `integration-strict-a2` (new), `integration-strict`,
+  `integration-strict-runner`, and `distributed-segment-runner` (2 forced devices).
+- The partition check covers 2816 tests.
