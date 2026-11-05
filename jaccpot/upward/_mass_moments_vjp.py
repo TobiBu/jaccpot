@@ -41,8 +41,8 @@ from typing import Any, Iterator
 
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array
 from jax import lax
+from jaxtyping import Array
 from yggdrax.tree_moments import (
     TreeMassMoments,
     _accumulation_dtype,
