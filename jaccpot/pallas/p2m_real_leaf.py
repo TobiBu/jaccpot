@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import functools
 import math
-from typing import Iterator
+from typing import Any, Iterator
 
 import jax
 import jax.numpy as jnp
@@ -46,12 +46,12 @@ except Exception:  # pragma: no cover - import is environment-dependent
     pl = None
     plgpu = None
 
-__all__ = [
-    "p2m_real_leaves_pallas",
-    "p2m_real_leaves_pallas_cvjp",
-    "p2m_real_leaves_reverse_pallas",
-    "pallas_p2m_real_leaf_supported",
-]
+# __all__ is at the end of the module: the lines above the kernels are their
+# Triton IR's source locations, which bench/provider_hlo_identity.py compares,
+# so the forward-mode tangent op (and its names in __all__) lives below the
+# reverse, and this block keeps the six lines the list had here. The
+# forward-mode additions are opt-in (ad_mode="forward"); the forward and the
+# reverse programs do not change.
 
 
 def pallas_p2m_real_leaf_supported() -> bool:
@@ -797,3 +797,566 @@ def _p2m_cvjp_bwd(
 
 
 p2m_real_leaves_pallas_cvjp.defvjp(_p2m_cvjp_fwd, _p2m_cvjp_bwd)
+
+
+# ------------------------------------------------------------------ forward mode
+# The tangent op of the leaf P2M (``ad_mode="forward"``, :mod:`jaccpot.pallas._tangent`):
+# ``M_nm = sum_i m_i U_nm(x_i - c)`` so
+#
+#     dM_nm = sum_i [ dm_i U_nm(x_i - c) + m_i grad U_nm(x_i - c) . (dx_i - dc) ]
+#
+# on the forward's blocked grid (:func:`_p2m_block_kernel`): the same leaves per
+# program, the same chunks, the same lane reduction; each lane linearizes the
+# forward's lane body once and applies it to its ``K`` tangents, the ``K x C`` sums
+# carried in registers across chunks.
+
+
+def _p2m_lane_linear(
+    mass: Array,
+    x: Array,
+    y: Array,
+    z: Array,
+    *,
+    order: int,
+    floor: float,
+    live_mass: bool,
+    live_delta: bool,
+) -> Any:
+    """The lane body's linear map ``(dm, dx, dy, dz) -> [d(m U_c)]_c`` (dead inputs dropped).
+
+    Parameters
+    ----------
+    mass : Array
+        Lane masses (zero on dead lanes).
+    x : Array
+        ``x - c_x`` lanes.
+    y : Array
+        ``y - c_y`` lanes.
+    z : Array
+        ``z - c_z`` lanes.
+    order : int
+        Expansion order. Static.
+    floor : float
+        Squared-radius floor. Static.
+    live_mass : bool
+        Whether the mass tangent can be nonzero (else the map ignores ``dm``).
+    live_delta : bool
+        Whether the ``delta`` tangent can be nonzero (else it ignores ``dx..dz``).
+
+    Returns
+    -------
+    Any
+        ``lin(dm, dx, dy, dz) -> list`` of the ``C`` lane tangents, packed order.
+    """
+    from jaccpot.pallas._tangent import linearize_lanes
+
+    def terms(m: Array, a: Array, b: Array, c: Array) -> list:
+        return [
+            m * u
+            for _, u in _regular_harmonics_lanes(a, b, c, order=order, floor=floor)
+        ]
+
+    if live_mass and live_delta:
+        _, lin = linearize_lanes(terms, (mass, x, y, z))
+        return lin
+    if live_delta:
+        _, lin_d = linearize_lanes(lambda a, b, c: terms(mass, a, b, c), (x, y, z))
+        return lambda dm, dx, dy, dz: lin_d(dx, dy, dz)
+    # linear in the masses: the tangent is the forward on the mass tangent
+    harm = [u for _, u in _regular_harmonics_lanes(x, y, z, order=order, floor=floor)]
+    return lambda dm, dx, dy, dz: [dm * u for u in harm]
+
+
+def _p2m_block_tangent_kernel(
+    pos_ref: KernelRef,
+    mass_ref: KernelRef,
+    start_ref: KernelRef,
+    count_ref: KernelRef,
+    cent_ref: KernelRef,
+    t_pos_ref: KernelRef,
+    t_mass_ref: KernelRef,
+    t_cent_ref: KernelRef,
+    table_in: KernelRef,
+    out_ref: KernelRef,
+    *,
+    order: int,
+    block: int,
+    chunk: int,
+    coeff_pad: int,
+    floor: float,
+    row_offset: int,
+    num_leaves: int,
+    k: int,
+    live: tuple[bool, bool, bool],
+) -> None:
+    """``block`` leaves, their particles ``chunk`` lanes at a time, ``K`` tangents.
+
+    The forward's program (:func:`_p2m_block_kernel`) with the lane body replaced by
+    its linear map (:func:`_p2m_lane_linear`) applied to the ``K`` tangents.
+
+    Parameters
+    ----------
+    pos_ref : KernelRef
+        Whole sorted position table ``[n, 3]``.
+    mass_ref : KernelRef
+        Whole sorted mass table ``[n]``.
+    start_ref : KernelRef
+        First particle of each leaf ``[L]``.
+    count_ref : KernelRef
+        Particle count of each leaf ``[L]``.
+    cent_ref : KernelRef
+        Expansion centre of each leaf ``[L, 3]``.
+    t_pos_ref : KernelRef
+        Whole ``[K, n, 3]`` position tangents.
+    t_mass_ref : KernelRef
+        Whole ``[K, n]`` mass tangents.
+    t_cent_ref : KernelRef
+        Whole ``[K, L, 3]`` leaf-centre tangents.
+    table_in : KernelRef
+        The zeroed ``[K, total_nodes, C]`` tangent table, aliased to ``out_ref``.
+    out_ref : KernelRef
+        **Output** the tangent table; this program writes its leaves' rows.
+    order : int
+        Expansion order ``p``. Static.
+    block : int
+        Leaves per program (a power of two). Static.
+    chunk : int
+        Lanes per leaf per iteration (a power of two). Static.
+    coeff_pad : int
+        Lanes of the coefficient vector (power of two >= ``(p+1)^2``). Static.
+    floor : float
+        The dtype's squared-radius floor. Static.
+    row_offset : int
+        Table row of leaf 0 (the internal node count). Static.
+    num_leaves : int
+        ``L``. Static.
+    k : int
+        ``K``. Static.
+    live : tuple[bool, bool, bool]
+        Which of the position, mass and centre tangents can be nonzero. Static.
+
+    Returns
+    -------
+    None
+        Writes the block's ``K`` tangent rows.
+    """
+    del table_in
+    assert pl is not None and plgpu is not None
+    p = int(order)
+    live_pos, live_mass, live_cent = (bool(v) for v in live)
+    live_delta = live_pos or live_cent
+    dtype = out_ref.dtype
+    leaf = pl.program_id(0) * block + lax.broadcasted_iota(jnp.int32, (block,), 0)
+    on = leaf < num_leaves
+    lf = jnp.where(on, leaf, 0)
+    start = start_ref[lf]
+    count = jnp.where(on, count_ref[lf], 0)
+    cx = cent_ref[lf, 0][:, None]
+    cy = cent_ref[lf, 1][:, None]
+    cz = cent_ref[lf, 2][:, None]
+    tc = [[t_cent_ref[j, lf, a][:, None] for a in range(3)] for j in range(k)]
+    lane = lax.broadcasted_iota(jnp.int32, (block, chunk), 1)
+    n_coef = (p + 1) * (p + 1)
+    zero_lanes = jnp.zeros((block, chunk), dtype)
+
+    def body(t: Array, acc: tuple) -> tuple:
+        off = t * chunk + lane
+        valid = off < count[:, None]
+        idx = jnp.where(valid, start[:, None] + off, 0)
+        x = pos_ref[idx, 0] - cx
+        y = pos_ref[idx, 1] - cy
+        z = pos_ref[idx, 2] - cz
+        mass = jnp.where(valid, mass_ref[idx], jnp.asarray(0.0, dtype))
+        lin = _p2m_lane_linear(
+            mass,
+            x,
+            y,
+            z,
+            order=p,
+            floor=floor,
+            live_mass=live_mass,
+            live_delta=live_delta,
+        )
+        new = list(acc)
+        for j in range(k):
+            dm = zero_lanes
+            if live_mass:
+                dm = jnp.where(valid, t_mass_ref[j, idx], jnp.asarray(0.0, dtype))
+            dd = []
+            for a in range(3):
+                da = zero_lanes
+                if live_pos:
+                    da = da + t_pos_ref[j, idx, a]
+                if live_cent:
+                    da = da - tc[j][a]
+                dd.append(da)
+            for c, term in enumerate(lin(dm, *dd)):
+                term = jnp.where(valid, term, jnp.asarray(0.0, dtype))
+                new[j * n_coef + c] = acc[j * n_coef + c] + jnp.sum(term, axis=1)
+        return tuple(new)
+
+    trips = (jnp.max(count) + (chunk - 1)) // chunk
+    zero = jnp.zeros((block,), dtype)
+    acc = lax.fori_loop(0, trips, body, tuple(zero for _ in range(k * n_coef)))
+    cidx = lax.broadcasted_iota(jnp.int32, (block, coeff_pad), 1)
+    row = (row_offset + leaf)[:, None]
+    _, n_rows, n_coeffs = out_ref.shape
+    for j in range(k):
+        out = jnp.zeros((block, coeff_pad), dtype)
+        for c in range(n_coef):
+            out = jnp.where(cidx == c, acc[j * n_coef + c][:, None], out)
+        plgpu.store(
+            out_ref.at[j, row, cidx],
+            out,
+            mask=(cidx < n_coeffs) & on[:, None] & (row < n_rows),
+        )
+
+
+def _p2m_tangent_impl(
+    positions_sorted: Array,
+    masses_sorted: Array,
+    leaf_centers: Array,
+    leaf_ranges: Array,
+    t_positions: Array,
+    t_masses: Array,
+    t_leaf_centers: Array,
+    *,
+    order: int,
+    num_internal: int,
+    total_nodes: int,
+    leaf_width: int,
+    interpret: bool,
+    backend: str,
+    num_warps: int | None,
+    live: tuple[bool, ...],
+) -> list[Array]:
+    """The ``K``-tangent P2M launch (``K`` from the buckets; see the op).
+
+    Parameters
+    ----------
+    positions_sorted : Array
+        ``[n, 3]`` positions in tree order.
+    masses_sorted : Array
+        ``[n]`` masses in tree order.
+    leaf_centers : Array
+        ``[L, 3]`` leaf expansion centres.
+    leaf_ranges : Array
+        ``[L, 2]`` inclusive particle ranges (``end < start``: empty).
+    t_positions : Array
+        ``[K, n, 3]`` position tangents.
+    t_masses : Array
+        ``[K, n]`` mass tangents.
+    t_leaf_centers : Array
+        ``[K, L, 3]`` leaf-centre tangents.
+    order : int
+        Expansion order. Static.
+    num_internal : int
+        Internal node count (rows left zero). Static.
+    total_nodes : int
+        Node count of the table. Static.
+    leaf_width : int
+        Leaf capacity (not read, as in the forward). Static.
+    interpret : bool
+        Pallas interpret mode.
+    backend : str
+        Pallas GPU lowering.
+    num_warps : int | None
+        Warps per program (``None``: the forward's default).
+    live : tuple[bool, ...]
+        Which of the three tangents can be nonzero.
+
+    Returns
+    -------
+    list[Array]
+        ``[K, total_nodes, (p+1)^2]`` tangent of the multipole table, internal rows
+        zero.
+
+    Raises
+    ------
+    RuntimeError
+        If Pallas is not available.
+    ValueError
+        If ``JACCPOT_P2M_BLOCK`` is ``0`` or negative.
+    """
+    from jaccpot._env import env_int
+
+    del leaf_width
+    if pl is None:
+        raise RuntimeError("jax.experimental.pallas is not available")
+    p = int(order)
+    C = sh_size(p)
+    cp = _next_pow2(C)
+    # the forward's grid: the same leaves per program and lanes per leaf
+    block = env_int("JACCPOT_P2M_BLOCK", P2M_BLOCK_DEFAULT)
+    if int(block) <= 0:
+        raise ValueError(
+            f"JACCPOT_P2M_BLOCK={block}: the leaves per program must be positive"
+        )
+    chunk = env_int("JACCPOT_P2M_CHUNK", P2M_CHUNK_DEFAULT, minimum=1)
+    if num_warps is None:
+        num_warps = _BLOCK_WARPS
+    dtype = jnp.result_type(positions_sorted.dtype, masses_sorted.dtype)
+    n = int(positions_sorted.shape[0])
+    L = int(leaf_ranges.shape[0])
+    k = int(t_positions.shape[0])
+    table = jnp.zeros((k, int(total_nodes), C), dtype)
+    flags = (bool(live[0]), bool(live[1]), bool(live[2]))
+    if n == 0 or L == 0 or not any(flags):
+        return [table]
+    pos = jnp.asarray(positions_sorted, dtype)
+    mass = jnp.asarray(masses_sorted, dtype)
+    ranges = jnp.asarray(leaf_ranges)
+    counts = jnp.maximum(ranges[:, 1] - ranges[:, 0] + 1, 0).astype(jnp.int32)
+    starts = jnp.where(counts > 0, ranges[:, 0], n).astype(jnp.int32)
+    cent = jnp.asarray(leaf_centers, dtype)
+    t_pos = jnp.asarray(t_positions, dtype)
+    t_mass = jnp.asarray(t_masses, dtype)
+    t_cent = jnp.asarray(t_leaf_centers, dtype)
+    B = _next_pow2(int(block))
+    ch = _next_pow2(int(chunk))
+    kernel = functools.partial(
+        _p2m_block_tangent_kernel,
+        order=p,
+        block=B,
+        chunk=ch,
+        coeff_pad=cp,
+        floor=float(squared_radius_floor(dtype)),
+        row_offset=int(num_internal),
+        num_leaves=L,
+        k=k,
+        live=flags,
+    )
+    backend_kwargs = pallas_backend_kwargs(backend, interpret)
+    if "compiler_params" in backend_kwargs:
+        backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
+            num_warps=int(num_warps)
+        )
+
+    def _full(arr: Array) -> Any:
+        assert pl is not None
+        shp = tuple(arr.shape)
+        return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
+
+    operands = [pos, mass, starts, counts, cent, t_pos, t_mass, t_cent]
+    out = pl.pallas_call(
+        kernel,
+        grid=(-(-L // B),),
+        in_specs=[_full(o) for o in operands + [table]],
+        out_specs=_full(table),
+        out_shape=jax.ShapeDtypeStruct(table.shape, dtype),
+        input_output_aliases={len(operands): 0},
+        interpret=bool(interpret),
+        name=f"p2m_tan_real_block_p{p}_b{B}_c{ch}_k{k}",
+        **backend_kwargs,
+    )(*operands, table)
+    return [out]
+
+
+def _p2m_tangent_shapes(*specs: Any, **params: Any) -> list[jax.ShapeDtypeStruct]:
+    """Closed-form output shape of the P2M tangent op.
+
+    Parameters
+    ----------
+    *specs : Any
+        The operands' shape/dtype structs (the op's operand order).
+    **params : Any
+        The op's static parameters (``order``, ``total_nodes`` are read).
+
+    Returns
+    -------
+    list[jax.ShapeDtypeStruct]
+        ``[K, total_nodes, (p+1)^2]``.
+    """
+    pos, mass, t_pos = specs[0], specs[1], specs[4]
+    shape = (t_pos.shape[0], int(params["total_nodes"]), sh_size(int(params["order"])))
+    return [jax.ShapeDtypeStruct(shape, jnp.result_type(pos.dtype, mass.dtype))]
+
+
+def _make_p2m_tangent_op() -> Any:
+    from jaccpot.pallas._tangent import make_tangent_op
+
+    return make_tangent_op(
+        "p2m_real_leaves",
+        _p2m_tangent_impl,
+        num_primals=4,
+        abstract_eval=_p2m_tangent_shapes,
+    )
+
+
+#: Forward-mode tangent op of :func:`p2m_real_leaves_pallas_cvjp`: operands
+#: ``(positions_sorted, masses_sorted, leaf_centers, leaf_ranges, t_positions,
+#: t_masses, t_leaf_centers)``, the tangents ``K``-stacked; params ``order,
+#: num_internal, total_nodes, leaf_width, interpret, backend, num_warps, live``;
+#: returns ``([K, total_nodes, (p+1)^2],)``.
+p2m_real_leaves_pallas_tangent = _make_p2m_tangent_op()
+
+
+def p2m_real_leaves_jnp(
+    positions_sorted: Array,
+    masses_sorted: Array,
+    leaf_centers: Array,
+    leaf_ranges: Array,
+    *,
+    order: int,
+    num_internal: int,
+    total_nodes: int,
+) -> Array:
+    """Pure-``jnp`` twin of :func:`p2m_real_leaves_pallas` (the same values).
+
+    Each particle inside a leaf's range contributes ``m U_nm(x - c_leaf)`` (the
+    kernel's lane body, :func:`_regular_harmonics_lanes`, on per-particle vectors),
+    summed per leaf by ``segment_sum``. The leaves' ranges must be disjoint (any
+    order); particles in no leaf contribute nothing.
+
+    Parameters
+    ----------
+    positions_sorted : Array
+        ``[n, 3]`` positions in tree order.
+    masses_sorted : Array
+        ``[n]`` masses in tree order.
+    leaf_centers : Array
+        ``[L, 3]`` leaf expansion centres.
+    leaf_ranges : Array
+        ``[L, 2]`` inclusive particle ranges (``end < start``: empty).
+    order : int
+        Expansion order. Static.
+    num_internal : int
+        Internal node count (rows left zero). Static.
+    total_nodes : int
+        Node count of the table. Static.
+
+    Returns
+    -------
+    Array
+        ``[total_nodes, (p+1)^2]`` packed multipoles, internal rows zero.
+    """
+    p = int(order)
+    C = sh_size(p)
+    dtype = jnp.result_type(positions_sorted.dtype, masses_sorted.dtype)
+    n = int(positions_sorted.shape[0])
+    L = int(leaf_ranges.shape[0])
+    table = jnp.zeros((int(total_nodes), C), dtype)
+    if n == 0 or L == 0:
+        return table
+    pos = jnp.asarray(positions_sorted, dtype)
+    mass = jnp.asarray(masses_sorted, dtype)
+    cent = jnp.asarray(leaf_centers, dtype)
+    ranges = jnp.asarray(leaf_ranges).astype(jnp.int32)
+    counts = jnp.maximum(ranges[:, 1] - ranges[:, 0] + 1, 0)
+    # owner + 1 of every particle: +id at each leaf's start, -id past its end
+    ids = jnp.arange(1, L + 1, dtype=jnp.int32)
+    nonempty = counts > 0
+    marks = jnp.zeros((n + 1,), jnp.int32)
+    marks = marks.at[jnp.where(nonempty, ranges[:, 0], n)].add(
+        jnp.where(nonempty, ids, 0)
+    )
+    marks = marks.at[jnp.where(nonempty, ranges[:, 1] + 1, n)].add(
+        jnp.where(nonempty, -ids, 0)
+    )
+    owner = jnp.cumsum(marks)[:n]
+    inside = owner > 0
+    leaf = jnp.where(inside, owner - 1, 0)
+    d = pos - cent[leaf]
+    m = jnp.where(inside, mass, 0)
+    floor = float(squared_radius_floor(dtype))
+    cols = [
+        jax.ops.segment_sum(jnp.where(inside, m * u, 0), leaf, num_segments=L)
+        for _, u in _regular_harmonics_lanes(
+            d[:, 0], d[:, 1], d[:, 2], order=p, floor=floor
+        )
+    ]
+    rows = int(num_internal) + jnp.arange(L)
+    return table.at[rows].set(jnp.stack(cols, axis=1), mode="drop")
+
+
+def p2m_real_leaves_pallas_tangent_jnp(
+    positions_sorted: Array,
+    masses_sorted: Array,
+    leaf_centers: Array,
+    leaf_ranges: Array,
+    t_positions: Array,
+    t_masses: Array,
+    t_leaf_centers: Array,
+    *,
+    order: int,
+    num_internal: int,
+    total_nodes: int,
+    leaf_width: int = 0,
+    interpret: bool = False,
+    backend: str = "triton",
+    num_warps: int | None = None,
+    live: tuple[bool, ...] = (True, True, True),
+) -> tuple[Array]:
+    """Reference of :data:`p2m_real_leaves_pallas_tangent`: ``jax.jvp`` of the twin.
+
+    The same operands and parameters as the op (the kernel parameters are
+    ignored), ``vmap``-ped over ``K``.
+
+    Parameters
+    ----------
+    positions_sorted : Array
+        ``[n, 3]`` positions in tree order.
+    masses_sorted : Array
+        ``[n]`` masses in tree order.
+    leaf_centers : Array
+        ``[L, 3]`` leaf expansion centres.
+    leaf_ranges : Array
+        ``[L, 2]`` inclusive particle ranges.
+    t_positions : Array
+        ``[K, n, 3]`` position tangents.
+    t_masses : Array
+        ``[K, n]`` mass tangents.
+    t_leaf_centers : Array
+        ``[K, L, 3]`` leaf-centre tangents.
+    order : int
+        Expansion order. Static.
+    num_internal : int
+        Internal node count. Static.
+    total_nodes : int
+        Node count. Static.
+    leaf_width : int
+        Ignored (the kernel's).
+    interpret : bool
+        Ignored.
+    backend : str
+        Ignored.
+    num_warps : int | None
+        Ignored.
+    live : tuple[bool, ...]
+        Ignored (a dead tangent is zero anyway).
+
+    Returns
+    -------
+    tuple[Array]
+        ``([K, total_nodes, (p+1)^2],)``.
+    """
+    del leaf_width, interpret, backend, num_warps, live
+
+    def f(x: Array, m: Array, c: Array) -> Array:
+        return p2m_real_leaves_jnp(
+            x,
+            m,
+            c,
+            leaf_ranges,
+            order=order,
+            num_internal=num_internal,
+            total_nodes=total_nodes,
+        )
+
+    def one(tx: Array, tm: Array, tc: Array) -> Array:
+        return jax.jvp(
+            f, (positions_sorted, masses_sorted, leaf_centers), (tx, tm, tc)
+        )[1]
+
+    return (jax.vmap(one)(t_positions, t_masses, t_leaf_centers),)
+
+
+__all__ = [
+    "p2m_real_leaves_jnp",
+    "p2m_real_leaves_pallas",
+    "p2m_real_leaves_pallas_cvjp",
+    "p2m_real_leaves_pallas_tangent",
+    "p2m_real_leaves_pallas_tangent_jnp",
+    "p2m_real_leaves_reverse_pallas",
+    "pallas_p2m_real_leaf_supported",
+]
