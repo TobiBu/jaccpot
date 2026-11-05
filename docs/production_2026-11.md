@@ -374,7 +374,9 @@ science. The design note (`mn-scratch/i1/I1-DESIGN.md`) is summarised in `docs/p
   (Odisseo's `E_pot` has no `FMM_ACC` branch; this predates I1).
 - Also passed: `test_shards.py check`; `tests/unit` top level 517 passed; bench-tooling 117; gated
   `distributed-segment-runner` 5 (2 forced devices).
-- GPU (R1p/R1x A-vs-A, then R1pN/R1xN): see `mn-scratch/i1/REPORT.md`.
+- GPU: one shared A100, functional only (`dce_pins.py`, N = 2e5, deterministic ops). R1p and R1x A-vs-A are
+  bitwise. `R1pN` and `R1xN` (the runner with nornax's `LeapfrogKDK`) are bitwise to the built-in's R1p and R1x:
+  states and forces, both arms of R1x.
 
 ### Open
 - I2: the mesh runner's seam.
