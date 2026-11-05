@@ -46,7 +46,6 @@ order, which the runner takes as ``MeshRunConfig(mesh=...)``.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
@@ -54,12 +53,15 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from jaccpot._env import env_text
+
 __all__ = [
     "ProcessInfo",
     "ProcessLocalParticles",
     "allgather_by_device",
     "allgather_host",
     "allgather_object",
+    "env_coordinator",
     "global_mesh",
     "host_copy",
     "host_value",
@@ -674,11 +676,20 @@ def env_coordinator() -> Optional[dict]:
     Optional[dict]
         The keywords, or ``None`` when unset.
     """
-    address = os.environ.get("JACCPOT_MP_COORDINATOR")
+    address = env_text("JACCPOT_MP_COORDINATOR")
     if not address:
         return None
-    return {
-        "coordinator_address": address,
-        "num_processes": int(os.environ["JACCPOT_MP_NUM_PROCESSES"]),
-        "process_id": int(os.environ["JACCPOT_MP_PROCESS_ID"]),
-    }
+    values = {}
+    for key, name in (
+        ("num_processes", "JACCPOT_MP_NUM_PROCESSES"),
+        ("process_id", "JACCPOT_MP_PROCESS_ID"),
+    ):
+        text = env_text(name)
+        try:
+            values[key] = int(text)
+        except ValueError:
+            raise ValueError(
+                f"JACCPOT_MP_COORDINATOR is set, so {name} must be an integer; "
+                f"got {text!r}"
+            ) from None
+    return {"coordinator_address": address, **values}

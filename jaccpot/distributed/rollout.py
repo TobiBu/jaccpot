@@ -54,6 +54,7 @@ __all__ = [
     "ShardState",
     "StepReport",
     "decompose",
+    "decompose_local",
     "make_reference_direct_force",
     "setup_fused_force",
 ]
