@@ -404,3 +404,114 @@ def test_forward_permutation_memo_stays_correct_across_states():
             forward = np.asarray(engine._forward_permutation(state))
             inverse = np.asarray(state.inverse_permutation)
             assert np.array_equal(forward[inverse], np.arange(inverse.size))
+
+
+# --------------------------------------------------------------------------
+# The AD mode (forward mode, ``ad_mode="forward"``)
+# --------------------------------------------------------------------------
+
+
+def test_ad_mode_defaults_to_reverse(monkeypatch):
+    from jaccpot.runtime.grad_options import (
+        forward_mode_enabled,
+        forward_tangent_kernels,
+    )
+
+    monkeypatch.delenv("JACCPOT_GRAD_AD_MODE", raising=False)
+    monkeypatch.delenv("JACCPOT_GRAD_FORWARD_TANGENT_KERNELS", raising=False)
+    options = _resolve(GradConfig())
+    assert options.ad_mode == "reverse"
+    assert options.forward_tangent_kernels == "auto"
+    assert not forward_mode_enabled()
+    assert forward_tangent_kernels() == "auto"
+
+
+def test_ad_mode_precedence_field_then_scope_then_env(monkeypatch):
+    from jaccpot.runtime.grad_options import ad_mode_override
+
+    monkeypatch.setenv("JACCPOT_GRAD_AD_MODE", "forward")
+    monkeypatch.setenv("JACCPOT_GRAD_FORWARD_TANGENT_KERNELS", "jnp")
+    assert _resolve(GradConfig()).ad_mode == "forward"
+    assert _resolve(GradConfig()).forward_tangent_kernels == "jnp"
+    assert _resolve(GradConfig(ad_mode="reverse")).ad_mode == "reverse"
+    assert (
+        _resolve(GradConfig(forward_tangent_kernels="pallas")).forward_tangent_kernels
+        == "pallas"
+    )
+    # an enclosing scope beats the environment: a nested resolution keeps it
+    with ad_mode_override("reverse", "auto"):
+        assert _resolve(GradConfig()).ad_mode == "reverse"
+        assert _resolve(GradConfig()).forward_tangent_kernels == "auto"
+    monkeypatch.setenv("JACCPOT_GRAD_AD_MODE", "sideways")
+    with pytest.warns(RuntimeWarning, match="JACCPOT_GRAD_AD_MODE"):
+        assert _resolve(GradConfig()).ad_mode == "reverse"  # malformed: default
+
+
+def test_invalid_ad_mode_is_rejected():
+    """Refused at construction (``ValueError``, or beartype's refusal of the
+    ``Literal`` under ``JACCPOT_RUNTIME_TYPECHECK=1``, as for the lane)."""
+    import jaxtyping
+
+    from jaccpot.runtime.grad_options import ad_mode_override
+
+    refusals = (ValueError, jaxtyping.TypeCheckError)
+    with pytest.raises(refusals, match="ad_mode"):
+        GradConfig(ad_mode="sideways")  # type: ignore[arg-type]
+    with pytest.raises(refusals, match="forward_tangent_kernels"):
+        GradConfig(forward_tangent_kernels="cuda")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="ad_mode"):
+        with ad_mode_override("sideways"):
+            pass
+
+
+def test_forward_scope_reaches_nested_resolutions_and_restores(monkeypatch):
+    """``differentiable_accelerations`` resolves its own options inside a
+    rollout's scope: forward mode must survive that, and leave nothing behind."""
+    from jaccpot.runtime.grad_options import (
+        ad_mode_override,
+        forward_mode_enabled,
+        forward_tangent_kernels,
+    )
+
+    monkeypatch.delenv("JACCPOT_GRAD_AD_MODE", raising=False)
+    monkeypatch.delenv("JACCPOT_GRAD_FORWARD_TANGENT_KERNELS", raising=False)
+    with ad_mode_override("forward", "jnp"):
+        inner = _resolve(None)
+        assert inner.ad_mode == "forward"
+        with grad_option_overrides(inner):
+            assert forward_mode_enabled()
+            assert forward_tangent_kernels() == "jnp"
+            # the analytic reverse rules are custom_vjps: off in forward mode
+            assert not analytic_l2p_vjp_enabled()
+            assert not analytic_p2p_vjp_enabled()
+        assert forward_mode_enabled()
+    assert not forward_mode_enabled()
+    with pytest.raises(RuntimeError, match="boom"):
+        with ad_mode_override("forward"):
+            raise RuntimeError("boom")
+    assert not forward_mode_enabled()
+
+
+def test_forward_mode_is_part_of_the_jit_cache_key(monkeypatch):
+    """A jitted helper traced in reverse mode must be traced again in forward
+    mode (and back): its seams are chosen at trace time."""
+    import jax
+
+    from jaccpot.runtime.grad_options import ad_mode_override, forward_mode_enabled
+
+    monkeypatch.delenv("JACCPOT_GRAD_AD_MODE", raising=False)
+    traces = []
+
+    @jax.jit
+    def helper(x):
+        traces.append(forward_mode_enabled())
+        return x + 1.0
+
+    x = jnp.ones(3)
+    helper(x)
+    with ad_mode_override("forward"):
+        helper(x)
+        with ad_mode_override(None, "jnp"):
+            helper(x)  # another tangent-kernel choice: another trace
+    helper(x)
+    assert traces == [False, True, True]

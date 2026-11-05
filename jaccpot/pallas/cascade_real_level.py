@@ -62,10 +62,16 @@ __all__ = [
     "cascade_level_tables",
     "l2l_real_centred_pair_jax",
     "l2l_real_levels_fb_pallas_cvjp",
+    "l2l_real_levels_jnp",
     "l2l_real_levels_pallas_cvjp",
+    "l2l_real_levels_pallas_tangent",
+    "l2l_real_levels_pallas_tangent_jnp",
     "l2l_real_levels_reverse_pallas",
     "m2m_real_centred_pair_jax",
+    "m2m_real_levels_jnp",
     "m2m_real_levels_pallas_cvjp",
+    "m2m_real_levels_pallas_tangent",
+    "m2m_real_levels_pallas_tangent_jnp",
     "m2m_real_levels_reverse_pallas",
     "pallas_cascade_level_supported",
 ]
@@ -1126,3 +1132,547 @@ def _l2l_fb_cvjp_bwd(
 
 
 l2l_real_levels_fb_pallas_cvjp.defvjp(_l2l_fb_cvjp_fwd, _l2l_fb_cvjp_bwd)
+
+
+# ------------------------------------------------------------- forward-mode seams
+# The tangent ops of both cascades (``ad_mode="forward"``,
+# :mod:`jaccpot.pallas._tangent`): the lane tangent kernels of
+# :mod:`jaccpot.pallas.cascade_real_lanes` on the forwards' grids (the same
+# ``JACCPOT_CASCADE_LANES_K`` nodes per program), and pure-``jnp`` references: the
+# ``jax.jvp`` of the XLA level loops, whose operators carry the analytic on-axis
+# derivative (``operators/_transverse_degeneracy_jvp.py``).
+
+
+def _m2m_tangent_impl(
+    packed: Array,
+    centers: Array,
+    left_child: Array,
+    right_child: Array,
+    parent: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    t_packed: Array,
+    t_centers: Array,
+    *,
+    order: int,
+    num_internal: int,
+    num_levels: int,
+    level_batch_width: int,
+    interpret: bool,
+    backend: str,
+    num_warps: int,
+    live: tuple[bool, ...],
+) -> list[Array]:
+    """The ``K``-tangent M2M cascade (``K`` from the buckets; see the op).
+
+    Parameters
+    ----------
+    packed : Array
+        ``[nodes, C]`` packed multipoles with the leaves filled.
+    centers : Array
+        ``[nodes, 3]`` expansion centres.
+    left_child : Array
+        ``[internal]`` left children.
+    right_child : Array
+        ``[internal]`` right children.
+    parent : Array
+        ``[nodes]`` parent per node (not read: the M2M is child-driven).
+    nodes_by_level : Array
+        Level-major node ids.
+    level_offsets : Array
+        ``[levels + 1]`` starts.
+    t_packed : Array
+        ``[K, nodes, C]`` tangents of ``packed``.
+    t_centers : Array
+        ``[K, nodes, 3]`` tangents of ``centers``.
+    order : int
+        Expansion order. Static.
+    num_internal : int
+        Internal node count. Static.
+    num_levels : int
+        Levels covered. Static.
+    level_batch_width : int
+        Nodes per level at most. Static.
+    interpret : bool
+        Pallas interpret mode.
+    backend : str
+        Pallas GPU lowering.
+    num_warps : int
+        The reverse kernels' warps (the lane kernels run ``k / 32``, as the forward).
+    live : tuple[bool, ...]
+        Which of the two tangents can be nonzero.
+
+    Returns
+    -------
+    list[Array]
+        ``[K, nodes, C]`` tangent of the output table.
+    """
+    from jaccpot.pallas.cascade_real_lanes import m2m_real_levels_lanes_tangent_pallas
+
+    del parent, num_warps
+    if not (bool(live[0]) or bool(live[1])):
+        return [jnp.zeros(t_packed.shape, jnp.asarray(packed).dtype)]
+    k = _cascade_lanes_k()
+    return [
+        m2m_real_levels_lanes_tangent_pallas(
+            packed,
+            centers,
+            left_child,
+            right_child,
+            nodes_by_level,
+            level_offsets,
+            t_packed,
+            t_centers,
+            order=order,
+            num_internal=num_internal,
+            num_levels=num_levels,
+            level_batch_width=level_batch_width,
+            k_lanes=k,
+            interpret=interpret,
+            backend=backend,
+            num_warps=max(1, k // 32),
+            live_cent=bool(live[1]),
+        )
+    ]
+
+
+def _l2l_tangent_impl(
+    coeffs_local: Array,
+    centers: Array,
+    parent: Array,
+    left_child: Array,
+    right_child: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    t_coeffs_local: Array,
+    t_centers: Array,
+    *,
+    order: int,
+    num_levels: int,
+    level_batch_width: int,
+    interpret: bool,
+    backend: str,
+    num_warps: int,
+    live: tuple[bool, ...],
+) -> list[Array]:
+    """The ``K``-tangent L2L cascade (``K`` from the buckets; see the op).
+
+    Parameters
+    ----------
+    coeffs_local : Array
+        ``[nodes, C]`` packed locals after M2L.
+    centers : Array
+        ``[nodes, 3]`` expansion centres.
+    parent : Array
+        ``[nodes]`` parent per node.
+    left_child : Array
+        ``[internal]`` left children (not read: the L2L is parent-driven).
+    right_child : Array
+        ``[internal]`` right children (not read).
+    nodes_by_level : Array
+        Level-major node ids.
+    level_offsets : Array
+        ``[levels + 1]`` starts.
+    t_coeffs_local : Array
+        ``[K, nodes, C]`` tangents of ``coeffs_local``.
+    t_centers : Array
+        ``[K, nodes, 3]`` tangents of ``centers``.
+    order : int
+        Expansion order. Static.
+    num_levels : int
+        Levels present. Static.
+    level_batch_width : int
+        Nodes per level at most. Static.
+    interpret : bool
+        Pallas interpret mode.
+    backend : str
+        Pallas GPU lowering.
+    num_warps : int
+        The reverse kernels' warps (the lane kernels run ``k / 32``, as the forward).
+    live : tuple[bool, ...]
+        Which of the two tangents can be nonzero.
+
+    Returns
+    -------
+    list[Array]
+        ``[K, nodes, C]`` tangent of the cascaded locals.
+    """
+    from jaccpot.pallas.cascade_real_lanes import l2l_real_levels_lanes_tangent_pallas
+
+    del left_child, right_child, num_warps
+    if not (bool(live[0]) or bool(live[1])):
+        return [jnp.zeros(t_coeffs_local.shape, jnp.asarray(coeffs_local).dtype)]
+    k = _cascade_lanes_k()
+    return [
+        l2l_real_levels_lanes_tangent_pallas(
+            coeffs_local,
+            centers,
+            parent,
+            nodes_by_level,
+            level_offsets,
+            t_coeffs_local,
+            t_centers,
+            order=order,
+            num_levels=num_levels,
+            level_batch_width=level_batch_width,
+            k_lanes=k,
+            interpret=interpret,
+            backend=backend,
+            num_warps=max(1, k // 32),
+            live_cent=bool(live[1]),
+        )
+    ]
+
+
+def _cascade_tangent_shapes(*specs: Any, **params: Any) -> list[jax.ShapeDtypeStruct]:
+    """Closed-form output shape of a cascade tangent op: the first tangent's.
+
+    Parameters
+    ----------
+    *specs : Any
+        The operands' shape/dtype structs (seven primals, then the tangents).
+    **params : Any
+        The op's static parameters (unused).
+
+    Returns
+    -------
+    list[jax.ShapeDtypeStruct]
+        ``[K, nodes, C]`` in the coefficients' dtype.
+    """
+    del params
+    return [jax.ShapeDtypeStruct(tuple(specs[7].shape), specs[0].dtype)]
+
+
+def _make_cascade_tangent_op(which: str) -> Any:
+    from jaccpot.pallas._tangent import make_tangent_op
+
+    impl = _m2m_tangent_impl if which == "m2m" else _l2l_tangent_impl
+    return make_tangent_op(
+        f"{which}_real_levels",
+        impl,
+        num_primals=7,
+        abstract_eval=_cascade_tangent_shapes,
+    )
+
+
+#: Forward-mode tangent op of :func:`m2m_real_levels_pallas_cvjp`: operands the
+#: seam's seven arrays in its order, then ``(t_packed, t_centers)`` ``K``-stacked;
+#: params the seam's statics by name plus ``live``; returns ``([K, nodes, C],)``.
+m2m_real_levels_pallas_tangent = _make_cascade_tangent_op("m2m")
+
+#: Forward-mode tangent op of :func:`l2l_real_levels_pallas_cvjp`: operands the
+#: seam's seven arrays in its order, then ``(t_coeffs_local, t_centers)``
+#: ``K``-stacked; params the seam's statics by name plus ``live``; returns
+#: ``([K, nodes, C],)``.
+l2l_real_levels_pallas_tangent = _make_cascade_tangent_op("l2l")
+
+
+def m2m_real_levels_jnp(
+    packed: Array,
+    centers: Array,
+    left_child: Array,
+    right_child: Array,
+    parent: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    *,
+    order: int,
+    num_internal: int,
+    num_levels: int,
+    level_batch_width: int,
+) -> Array:
+    """Pure-``jnp`` twin of the M2M seam: the XLA level loop.
+
+    :func:`~jaccpot.upward.real_tree_expansions.aggregate_m2m_real_by_level` with
+    the seam's arguments; it agrees with the lane forward to round-off and is
+    forward- and reverse-differentiable (the operators' on-axis rule included).
+
+    Parameters
+    ----------
+    packed : Array
+        ``[nodes, C]`` packed multipoles with the leaves filled.
+    centers : Array
+        ``[nodes, 3]`` expansion centres.
+    left_child : Array
+        ``[internal]`` left children.
+    right_child : Array
+        ``[internal]`` right children.
+    parent : Array
+        ``[nodes]`` parent per node (not read).
+    nodes_by_level : Array
+        Level-major node ids.
+    level_offsets : Array
+        ``[levels + 1]`` starts.
+    order : int
+        Expansion order. Static.
+    num_internal : int
+        Internal node count. Static.
+    num_levels : int
+        Levels covered. Static.
+    level_batch_width : int
+        Nodes per level at most. Static.
+
+    Returns
+    -------
+    Array
+        ``[nodes, C]`` packed multipoles with the internal nodes filled.
+    """
+    from jaccpot.upward.real_tree_expansions import aggregate_m2m_real_by_level
+
+    del parent
+    return aggregate_m2m_real_by_level(
+        packed,
+        centers,
+        left_child,
+        right_child,
+        nodes_by_level,
+        level_offsets,
+        order=order,
+        num_internal=num_internal,
+        num_levels=num_levels,
+        level_batch_width=level_batch_width,
+    )
+
+
+def l2l_real_levels_jnp(
+    coeffs_local: Array,
+    centers: Array,
+    parent: Array,
+    left_child: Array,
+    right_child: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    *,
+    order: int,
+    num_levels: int,
+    level_batch_width: int,
+) -> Array:
+    """Pure-``jnp`` twin of the L2L seam: the XLA level-compact cascade.
+
+    :func:`~jaccpot.runtime.kernels._l2l._propagate_solidfmm_locals_by_level`'s
+    level-compact loop over the parents of levels ``0 .. num_levels - 2`` (the lane
+    forward's child levels ``1 .. num_levels - 1``); it agrees with the lane forward
+    to round-off and is forward- and reverse-differentiable (the operators'
+    on-axis rule included).
+
+    Parameters
+    ----------
+    coeffs_local : Array
+        ``[nodes, C]`` packed locals after M2L.
+    centers : Array
+        ``[nodes, 3]`` expansion centres.
+    parent : Array
+        ``[nodes]`` parent per node (not read).
+    left_child : Array
+        ``[internal]`` left children.
+    right_child : Array
+        ``[internal]`` right children.
+    nodes_by_level : Array
+        Level-major node ids.
+    level_offsets : Array
+        ``[levels + 1]`` starts.
+    order : int
+        Expansion order. Static.
+    num_levels : int
+        Levels present. Static.
+    level_batch_width : int
+        Nodes per level at most. Static.
+
+    Returns
+    -------
+    Array
+        ``[nodes, C]`` cascaded locals.
+    """
+    from jaccpot.runtime.kernels._l2l import _propagate_solidfmm_locals_by_level
+
+    del parent
+    nodes = int(coeffs_local.shape[0])
+    if int(num_levels) <= 1 or int(left_child.shape[0]) <= 0:
+        return coeffs_local
+    # a copy: the level loop donates its first argument (the caller's array, when
+    # called eagerly)
+    out = _propagate_solidfmm_locals_by_level(
+        jnp.copy(coeffs_local),
+        centers,
+        left_child,
+        right_child,
+        jnp.zeros((nodes,), jnp.asarray(left_child).dtype),
+        order=order,
+        total_nodes=nodes,
+        num_levels=int(num_levels) - 2,
+        nodes_by_level=nodes_by_level,
+        level_offsets=level_offsets,
+        level_batch_width=int(level_batch_width),
+    )
+    assert not isinstance(out, tuple)
+    return out
+
+
+def m2m_real_levels_pallas_tangent_jnp(
+    packed: Array,
+    centers: Array,
+    left_child: Array,
+    right_child: Array,
+    parent: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    t_packed: Array,
+    t_centers: Array,
+    *,
+    order: int,
+    num_internal: int,
+    num_levels: int,
+    level_batch_width: int,
+    interpret: bool = False,
+    backend: str = "triton",
+    num_warps: int = 4,
+    live: tuple[bool, ...] = (True, True),
+) -> tuple[Array]:
+    """Reference of :data:`m2m_real_levels_pallas_tangent`: ``jax.jvp`` of the twin.
+
+    Parameters
+    ----------
+    packed : Array
+        ``[nodes, C]`` packed multipoles with the leaves filled.
+    centers : Array
+        ``[nodes, 3]`` expansion centres.
+    left_child : Array
+        ``[internal]`` left children.
+    right_child : Array
+        ``[internal]`` right children.
+    parent : Array
+        ``[nodes]`` parent per node.
+    nodes_by_level : Array
+        Level-major node ids.
+    level_offsets : Array
+        ``[levels + 1]`` starts.
+    t_packed : Array
+        ``[K, nodes, C]`` tangents of ``packed``.
+    t_centers : Array
+        ``[K, nodes, 3]`` tangents of ``centers``.
+    order : int
+        Expansion order. Static.
+    num_internal : int
+        Internal node count. Static.
+    num_levels : int
+        Levels covered. Static.
+    level_batch_width : int
+        Nodes per level at most. Static.
+    interpret : bool
+        Ignored (the kernel's).
+    backend : str
+        Ignored.
+    num_warps : int
+        Ignored.
+    live : tuple[bool, ...]
+        Ignored (a dead tangent is zero anyway).
+
+    Returns
+    -------
+    tuple[Array]
+        ``([K, nodes, C],)``.
+    """
+    del interpret, backend, num_warps, live
+
+    def f(x: Array, c: Array) -> Array:
+        return m2m_real_levels_jnp(
+            x,
+            c,
+            left_child,
+            right_child,
+            parent,
+            nodes_by_level,
+            level_offsets,
+            order=order,
+            num_internal=num_internal,
+            num_levels=num_levels,
+            level_batch_width=level_batch_width,
+        )
+
+    def one(tx: Array, tc: Array) -> Array:
+        return jax.jvp(f, (packed, centers), (tx, tc))[1]
+
+    return (jax.vmap(one)(t_packed, t_centers),)
+
+
+def l2l_real_levels_pallas_tangent_jnp(
+    coeffs_local: Array,
+    centers: Array,
+    parent: Array,
+    left_child: Array,
+    right_child: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    t_coeffs_local: Array,
+    t_centers: Array,
+    *,
+    order: int,
+    num_levels: int,
+    level_batch_width: int,
+    interpret: bool = False,
+    backend: str = "triton",
+    num_warps: int = 4,
+    live: tuple[bool, ...] = (True, True),
+) -> tuple[Array]:
+    """Reference of :data:`l2l_real_levels_pallas_tangent`: ``jax.jvp`` of the twin.
+
+    Parameters
+    ----------
+    coeffs_local : Array
+        ``[nodes, C]`` packed locals after M2L.
+    centers : Array
+        ``[nodes, 3]`` expansion centres.
+    parent : Array
+        ``[nodes]`` parent per node.
+    left_child : Array
+        ``[internal]`` left children.
+    right_child : Array
+        ``[internal]`` right children.
+    nodes_by_level : Array
+        Level-major node ids.
+    level_offsets : Array
+        ``[levels + 1]`` starts.
+    t_coeffs_local : Array
+        ``[K, nodes, C]`` tangents of ``coeffs_local``.
+    t_centers : Array
+        ``[K, nodes, 3]`` tangents of ``centers``.
+    order : int
+        Expansion order. Static.
+    num_levels : int
+        Levels present. Static.
+    level_batch_width : int
+        Nodes per level at most. Static.
+    interpret : bool
+        Ignored (the kernel's).
+    backend : str
+        Ignored.
+    num_warps : int
+        Ignored.
+    live : tuple[bool, ...]
+        Ignored (a dead tangent is zero anyway).
+
+    Returns
+    -------
+    tuple[Array]
+        ``([K, nodes, C],)``.
+    """
+    del interpret, backend, num_warps, live
+
+    def f(x: Array, c: Array) -> Array:
+        return l2l_real_levels_jnp(
+            x,
+            c,
+            parent,
+            left_child,
+            right_child,
+            nodes_by_level,
+            level_offsets,
+            order=order,
+            num_levels=num_levels,
+            level_batch_width=level_batch_width,
+        )
+
+    def one(tx: Array, tc: Array) -> Array:
+        return jax.jvp(f, (coeffs_local, centers), (tx, tc))[1]
+
+    return (jax.vmap(one)(t_coeffs_local, t_centers),)

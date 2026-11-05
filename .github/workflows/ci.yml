@@ -209,12 +209,37 @@ jobs:
             workers: 1
             jax_cache: "off"
             timeout: 40
+          # Forward mode (ad_mode="forward"): the F gates through the production
+          # lane -- jvp / jacfwd / linearize programs of the 3-step rollout, the
+          # reverse gradients F2 and F5 compare against, a two-segment
+          # GradientPlan; every Pallas kernel in interpret mode. Measured at `-n 0`
+          # with the Pallas tangent kernels, cold cache, on a loaded 64-core host
+          # (2026-11-04): -forward 57 min / 13.4 GB, -forward-adjoint (F2, F3)
+          # 50 min / 13.1 GB.
+          - shard: integration-strict-grad-forward
+            typecheck: "0"
+            workers: 1
+            jax_cache: "off"
+            timeout: 100
+          - shard: integration-strict-grad-forward-adjoint
+            typecheck: "0"
+            workers: 1
+            jax_cache: "off"
+            timeout: 90
           - shard: mutual-static-device
             typecheck: "0"
             timeout: 15
           - shard: unit
             typecheck: "1"
             timeout: 45
+          # The forward-mode M2M/L2L tangent ops' tests: 11.5 GB in one process
+          # (local, -n 0, cold, 16 min, 2026-11-04) -- with the unit shard's second
+          # worker they shut the 16 GB runner down (#500).
+          - shard: unit-forward-cascade
+            typecheck: "1"
+            timeout: 40
+            workers: 1
+            jax_cache: "off"
           # tests/unit/runtime in three parts: the Dehnen-MAC / force-scale
           # criterion family (every case a full FMM solve, 26-95 s on CPU), the
           # gradients on the production layout (plan S8: jax.grad through the

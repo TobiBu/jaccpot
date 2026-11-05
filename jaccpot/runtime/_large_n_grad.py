@@ -865,12 +865,19 @@ def large_n_farfield_locals_at(
         Freshly computed local expansions -- NOT ``state.local_data``, which is
         prebaked and would cut the source-side chain.
     """
+    from contextlib import nullcontext
+
     from jaccpot.upward._mass_moments_vjp import gather_reverse_mass_moments
+
+    from .grad_options import forward_mode_enabled
 
     engine = _engine(fmm)
     # the COMs' reverse by the tree's ancestor sums: gathers only (no f64[N + 1]
-    # scatter, the same sums in every run), the forward yggdrax's
-    with gather_reverse_mass_moments():
+    # scatter, the same sums in every run), the forward yggdrax's. Forward mode
+    # keeps yggdrax's plain prefix sums (a custom_vjp cannot be jvp'd; the sums
+    # jvp natively, the same forward)
+    moments = nullcontext() if forward_mode_enabled() else gather_reverse_mass_moments()
+    with moments:
         upward = engine.prepare_upward_sweep(
             state.tree,
             positions_sorted,

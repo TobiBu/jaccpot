@@ -750,3 +750,63 @@ def test_start_aux_maps_the_start_forces_aux_for_the_first_step(checkpoint):
     for got, want in zip(mapped[:3], plain[:3]):
         assert np.array_equal(np.asarray(got), np.asarray(want))
     assert np.array_equal(np.asarray(grad), np.asarray(plain_grad))
+
+
+# ---------------------------------------------------------------------------
+# Forward mode (ad_mode="forward"): the plain scan, jvp and jacfwd.
+# ---------------------------------------------------------------------------
+
+
+def test_forward_mode_rollout_is_the_plain_scan_and_its_jvp_the_adjoints_transpose():
+    """``ad_mode="forward"`` runs the ``checkpoint=None`` scan (the default
+    ``"step"`` means the same; the forward is bitwise ``checkpoint=None``'s), its
+    jvp matches the reverse gradient (the adjoint identity) in every input, and
+    ``jax.jacfwd`` over ``(dt, k)`` matches ``jax.jacrev``."""
+    x0, v0, m, wx, wv = _system()
+    dt, k = jnp.asarray(DT), jnp.asarray(K_EXT)
+
+    def loss(ad_mode, checkpoint):
+        def f(x, v, mm, dd, kk):
+            out = _rollout(x, v, mm, dd, kk, checkpoint=checkpoint, ad_mode=ad_mode)
+            return jnp.sum(wx * out.positions) + jnp.sum(wv * out.velocities)
+
+        return f
+
+    args = (x0, v0, m, dt, k)
+    plain = jax.jit(loss("reverse", None))(*args)
+    for checkpoint in (None, "step"):
+        assert np.asarray(jax.jit(loss("forward", checkpoint))(*args)).tobytes() == (
+            np.asarray(plain).tobytes()
+        )
+    grads = jax.jit(jax.grad(loss("reverse", "step"), argnums=tuple(range(5))))(*args)
+    rng = np.random.default_rng(3)
+    dirs = tuple(jnp.asarray(rng.normal(size=np.shape(a)), a.dtype) for a in args)
+    value, tangent = jax.jit(lambda p, t: jax.jvp(loss("forward", None), p, t))(
+        args, dirs
+    )
+    assert np.asarray(value).tobytes() == np.asarray(plain).tobytes()
+    want = sum(float(jnp.vdot(g, d)) for g, d in zip(grads, dirs))
+    assert abs(float(tangent) - want) <= 1e-12 * abs(want)
+
+    def theta_fn(ad_mode, checkpoint):
+        def f(theta):
+            return jnp.stack(
+                [
+                    loss(ad_mode, checkpoint)(x0, v0, m, theta[0], theta[1]),
+                    loss(ad_mode, checkpoint)(x0, v0, 2.0 * m, theta[0], theta[1]),
+                ]
+            )
+
+        return f
+
+    theta = jnp.asarray([DT, K_EXT])
+    jf = np.asarray(jax.jit(jax.jacfwd(theta_fn("forward", None)))(theta))
+    jr = np.asarray(jax.jit(jax.jacrev(theta_fn("reverse", "step")))(theta))
+    assert np.max(np.abs(jf - jr)) <= 1e-12 * np.max(np.abs(jr))
+
+
+@pytest.mark.parametrize("checkpoint", ["nested", "offload"])
+def test_forward_mode_refuses_reverse_storage_schedules(checkpoint):
+    x0, v0, m, _, _ = _system()
+    with pytest.raises(ValueError, match="ad_mode='forward' stores no residuals"):
+        _rollout(x0, v0, m, DT, K_EXT, checkpoint=checkpoint, ad_mode="forward")

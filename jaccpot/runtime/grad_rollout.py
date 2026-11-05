@@ -769,6 +769,7 @@ def differentiable_rollout(
     checkpoint: Optional[str] = "step",
     inner_steps: Optional[int] = None,
     start_aux: Optional[Callable[[Any, Any], Any]] = None,
+    ad_mode: Optional[str] = None,
 ) -> RolloutResult:
     """``num_steps`` velocity-Verlet steps over ``step_fn``, differentiably.
 
@@ -852,6 +853,17 @@ def differentiable_rollout(
         with ``start_force="adjoint"``). Not differentiated (the aux never is
         under ``"step"`` / ``"nested"`` / ``"offload"``). ``None``: the start
         force's own aux (the program is the one without the argument).
+    ad_mode : Optional[str]
+        ``"reverse"`` (for ``jax.grad`` / ``jax.vjp``) or ``"forward"`` (for
+        ``jax.jvp``, ``jax.jacfwd``, ``jax.linearize``); ``None`` takes the
+        enclosing :func:`~jaccpot.runtime.grad_options.ad_mode_override`, then
+        ``JACCPOT_GRAD_AD_MODE``, then ``"reverse"``. Forward mode traces
+        ``step_fn`` with the gradient lane's ``custom_jvp`` seams installed and
+        runs the plain scan (``checkpoint=None``): a jvp through a scan stores
+        no residual, so its memory is flat in ``num_steps``. ``checkpoint`` must
+        then be ``None`` or ``"step"`` (the default, which in forward mode means
+        the same plain scan); ``"nested"`` and ``"offload"`` (reverse-pass
+        storage schedules) are refused. Static.
 
     Returns
     -------
@@ -866,8 +878,113 @@ def differentiable_rollout(
         If ``num_steps`` or ``inner_steps`` is not a positive int, ``checkpoint``
         is not one of :data:`CHECKPOINT_MODES`, ``inner_steps`` comes without
         ``checkpoint="nested"`` or ``"offload"``, ``external_args`` without
-        ``external_fn``, ``start_aux`` with an ``acceleration``, or the arrays'
-        shapes or the state's dtypes disagree.
+        ``external_fn``, ``start_aux`` with an ``acceleration``, the arrays'
+        shapes or the state's dtypes disagree, or ``ad_mode="forward"`` comes
+        with ``checkpoint="nested"`` / ``"offload"``.
+    """
+    from .grad_options import ad_mode_override, resolve_ad_mode
+
+    if resolve_ad_mode(ad_mode) == "forward":
+        if checkpoint not in (None, "step"):
+            raise ValueError(
+                f"checkpoint={checkpoint!r} is a reverse-pass storage schedule; "
+                "ad_mode='forward' stores no residuals (a plain scan): use "
+                "checkpoint=None"
+            )
+        with ad_mode_override("forward"):
+            return _rollout(
+                step_fn,
+                positions,
+                velocities,
+                masses,
+                dt,
+                num_steps,
+                params=params,
+                aux=aux,
+                acceleration=acceleration,
+                external_fn=external_fn,
+                external_args=external_args,
+                checkpoint=None,
+                inner_steps=inner_steps,
+                start_aux=start_aux,
+            )
+    return _rollout(
+        step_fn,
+        positions,
+        velocities,
+        masses,
+        dt,
+        num_steps,
+        params=params,
+        aux=aux,
+        acceleration=acceleration,
+        external_fn=external_fn,
+        external_args=external_args,
+        checkpoint=checkpoint,
+        inner_steps=inner_steps,
+        start_aux=start_aux,
+    )
+
+
+def _rollout(
+    step_fn: Callable[..., tuple[Any, Any]],
+    positions: Array,
+    velocities: Array,
+    masses: Array,
+    dt: Union[float, Array],
+    num_steps: int,
+    *,
+    params: Any,
+    aux: Any,
+    acceleration: Optional[Array],
+    external_fn: Optional[Callable[..., Array]],
+    external_args: Any,
+    checkpoint: Optional[str],
+    inner_steps: Optional[int],
+    start_aux: Optional[Callable[[Any, Any], Any]],
+) -> RolloutResult:
+    """:func:`differentiable_rollout` in the mode installed (its arguments).
+
+    Parameters
+    ----------
+    step_fn : Callable[..., tuple[Any, Any]]
+        As :func:`differentiable_rollout`.
+    positions : Array
+        As :func:`differentiable_rollout`.
+    velocities : Array
+        As :func:`differentiable_rollout`.
+    masses : Array
+        As :func:`differentiable_rollout`.
+    dt : Union[float, Array]
+        As :func:`differentiable_rollout`.
+    num_steps : int
+        As :func:`differentiable_rollout`.
+    params : Any
+        As :func:`differentiable_rollout`.
+    aux : Any
+        As :func:`differentiable_rollout`.
+    acceleration : Optional[Array]
+        As :func:`differentiable_rollout`.
+    external_fn : Optional[Callable[..., Array]]
+        As :func:`differentiable_rollout`.
+    external_args : Any
+        As :func:`differentiable_rollout`.
+    checkpoint : Optional[str]
+        As :func:`differentiable_rollout`.
+    inner_steps : Optional[int]
+        As :func:`differentiable_rollout`.
+    start_aux : Optional[Callable[[Any, Any], Any]]
+        As :func:`differentiable_rollout`.
+
+    Returns
+    -------
+    RolloutResult
+        As :func:`differentiable_rollout`.
+
+    Raises
+    ------
+    ValueError
+        As :func:`differentiable_rollout`.
     """
     if isinstance(num_steps, bool) or not isinstance(num_steps, (int, np.integer)):
         raise ValueError(f"num_steps must be a Python int, got {num_steps!r}")

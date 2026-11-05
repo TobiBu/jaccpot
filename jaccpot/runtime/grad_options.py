@@ -25,9 +25,11 @@ from __future__ import annotations
 import contextlib
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
-from jaccpot._env import env_flag, env_float, env_int
+import jax
+
+from jaccpot._env import env_choice, env_flag, env_float, env_int
 from jaccpot.config import GradConfig
 
 # Env-var names, kept in one place so the docs, the resolver and the tests all
@@ -43,6 +45,8 @@ ENV_REV_TIER_MIN_GAIN = "JACCPOT_GRAD_REV_TIER_MIN_GAIN"
 ENV_REV_SKIP_EMPTY_TILES = "JACCPOT_GRAD_REV_SKIP_EMPTY_TILES"
 ENV_REV_LEAF_BATCH = "JACCPOT_GRAD_REV_LEAF_BATCH"
 ENV_REV_BLOCK_TILE = "JACCPOT_GRAD_REV_BLOCK_TILE"
+ENV_AD_MODE = "JACCPOT_GRAD_AD_MODE"
+ENV_FORWARD_TANGENT_KERNELS = "JACCPOT_GRAD_FORWARD_TANGENT_KERNELS"
 
 
 @dataclass(frozen=True)
@@ -111,6 +115,12 @@ class ResolvedGradOptions:
         Use the analytic real-basis L2P reverse rule.
     reverse : LeafPairReverseOptions
         Tuning for the analytic leaf-pair reverse.
+    ad_mode : str
+        ``"reverse"`` (the custom_vjp kernels) or ``"forward"`` (their
+        ``custom_jvp`` siblings, :mod:`jaccpot.runtime._forward_seams`).
+    forward_tangent_kernels : str
+        ``"auto"``, ``"pallas"`` or ``"jnp"``: the tangent kernels forward mode
+        runs (ignored in reverse mode).
     """
 
     nearfield_lane: str  # "bucketed" | "fast_lane"
@@ -120,6 +130,8 @@ class ResolvedGradOptions:
     analytic_p2p_vjp: bool
     analytic_l2p_vjp: bool
     reverse: LeafPairReverseOptions
+    ad_mode: str = "reverse"
+    forward_tangent_kernels: str = "auto"
 
 
 def resolve_grad_options(
@@ -168,6 +180,10 @@ def resolve_grad_options(
             lane = "bucketed"
 
     return ResolvedGradOptions(
+        ad_mode=resolve_ad_mode(cfg.ad_mode),
+        forward_tangent_kernels=resolve_forward_tangent_kernels(
+            cfg.forward_tangent_kernels
+        ),
         nearfield_lane=lane,
         nearfield_lane_was_auto=lane_was_auto,
         cascade_pallas=(
@@ -221,6 +237,76 @@ def resolve_grad_options(
     )
 
 
+def resolve_ad_mode(ad_mode: Optional[str] = None) -> str:
+    """The AD mode a gradient-path program is built for.
+
+    Precedence: ``ad_mode`` itself, then the mode an enclosing
+    :func:`grad_option_overrides` (or :func:`ad_mode_override`) installed, then
+    ``JACCPOT_GRAD_AD_MODE``, then ``"reverse"``. An enclosing scope beats the
+    environment so a nested resolution (``differentiable_accelerations`` resolves
+    its own options inside a rollout's) keeps the caller's mode.
+
+    Parameters
+    ----------
+    ad_mode : Optional[str]
+        ``"reverse"``, ``"forward"`` or ``None`` (defer).
+
+    Returns
+    -------
+    str
+        ``"reverse"`` or ``"forward"``.
+
+    Raises
+    ------
+    ValueError
+        For any other explicit value.
+    """
+    if ad_mode is not None:
+        mode = str(ad_mode).strip().lower()
+        if mode not in ("reverse", "forward"):
+            raise ValueError(f"ad_mode must be 'reverse' or 'forward', got {ad_mode!r}")
+        return mode
+    ambient = _ad_mode_override.get()
+    if ambient is not None:
+        return ambient
+    return env_choice(ENV_AD_MODE, "reverse", ("reverse", "forward"))
+
+
+def resolve_forward_tangent_kernels(choice: Optional[str] = None) -> str:
+    """Which tangent kernels forward mode runs.
+
+    Precedence as :func:`resolve_ad_mode`: ``choice``, an enclosing override,
+    ``JACCPOT_GRAD_FORWARD_TANGENT_KERNELS``, ``"auto"``.
+
+    Parameters
+    ----------
+    choice : Optional[str]
+        ``"auto"``, ``"pallas"``, ``"jnp"`` or ``None`` (defer).
+
+    Returns
+    -------
+    str
+        ``"auto"``, ``"pallas"`` or ``"jnp"``.
+
+    Raises
+    ------
+    ValueError
+        For any other explicit value.
+    """
+    choices = ("auto", "pallas", "jnp")
+    if choice is not None:
+        text = str(choice).strip().lower()
+        if text not in choices:
+            raise ValueError(
+                f"forward_tangent_kernels must be one of {choices}, got {choice!r}"
+            )
+        return text
+    ambient = _forward_tangent_kernels_override.get()
+    if ambient is not None:
+        return ambient
+    return env_choice(ENV_FORWARD_TANGENT_KERNELS, "auto", choices)
+
+
 # --------------------------------------------------------------------------
 # Scoped overrides for gates that are read deep inside the kernels.
 #
@@ -265,6 +351,23 @@ _analytic_l2p_vjp_override: ContextVar[Optional[bool]] = ContextVar(
 _cascade_pallas_override: ContextVar[Optional[bool]] = ContextVar(
     "jaccpot_cascade_pallas_override", default=None
 )
+#: The AD mode (``"reverse"`` / ``"forward"``) the seams below dispatch on, and
+#: forward mode's tangent-kernel choice. ``None``: no enclosing scope.
+_ad_mode_override: ContextVar[Optional[str]] = ContextVar(
+    "jaccpot_ad_mode_override", default=None
+)
+_forward_tangent_kernels_override: ContextVar[Optional[str]] = ContextVar(
+    "jaccpot_forward_tangent_kernels_override", default=None
+)
+#: The forward mode's key in ``jax.jit``'s caches. The seams below sit inside
+#: jitted helpers (``_evaluate_local_expansions_particle_major``,
+#: ``_propagate_solidfmm_locals_by_level``, ...) whose trace cache keys on their
+#: arguments only: a reverse-mode trace reused under forward mode would hand
+#: ``jax.jvp`` the custom_vjp kernels (and a forward trace reused under reverse
+#: mode would change the reverse program). Forward mode enters this jit-key
+#: context with its tangent-kernel choice; reverse mode leaves it at its default
+#: ``None``, so the reverse programs' keys (and texts) are what they were.
+_FORWARD_JIT_KEY: Any = jax.make_user_context(None)
 
 
 def cascade_pallas_override() -> Optional[bool]:
@@ -301,8 +404,12 @@ def analytic_p2p_vjp_enabled() -> bool:
     Returns
     -------
     bool
-        ``True`` when the analytic P2P reverse is enabled. On by default.
+        ``True`` when the analytic P2P reverse is enabled. On by default; always
+        ``False`` in forward mode (:func:`forward_mode_enabled`).
     """
+    if forward_mode_enabled():
+        # a custom_vjp, which JAX refuses to jvp; its forward is plain autodiff's
+        return False
     override = _analytic_p2p_vjp_override.get()
     if override is not None:
         return bool(override)
@@ -315,12 +422,107 @@ def analytic_l2p_vjp_enabled() -> bool:
     Returns
     -------
     bool
-        ``True`` when the analytic L2P reverse is enabled. On by default.
+        ``True`` when the analytic L2P reverse is enabled. On by default; always
+        ``False`` in forward mode (:func:`forward_mode_enabled`).
     """
+    if forward_mode_enabled():
+        # a custom_vjp, which JAX refuses to jvp; its forward is plain autodiff's
+        # ``value_and_grad`` (the same bits)
+        return False
     override = _analytic_l2p_vjp_override.get()
     if override is not None:
         return bool(override)
     return env_flag(ENV_ANALYTIC_L2P_VJP, True)
+
+
+def forward_mode_enabled() -> bool:
+    """Whether the seams trace their forward-mode (``custom_jvp``) siblings.
+
+    Read at trace time by every production seam of the large-N gradient lane:
+    ``True`` routes the seam to :mod:`jaccpot.runtime._forward_seams`, ``False``
+    (the default) to the ``custom_vjp`` kernels, unchanged.
+
+    Returns
+    -------
+    bool
+        ``True`` inside a forward-mode :func:`grad_option_overrides` or
+        :func:`ad_mode_override`, else whether ``JACCPOT_GRAD_AD_MODE`` is
+        ``forward``.
+    """
+    return resolve_ad_mode(None) == "forward"
+
+
+def forward_tangent_kernels() -> str:
+    """Forward mode's tangent-kernel choice (``"auto"``, ``"pallas"``, ``"jnp"``).
+
+    Returns
+    -------
+    str
+        The enclosing scope's resolved choice, else the environment's, else
+        ``"auto"``.
+    """
+    return resolve_forward_tangent_kernels(None)
+
+
+@contextlib.contextmanager
+def ad_mode_override(
+    ad_mode: Optional[str], forward_tangent_kernels: Optional[str] = None
+) -> Iterator[None]:
+    """Trace the gradient path's seams for ``ad_mode`` within the block.
+
+    The AD mode alone, without the other resolved options:
+    :func:`~jaccpot.runtime.grad_rollout.differentiable_rollout` and
+    :class:`~jaccpot.production_grad.GradientPlan` install it around the trace of
+    a forward-mode program. Like the other gates it is read at TRACE time.
+
+    Parameters
+    ----------
+    ad_mode : Optional[str]
+        ``"reverse"`` or ``"forward"``; ``None`` keeps the enclosing mode.
+    forward_tangent_kernels : Optional[str]
+        ``"auto"``, ``"pallas"`` or ``"jnp"``; ``None`` keeps the enclosing one.
+
+    Yields
+    ------
+    None
+        The block runs with the mode installed.
+    """
+    mode = None if ad_mode is None else resolve_ad_mode(ad_mode)
+    kernels = (
+        None
+        if forward_tangent_kernels is None
+        else resolve_forward_tangent_kernels(forward_tangent_kernels)
+    )
+    tokens = []
+    if mode is not None:
+        tokens.append((_ad_mode_override, _ad_mode_override.set(mode)))
+    if kernels is not None:
+        tokens.append(
+            (
+                _forward_tangent_kernels_override,
+                _forward_tangent_kernels_override.set(kernels),
+            )
+        )
+    try:
+        with _forward_jit_key():
+            yield
+    finally:
+        for var, token in reversed(tokens):
+            var.reset(token)
+
+
+def _forward_jit_key() -> Any:
+    """The jit-cache context of the mode now installed (see ``_FORWARD_JIT_KEY``).
+
+    Returns
+    -------
+    Any
+        A context manager: ``("forward", <tangent kernels>)`` in forward mode,
+        ``None`` (the default, no new cache entries) in reverse mode.
+    """
+    if resolve_ad_mode(None) == "forward":
+        return _FORWARD_JIT_KEY(("forward", resolve_forward_tangent_kernels(None)))
+    return _FORWARD_JIT_KEY(None)
 
 
 @contextlib.contextmanager
@@ -348,23 +550,33 @@ def grad_option_overrides(options: ResolvedGradOptions) -> Iterator[None]:
         _analytic_p2p_vjp_override.set(options.analytic_p2p_vjp),
         _analytic_l2p_vjp_override.set(options.analytic_l2p_vjp),
         _cascade_pallas_override.set(options.cascade_pallas),
+        _ad_mode_override.set(options.ad_mode),
+        _forward_tangent_kernels_override.set(options.forward_tangent_kernels),
     )
     try:
-        yield
+        with _forward_jit_key():
+            yield
     finally:
         _fused_m2l_pallas_override.reset(tokens[0])
         _analytic_p2p_vjp_override.reset(tokens[1])
         _analytic_l2p_vjp_override.reset(tokens[2])
         _cascade_pallas_override.reset(tokens[3])
+        _ad_mode_override.reset(tokens[4])
+        _forward_tangent_kernels_override.reset(tokens[5])
 
 
 __all__ = [
     "LeafPairReverseOptions",
     "ResolvedGradOptions",
+    "ad_mode_override",
     "analytic_l2p_vjp_enabled",
     "analytic_p2p_vjp_enabled",
     "cascade_pallas_override",
+    "forward_mode_enabled",
+    "forward_tangent_kernels",
     "fused_m2l_pallas_enabled",
     "grad_option_overrides",
+    "resolve_ad_mode",
+    "resolve_forward_tangent_kernels",
     "resolve_grad_options",
 ]

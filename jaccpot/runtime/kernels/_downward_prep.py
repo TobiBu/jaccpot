@@ -637,6 +637,8 @@ def _solidfmm_downward_accumulate_from_multipoles(
         ``force_scale`` off the CSR lanes kernel.
     """
 
+    from jaccpot.runtime._forward_seams import jnp_stage
+
     csr_lane = _m2l_csr_pallas_active()
     if force_scale is not None and not csr_lane:
         raise ValueError(
@@ -658,6 +660,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
     if csr_lane:
         from jaccpot._env import env_flag
         from jaccpot.pallas.m2l_real_csr_lanes import m2l_real_csr_lanes_pallas_cvjp
+        from jaccpot.runtime.grad_options import forward_mode_enabled
 
         interpret = env_flag("JACCPOT_M2L_CSR_INTERPRET", False)
         if force_scale is not None:
@@ -688,7 +691,13 @@ def _solidfmm_downward_accumulate_from_multipoles(
             return initial_locals_coeffs + m2l_inc, own_far
         # the custom_vjp seam: the forward is the same launch, and the reverse
         # runs the transposed (by-source) lane kernel
-        m2l_inc = m2l_real_csr_lanes_pallas_cvjp(
+        m2l_seam: Any = m2l_real_csr_lanes_pallas_cvjp
+        if forward_mode_enabled():
+            # ad_mode="forward": the custom_jvp sibling (the same launch)
+            from jaccpot.runtime._forward_seams import m2l_real_csr_lanes_forward
+
+            m2l_seam = m2l_real_csr_lanes_forward
+        m2l_inc = m2l_seam(
             multipoles_coeffs,
             centers,
             src,
@@ -705,7 +714,8 @@ def _solidfmm_downward_accumulate_from_multipoles(
         )
         locals_updated = initial_locals_coeffs + m2l_inc
     elif pair_count <= chunk_size:
-        locals_updated = _accumulate_m2l_fullbatch(
+        locals_updated = jnp_stage(
+            _accumulate_m2l_fullbatch,
             initial_locals_coeffs,
             multipoles_coeffs,
             centers,
@@ -717,7 +727,8 @@ def _solidfmm_downward_accumulate_from_multipoles(
             total_nodes=total_nodes,
         )
     else:
-        locals_updated = _accumulate_m2l_chunked_scan(
+        locals_updated = jnp_stage(
+            _accumulate_m2l_chunked_scan,
             initial_locals_coeffs,
             multipoles_coeffs,
             centers,

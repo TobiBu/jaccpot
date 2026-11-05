@@ -109,10 +109,13 @@ process drops from 81 s to 17 s.
   `mac_type="dehnen_error"` refuses any `force_params` but the solver's own
   (`ValueError`: its eq (16a) thresholds were built with them); its positions and
   masses differentiate at its frozen lists like any other.
-* **Reverse mode only.** Every fast kernel is a `custom_vjp`, and JAX refuses
-  `jax.jvp` through one (`TypeError: can't apply forward-mode autodiff (jvp) to a
-  custom_vjp function`, on a CPU radix state too). Forward-mode adjoints, such as
-  diffrax's `ForwardMode`, fail; reverse-mode ones work.
+* **Reverse mode by default; forward mode opt-in on the large-N lane.** Every fast
+  kernel is a `custom_vjp`, and JAX refuses `jax.jvp` through one (`TypeError:
+  can't apply forward-mode autodiff (jvp) to a custom_vjp function`).
+  `ad_mode="forward"` routes the large-N lane's seams to `custom_jvp` siblings
+  instead, for `jax.jvp`, `jax.jacfwd` and `jax.linearize` (see
+  [Forward mode](#forward-mode-ad_modeforward) below). The radix lane is reverse
+  mode only.
 * **One force at a time.** `strict_run_v2` and the multi-GPU `FusedRollout` are
   forward-only: the strict refresh evaluates the forward-only
   `evaluate_large_n_state`, and the cross-domain M2L and near-field reverses raise.
@@ -135,6 +138,77 @@ process drops from 81 s to 17 s.
   options table below), and `nearfield_lane` is ignored on a `LargeNPreparedState`.
 
 ---
+
+## Forward mode (`ad_mode="forward"`)
+
+Forward mode differentiates the large-N lane (`preset="large_n_gpu"` /
+`"galaxy"`: `FusedForceProvider.differentiable_step`, `differentiable_rollout`,
+`GradientPlan`, `differentiable_accelerations` / `differentiable_step_fn` on a
+`LargeNPreparedState`) with `jax.jvp`, `jax.jacfwd` and `jax.linearize`. It is a
+second dispatch beside the reverse one: each production kernel's `custom_vjp` has a
+`custom_jvp` sibling (`jaccpot/runtime/_forward_seams.py`) whose primal is the same
+production kernel -- so the forward is the production forward **bitwise** -- and
+whose tangent is a tangent kernel (Pallas where one exists, else a pure-`jnp`
+reference). The reverse programs are unchanged.
+
+```python
+from jaccpot.runtime.grad_rollout import differentiable_rollout
+from jaccpot.runtime.grad_options import ad_mode_override
+
+def final_state(x0, v0, m, dt):
+    out = differentiable_rollout(provider.differentiable_step, x0, v0, m, dt, T,
+                                 ad_mode="forward", checkpoint=None)
+    return out.positions, out.velocities
+
+# one direction
+(xT, vT), (dxT, dvT) = jax.jit(lambda p, t: jax.jvp(final_state, p, t))(
+    (x0, v0, m, dt), (dx0, dv0, dm, ddt))
+# a few parameters: one batched program (the tangent kernels carry up to 8 per launch)
+J = jax.jit(jax.jacfwd(lambda theta: ...))(theta)
+
+# a single step, outside a rollout: install the mode around the trace
+with ad_mode_override("forward"):
+    acc, t_acc = jax.jit(lambda x, t: jax.jvp(
+        lambda y: provider.differentiable_step(y, m)[0], (x,), (t,)))(x, t)
+
+# the production runner's gradient run (S9): forward twins of value_and_grad
+plan = runner.gradient_plan(state, masses, dt=dt, num_steps=T)
+res = plan.jvp(None, {"positions": dx0}, wrt=("positions",))   # value, tangent, result
+jac = plan.jacfwd(lambda r, inp: jnp.sum(w * r.positions), wrt=("dt",))
+lin = plan.linearize(wrt=("positions",)).tangent                  # tangents -> output
+```
+
+* **Selecting it.** `ad_mode="forward"` on `differentiable_rollout`; the
+  `GradientPlan` methods above; `GradConfig(ad_mode="forward")` for
+  `differentiable_accelerations` / `differentiable_step_fn`;
+  `jaccpot.runtime.grad_options.ad_mode_override("forward")` around any trace; or
+  `JACCPOT_GRAD_AD_MODE=forward`. `GradConfig.forward_tangent_kernels` (or
+  `JACCPOT_GRAD_FORWARD_TANGENT_KERNELS`) picks the tangent kernels: `"auto"`
+  (Pallas where it exists, else the jnp reference), `"jnp"`, `"pallas"`.
+* **Memory is flat in the number of steps.** A jvp through a `lax.scan` stores no
+  residuals, so `differentiable_rollout(ad_mode="forward")` is the plain scan
+  (`checkpoint=None`; the default `"step"` means the same; `"nested"` /
+  `"offload"`, reverse-pass storage schedules, are refused). The cost is one
+  tangent pass per direction (`jax.jacfwd` batches them); the adjoint's
+  `W + 16 B/p` per step (S9) does not apply. `jax.linearize` keeps the
+  linearization point's intermediates, so it grows with the steps like a reverse
+  pass.
+* **The verdict.** The tangent of a step whose capacity verdict failed
+  (`overflow_ok(bits)` false) is NaN; `GradientPlan.jvp` / `jacfwd` / `linearize`
+  refuse it on the host (`RolloutVerdictError`). Forward mode needs no symmetric
+  lists, so `OVERFLOW_GRAD_LISTS` is never set.
+* **First order only.** `jax.grad` of a forward-mode program, and a jvp of a
+  forward-mode tangent (`jacfwd(jacfwd)`, `jax.hessian`), refuse.
+* **Not covered:** the radix lane, the multi-GPU lanes, the mutual and block-step
+  lanes, the near field's table and prepacked layouts (they raise), and the
+  `dehnen_error` force-scale twins' tangents (f_b is stopped anyway).
+* **Gates** (CPU, float64, the S9 G2 system):
+  `tests/integration/strict/test_forward_mode.py` (the jvp primal bitwise the
+  production step and `strict_run_v2`; `<w, J d> == <J^T w, d>` against the
+  reverse path for every input; central differences on identical lists;
+  `jacfwd == jacrev`; NaN on overflow; `linearize == jvp`) and
+  `tests/unit/runtime/test_forward_seams.py` (each seam's primal bitwise, its
+  tangent the reverse kernel's transpose).
 
 ## The contract: fixed topology
 
@@ -264,7 +338,9 @@ trusting the 3.0 threshold on other hardware.
 * The radix *overflow* and *target-block* near-field payloads, and the
   materialized per-particle "pairs" layout — each would differentiate a different
   force than the forward computes.
-* `jax.jvp` / forward mode (the `custom_vjp` refuses it with a `TypeError`).
+* `jax.jvp` / forward mode by default (the `custom_vjp` refuses it with a
+  `TypeError`): opt in with `ad_mode="forward"` on the large-N lane
+  ([Forward mode](#forward-mode-ad_modeforward)).
 * `strict_run_v2` and the multi-GPU `FusedRollout`: forward-only (their
   cross-domain reverses raise; the strict refresh has no differentiable seam).
 
@@ -379,7 +455,8 @@ Measure in context, at the target scale.
 | `NotImplementedError: ... needs a SYMMETRIC near list` | the near reverse reads each pair from both ends | the walk's lists are symmetric; a hand-built neighbour list must hold both directions |
 | `RuntimeError: compact_far_pairs is None` | large-N state built without the pair list | construct the solver with `retain_far_pairs_for_grad=True` |
 | `TypeError: ... prepare_state() got an unexpected keyword argument 'retain_far_pairs_for_grad'` | it is a constructor option | pass it to `FastMultipoleMethod(...)` |
-| `TypeError: can't apply forward-mode autodiff (jvp) to a custom_vjp function` | forward mode (`jax.jvp`, a forward-mode adjoint) | use reverse mode |
+| `TypeError: can't apply forward-mode autodiff (jvp) to a custom_vjp function` | forward mode (`jax.jvp`, `jax.jacfwd`, a forward-mode adjoint) through the reverse-mode kernels | trace it under `ad_mode="forward"`: `differentiable_rollout(..., ad_mode="forward")`, `GradientPlan.jvp` / `jacfwd` / `linearize`, `GradConfig(ad_mode="forward")`, or `with ad_mode_override("forward"):` around `jax.jvp(provider.differentiable_step, ...)`; or use reverse mode |
+| `NotImplementedError: jaccpot_tangent_...: has no transpose` | `jax.grad` of a forward-mode program | build reverse-mode programs with `ad_mode="reverse"` (the default) |
 | all-NaN gradients in fp32 | historical; the squared-radius floors underflowed in fp32 | fixed — ensure you are on this branch |
 | `ConcretizationTypeError` under outer `jax.jit` | a radix state: host-side ops in the re-run sweeps at large N | use bare `jax.grad` (a `LargeNPreparedState` compiles whole, as arguments) |
 | gradients are exactly zero | you differentiated `evaluate_prepared_state` or the Odisseo forward path | use `differentiable_accelerations` / `differentiable=True` |
