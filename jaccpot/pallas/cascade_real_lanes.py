@@ -1739,6 +1739,7 @@ def _tan_level_call(
     Array
         The updated tangent tables.
     """
+    assert pl is not None
     backend_kwargs = pallas_backend_kwargs(backend, interpret)
     if "compiler_params" in backend_kwargs:
         backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
