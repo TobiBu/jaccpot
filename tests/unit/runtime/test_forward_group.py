@@ -5,7 +5,8 @@ A toy force -- a gather, a nonlinear map with a tangent op (the
 records the ``K`` it is called with), traced parameters, a stopped output -- whose
 ``jax.jacfwd`` through :func:`grouped_jvp` must equal the ungrouped one to round-off
 for ``K`` in {3, 8, 11} and ``g`` in {1, 2, 4} (a partial last group included), with
-the tangent op launched at ``K = g`` (plus the remainder) and the primal once.
+the tangent op launched at ``K = g`` (plus the remainder) and no primal work in the
+looped tangent map.
 """
 
 from __future__ import annotations
@@ -94,14 +95,26 @@ def test_grouped_jacfwd_is_the_single_pass(k, group):
     """Grouped ``jacfwd`` equals the ungrouped one; the op runs at ``K = g``."""
     directions = jnp.asarray(np.random.default_rng(k).normal(size=(k, _N, 4)))
     c0 = jnp.zeros(k)
+    _PRIMALS.clear()
     want = jax.jit(jax.jacfwd(_map(directions, None)))(c0)
+    traces = len(_PRIMALS)
     _LAUNCHES.clear()
     _PRIMALS.clear()
     got = jax.jit(jax.jacfwd(_map(directions, group)))(c0)
     full, rem = divmod(k, group)
     assert sorted(_LAUNCHES) == sorted([group] * min(full, 1) + [rem] * (rem > 0))
-    # the primal is traced once (linearize), never per group
-    assert len(_PRIMALS) == 1
+    # the seam's Python runs once more (the force is traced to a jaxpr first), but
+    # the program computes the primal once: the looped tangent map holds no primal
+    assert len(_PRIMALS) == traces + 1
+    eqns = [
+        e
+        for e in jax.make_jaxpr(jax.jacfwd(_map(directions, group)))(c0).jaxpr.eqns
+        if e.primitive.name == "jaccpot_tangent_grouped"
+    ]
+    assert len(eqns) == 1
+    inner = {e.primitive.name for e in eqns[0].params["jaxpr"].eqns}
+    assert "jaccpot_tangent_grouped_toy" in inner
+    assert not inner & {"sin", "cos", "custom_jvp_call", "sort"}, inner
     for a, b in zip(jax.tree_util.tree_leaves(got), jax.tree_util.tree_leaves(want)):
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-13, atol=1e-13)
     # the stopped output's tangent is zero

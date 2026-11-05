@@ -18,6 +18,7 @@ tests/integration/strict/test_forward_mode.py::test_jacfwd_over_parameters_is_ja
 tests/integration/strict/test_forward_mode.py::test_jacfwd_in_chunks_is_the_single_pass[11]
 tests/integration/strict/test_forward_mode.py::test_jacfwd_in_chunks_is_the_single_pass[8]
 tests/integration/strict/test_forward_mode.py::test_linearize_over_three_directions_is_three_jvps
+tests/integration/strict/test_forward_mode.py::test_tangent_groups_are_the_single_pass
 tests/integration/strict/test_forward_mode.py::test_the_gradient_plans_forward_twins
 tests/integration/strict/test_forward_mode.py::test_the_jvp_primal_is_the_production_forward[dehnen_error]
 tests/integration/strict/test_forward_mode.py::test_the_jvp_primal_is_the_production_forward[plummer]

@@ -125,8 +125,8 @@ def forward_tangent_group() -> Optional[int]:
     return group
 
 
-def _differentiable(leaf: Any) -> bool:
-    """Whether a pytree leaf is an inexact array (a differentiated input).
+def _is_array(leaf: Any) -> bool:
+    """Whether a pytree leaf is an array (or a tracer of one).
 
     Parameters
     ----------
@@ -136,24 +136,28 @@ def _differentiable(leaf: Any) -> bool:
     Returns
     -------
     bool
-        ``True`` for floating / complex arrays and tracers.
+        ``True`` for anything with a ``shape`` and a ``dtype``.
     """
-    dtype = getattr(leaf, "dtype", None)
-    return (
-        dtype is not None
-        and hasattr(leaf, "shape")
-        and jnp.issubdtype(dtype, jnp.inexact)
-    )
+    return hasattr(leaf, "dtype") and hasattr(leaf, "shape")
 
 
 def grouped_jvp(fn: Callable[..., Any], args: Sequence[Any], *, group: int) -> Any:
     """``fn(*args)``, whose forward-mode tangent runs in groups of ``group`` directions.
 
+    ``fn`` is traced ONCE, here, to a jaxpr (inside the caller's option contexts and
+    plan state, exactly as the ungrouped call traces it); the ``custom_jvp`` is over
+    that jaxpr's evaluation, with every array the jaxpr reads -- the arguments' array
+    leaves and the jaxpr's captured constants -- passed as an explicit argument. A
+    ``custom_jvp`` rule runs LATER under a transformed ``lax.scan`` (the jvp of the
+    scan re-processes the body), so it must close over no tracer and re-run no
+    Python that reads trace-time state.
+
     Parameters
     ----------
     fn : Callable[..., Any]
-        A function of ``args`` (pytrees). Its inexact array leaves are the
-        differentiated inputs; every other leaf is held fixed (closed over).
+        A function of ``args`` (pytrees). Every array leaf is an input: those whose
+        tangent is not a known zero (inexact, and differentiated by the caller) are
+        linearized; the non-array leaves are static.
     args : Sequence[Any]
         The arguments.
     group : int
@@ -173,19 +177,47 @@ def grouped_jvp(fn: Callable[..., Any], args: Sequence[Any], *, group: int) -> A
     if group < 1:
         raise ValueError(f"the tangent group holds >= 1 directions, got {group}")
     leaves, tree = jax.tree_util.tree_flatten(tuple(args))
-    diff_idx = [i for i, leaf in enumerate(leaves) if _differentiable(leaf)]
+    arr_idx = [i for i, leaf in enumerate(leaves) if _is_array(leaf)]
 
-    def call(*dleaves: Array) -> Any:
+    def flat_fn(*arrays: Array) -> Any:
         full = list(leaves)
-        for i, leaf in zip(diff_idx, dleaves):
-            full[i] = leaf
+        for i, a in zip(arr_idx, arrays):
+            full[i] = a
         return fn(*jax.tree_util.tree_unflatten(tree, full))
 
-    if not diff_idx:
-        return call()
-    wrapped = jax.custom_jvp(call)
-    wrapped.defjvp(functools.partial(_grouped_rule, call, group), symbolic_zeros=True)
-    return wrapped(*[leaves[i] for i in diff_idx])
+    arrays = [leaves[i] for i in arr_idx]
+    closed, out_shape = jax.make_jaxpr(flat_fn, return_shape=True)(*arrays)
+    if closed.jaxpr.effects:
+        # an effectful force (a callback) is not wrapped: the ungrouped program
+        return flat_fn(*arrays)
+    jaxpr, consts = closed.jaxpr, list(closed.consts)
+    num_consts = len(consts)
+
+    def body(*operands: Array) -> list[Array]:
+        return _eval_jaxpr(jaxpr, operands[:num_consts], *operands[num_consts:])
+
+    wrapped = jax.custom_jvp(body)
+    wrapped.defjvp(functools.partial(_grouped_rule, body, group), symbolic_zeros=True)
+    outs = wrapped(*consts, *arrays)
+    return jax.tree_util.tree_unflatten(jax.tree_util.tree_structure(out_shape), outs)
+
+
+def _is_zero_tangent(t: Any) -> bool:
+    """Whether a rule's tangent is a known zero (symbolic, or ``float0``).
+
+    Parameters
+    ----------
+    t : Any
+        A tangent the rule received.
+
+    Returns
+    -------
+    bool
+        ``True`` for a :class:`SymbolicZero` or a ``float0`` array.
+    """
+    return isinstance(t, SymbolicZero) or (
+        getattr(t, "dtype", None) == jax.dtypes.float0
+    )
 
 
 def _grouped_rule(
@@ -196,20 +228,20 @@ def _grouped_rule(
     Parameters
     ----------
     call : Callable[..., Any]
-        The function of the differentiated leaves.
+        The function (of every array input).
     group : int
         Directions per group.
     primals : tuple
-        The differentiated leaves.
+        The array inputs.
     tangents : tuple
-        Their tangents (:class:`SymbolicZero` for a known zero).
+        Their tangents (:class:`SymbolicZero` or ``float0`` for a known zero).
 
     Returns
     -------
     tuple[Any, Any]
         ``(primal output, tangent output)``.
     """
-    live = [i for i, t in enumerate(tangents) if not isinstance(t, SymbolicZero)]
+    live = [i for i, t in enumerate(tangents) if not _is_zero_tangent(t)]
     if not live:
         out = call(*primals)
         return out, jax.tree_util.tree_map(_zero_tangent, out)

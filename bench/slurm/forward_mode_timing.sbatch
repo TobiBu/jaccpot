@@ -18,6 +18,10 @@
 #                        kernels share the primal across K) and compile_s(K) -- round 1: 2e6 K = 8 ~75 min.
 #   t_<N>_jacfwd_k8_dpp<k>  the same 8 columns, k = 1 / 2 per pass (directions_per_pass): the price of
 #                        recomputing the primal per chunk against the memory it saves (peak B/p in the row).
+#   t_<N>_jacfwd_k8_group<g>  the same 8 columns in ONE pass, the force's tangent applied g = 1 / 2 / 4 directions
+#                        at a time (JACCPOT_FORWARD_TANGENT_GROUP; primal once): its price against the single pass
+#                        (the tangent kernels at K = g, K / g launches) and its memory (peak B/p). jvp_group1: the
+#                        knob's cost at K = 1 (the linearized force keeps its residuals through the tangent map).
 #   t_<N>_vgrad          value_and_grad (checkpoint="step", S9's reverse): where forward stops paying.
 #   tpp_2p5e7            each seam's tangent op alone at 2.5e7 shapes, K = 8, tangents-per-program 1/2/4/8
 #                        (JACCPOT_TANGENT_TPP_<SEAM>; skipped if the installed jaccpot has no such knob).
@@ -75,6 +79,11 @@ done
 for dpp in 1 2; do
   ROW_LIST+=("t_2p5e7_jacfwd_k8_dpp${dpp}|$BFC|$T --n $N --steps 16 --program jacfwd --k 8 --directions-per-pass $dpp --reps $REPS")
 done
+# the force's tangent in groups of g directions (JACCPOT_FORWARD_TANGENT_GROUP, track M): no primal recompute
+for g in 1 2 4; do
+  ROW_LIST+=("t_2p5e7_jacfwd_k8_group${g}|$BFC JACCPOT_FORWARD_TANGENT_GROUP=$g|$T --n $N --steps 16 --program jacfwd --k 8 --reps $REPS")
+done
+ROW_LIST+=("t_2p5e7_jvp_group1|$BFC JACCPOT_FORWARD_TANGENT_GROUP=1|$T --n $N --steps 16 --program jvp --reps $REPS")
 ROW_LIST+=(
   "t_2p5e7_vgrad|$BFC|$T --n $N --steps 16 --program vgrad --reps $REPS"
   "tpp_2p5e7|$BFC|$T --n $N --tpp-sweep --tpp-k 8 --reps $REPS"

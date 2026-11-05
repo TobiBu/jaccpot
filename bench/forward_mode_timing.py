@@ -536,6 +536,7 @@ def summarize(directory: str) -> list[dict]:
                 "program": c["program"],
                 "k": c["k"],
                 "dpp": c.get("directions_per_pass"),
+                "group": (r.get("env") or {}).get("JACCPOT_FORWARD_TANGENT_GROUP"),
                 "ms_per_step": r["timing"]["median_ms_per_step"],
                 "over_forward": (
                     r["timing"]["median_ms"] / ref["timing"]["median_ms"]
@@ -551,14 +552,21 @@ def summarize(directory: str) -> list[dict]:
             }
         )
     rows.sort(
-        key=lambda q: (q["n"], PROGRAMS.index(q["program"]), q["k"], q["dpp"] or 0)
+        key=lambda q: (
+            q["n"],
+            PROGRAMS.index(q["program"]),
+            q["k"],
+            q["dpp"] or 0,
+            str(q["group"] or ""),
+        )
     )
     for q in rows:
         ratio = "-" if q["over_forward"] is None else f"{q['over_forward']:.2f}x"
         peak = "-" if q["peak_bpp"] is None else f"{q['peak_bpp']:.0f}"
         print(
             f"N {q['n']:>11,} T {q['steps']:>3} {q['program']:>7} K {q['k']} dpp "
-            f"{q['dpp'] or '-':>2}  {q['ms_per_step']:9.1f} ms/step {ratio:>7}  "
+            f"{q['dpp'] or '-':>2} g {q['group'] or '-':>2}  "
+            f"{q['ms_per_step']:9.1f} ms/step {ratio:>7}  "
             f"compile {q['compile_s']:7.0f} s  temp {q['temp_bpp']:.0f} peak {peak} "
             f"B/p  A-vs-A {q['a_vs_a']} bits {q['bits']}"
             + ("  CONTENDED" if q["contended"] else "")
