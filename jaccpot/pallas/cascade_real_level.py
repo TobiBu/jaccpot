@@ -1162,8 +1162,9 @@ def _m2m_tangent_impl(
     backend: str,
     num_warps: int,
     live: tuple[bool, ...],
+    tangents_per_program: int | None = None,
 ) -> list[Array]:
-    """The ``K``-tangent M2M cascade (``K`` from the buckets; see the op).
+    """The ``K``-tangent M2M cascade (any ``K``; see the op).
 
     Parameters
     ----------
@@ -1201,6 +1202,8 @@ def _m2m_tangent_impl(
         The reverse kernels' warps (the lane kernels run ``k / 32``, as the forward).
     live : tuple[bool, ...]
         Which of the two tangents can be nonzero.
+    tangents_per_program : int | None
+        Tangents per program (``None``: ``JACCPOT_TANGENT_TPP_M2M``). Static.
 
     Returns
     -------
@@ -1232,6 +1235,7 @@ def _m2m_tangent_impl(
             backend=backend,
             num_warps=max(1, k // 32),
             live_cent=bool(live[1]),
+            tangents_per_program=tangents_per_program,
         )
     ]
 
@@ -1254,8 +1258,9 @@ def _l2l_tangent_impl(
     backend: str,
     num_warps: int,
     live: tuple[bool, ...],
+    tangents_per_program: int | None = None,
 ) -> list[Array]:
-    """The ``K``-tangent L2L cascade (``K`` from the buckets; see the op).
+    """The ``K``-tangent L2L cascade (any ``K``; see the op).
 
     Parameters
     ----------
@@ -1291,6 +1296,8 @@ def _l2l_tangent_impl(
         The reverse kernels' warps (the lane kernels run ``k / 32``, as the forward).
     live : tuple[bool, ...]
         Which of the two tangents can be nonzero.
+    tangents_per_program : int | None
+        Tangents per program (``None``: ``JACCPOT_TANGENT_TPP_L2L``). Static.
 
     Returns
     -------
@@ -1320,6 +1327,7 @@ def _l2l_tangent_impl(
             backend=backend,
             num_warps=max(1, k // 32),
             live_cent=bool(live[1]),
+            tangents_per_program=tangents_per_program,
         )
     ]
 

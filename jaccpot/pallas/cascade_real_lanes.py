@@ -1392,7 +1392,7 @@ def _ladder_harm_adjoint(coeff: dict, *, p: int) -> Any:
 
 def _store_tangent_rows(
     tout_ref: KernelRef,
-    j: int,
+    j: Any,
     node: Array,
     valid: Array,
     vals: dict,
@@ -1408,8 +1408,8 @@ def _store_tangent_rows(
     ----------
     tout_ref : KernelRef
         The tangent tables.
-    j : int
-        Which tangent. Static.
+    j : Any
+        Which tangent (a scalar, possibly traced).
     node : Array
         Each lane's node.
     valid : Array
@@ -1450,9 +1450,14 @@ def _m2m_tan_lanes_kernel(
     tables: dict,
     num_internal: int,
     k: int,
+    tpp: int,
     live_cent: bool,
 ) -> None:
-    """:func:`_m2m_lanes_kernel` with ``K`` tangents: the parent's row and its tangents.
+    """:func:`_m2m_lanes_kernel` with tangents: the parent's row and its tangents.
+
+    Grid axis 1 is the tangent group (:mod:`jaccpot.pallas._tangent_grid`): the
+    program carries tangents ``g tpp .. g tpp + tpp - 1``; group 0 also writes the
+    primal row.
 
     Parameters
     ----------
@@ -1487,7 +1492,10 @@ def _m2m_tan_lanes_kernel(
     num_internal : int
         Internal node count. Static.
     k : int
-        ``K``. Static.
+        ``K``, the tangents of the launch. Static.
+    tpp : int
+        Tangents per program; those past ``K`` are clamped on load and not
+        stored. Static.
     live_cent : bool
         Whether the centre tangent can be nonzero. Static.
 
@@ -1502,6 +1510,10 @@ def _m2m_tan_lanes_kernel(
     C, packed = tables["C"], tables["packed"]
     base = pl.program_id(0) * k_lanes
     count = count_ref[0]
+    group = pl.program_id(1)
+    tails = int(k) % int(tpp) != 0
+    js = [group * tpp + jj for jj in range(tpp)]
+    jl = [jnp.minimum(j, k - 1) for j in js] if tails else js
 
     @pl.when(base < count)
     def _live():
@@ -1515,7 +1527,7 @@ def _m2m_tan_lanes_kernel(
         py = cent_ref[node_safe, 1]
         pz = cent_ref[node_safe, 2]
         acc = None
-        tacc: list = [None] * k
+        tacc: list = [None] * tpp
         for child_ref in (left_ref, right_ref):
             ch = child_ref[node_safe]
             ok = valid & (ch >= 0)
@@ -1534,7 +1546,7 @@ def _m2m_tan_lanes_kernel(
             adj = _ladder_coeff_adjoint(w, p=p) if live_cent else None
             wm = {key: jnp.where(ok, val, 0.0) for key, val in w.items()}
             acc = wm if acc is None else {key: acc[key] + wm[key] for key in wm}
-            for j in range(k):
+            for jj, j in enumerate(jl):
                 dv = {key: tcoef_ref[j, row + packed[key]] for key in _keys(p)}
                 dw = lin(dv)
                 if adj is not None:
@@ -1547,18 +1559,24 @@ def _m2m_tan_lanes_kernel(
                     ga = adj(e)
                     dw = {key: dw[key] + ga[key] for key in dw}
                 dw = {key: jnp.where(ok, val, 0.0) for key, val in dw.items()}
-                prev = tacc[j]
-                tacc[j] = (
+                prev = tacc[jj]
+                tacc[jj] = (
                     dw if prev is None else {key: prev[key] + dw[key] for key in dw}
                 )
-        _store_rows(out_ref, node_safe, valid, acc, p=p, C=C, packed=packed, lane=lane)
-        for j in range(k):
+
+        @pl.when(group == 0)
+        def _primal():
+            _store_rows(
+                out_ref, node_safe, valid, acc, p=p, C=C, packed=packed, lane=lane
+            )
+
+        for jj in range(tpp):
             _store_tangent_rows(
                 tout_ref,
-                j,
+                jl[jj],
                 node_safe,
-                valid,
-                tacc[j],
+                (valid & (js[jj] < k)) if tails else valid,
+                tacc[jj],
                 p=p,
                 C=C,
                 packed=packed,
@@ -1582,9 +1600,14 @@ def _l2l_tan_lanes_kernel(
     k_lanes: int,
     tables: dict,
     k: int,
+    tpp: int,
     live_cent: bool,
 ) -> None:
-    """:func:`_l2l_lanes_kernel` with ``K`` tangents: the node's row and its tangents.
+    """:func:`_l2l_lanes_kernel` with tangents: the node's row and its tangents.
+
+    Grid axis 1 is the tangent group (:mod:`jaccpot.pallas._tangent_grid`): the
+    program carries tangents ``g tpp .. g tpp + tpp - 1``; group 0 also writes the
+    primal row.
 
     Parameters
     ----------
@@ -1615,7 +1638,10 @@ def _l2l_tan_lanes_kernel(
     tables : dict
         :func:`_cascade_lane_tables`. Static.
     k : int
-        ``K``. Static.
+        ``K``, the tangents of the launch. Static.
+    tpp : int
+        Tangents per program; those past ``K`` are clamped on load and not
+        stored. Static.
     live_cent : bool
         Whether the centre tangent can be nonzero. Static.
 
@@ -1630,6 +1656,10 @@ def _l2l_tan_lanes_kernel(
     C, packed = tables["C"], tables["packed"]
     base = pl.program_id(0) * k_lanes
     count = count_ref[0]
+    group = pl.program_id(1)
+    tails = int(k) % int(tpp) != 0
+    js = [group * tpp + jj for jj in range(tpp)]
+    jl = [jnp.minimum(j, k - 1) for j in js] if tails else js
 
     @pl.when(base < count)
     def _live():
@@ -1655,9 +1685,15 @@ def _l2l_tan_lanes_kernel(
             (v,),
         )
         new = {key: coef_ref[nrow + packed[key]] + w[key] for key in _keys(p)}
-        _store_rows(out_ref, node_safe, valid, new, p=p, C=C, packed=packed, lane=lane)
+
+        @pl.when(group == 0)
+        def _primal():
+            _store_rows(
+                out_ref, node_safe, valid, new, p=p, C=C, packed=packed, lane=lane
+            )
+
         adj = _ladder_harm_adjoint(v, p=p) if live_cent else None
-        for j in range(k):
+        for jj, j in enumerate(jl):
             u = {key: tcoef_ref[j, prow + packed[key]] for key in _keys(p)}
             if adj is not None:
                 e = [
@@ -1671,8 +1707,75 @@ def _l2l_tan_lanes_kernel(
             dw = lin(u)
             dnew = {key: tcoef_ref[j, nrow + packed[key]] + dw[key] for key in _keys(p)}
             _store_tangent_rows(
-                tout_ref, j, node_safe, valid, dnew, p=p, C=C, packed=packed, lane=lane
+                tout_ref,
+                j,
+                node_safe,
+                (valid & (js[jj] < k)) if tails else valid,
+                dnew,
+                p=p,
+                C=C,
+                packed=packed,
+                lane=lane,
             )
+
+
+def _tan_level_call(
+    kernel: Any,
+    operands: list,
+    *,
+    num_programs: int,
+    groups: int,
+    interpret: bool,
+    backend: str,
+    num_warps: int,
+    name: str,
+) -> tuple[Array, Array]:
+    """One level of a tangent cascade: :func:`_rev_level_call` with a tangent-group axis.
+
+    Parameters
+    ----------
+    kernel : Any
+        The level kernel (operands ``0`` and ``1`` aliased to its two outputs).
+    operands : list
+        The kernel's inputs.
+    num_programs : int
+        Programs over the level's nodes. Static.
+    groups : int
+        Tangent groups (grid axis 1). Static.
+    interpret : bool
+        Pallas interpret mode.
+    backend : str
+        Pallas GPU lowering.
+    num_warps : int
+        Warps per program.
+    name : str
+        Kernel name.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        The two aliased outputs.
+    """
+    backend_kwargs = pallas_backend_kwargs(backend, interpret)
+    if "compiler_params" in backend_kwargs:
+        backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
+            num_warps=int(num_warps)
+        )
+    a, b = operands[0], operands[1]
+    return pl.pallas_call(
+        kernel,
+        grid=(int(num_programs), int(groups)),
+        in_specs=[_full(x) for x in operands],
+        out_specs=[_full(a), _full(b)],
+        out_shape=[
+            jax.ShapeDtypeStruct(a.shape, a.dtype),
+            jax.ShapeDtypeStruct(b.shape, b.dtype),
+        ],
+        input_output_aliases={0: 0, 1: 1},
+        interpret=bool(interpret),
+        name=name,
+        **backend_kwargs,
+    )(*operands)
 
 
 def _tangent_level_operands(
@@ -1737,6 +1840,7 @@ def m2m_real_levels_lanes_tangent_pallas(
     backend: str = "triton",
     num_warps: int = 1,
     live_cent: bool = True,
+    tangents_per_program: Optional[int] = None,
 ) -> Array:
     """``K`` tangents of :func:`m2m_real_levels_lanes_pallas`, on its grid and level order.
 
@@ -1776,6 +1880,9 @@ def m2m_real_levels_lanes_tangent_pallas(
         Warps per program.
     live_cent : bool
         Whether ``t_centers`` can be nonzero (``False`` drops the ladder terms).
+    tangents_per_program : Optional[int]
+        Tangents per program (``None``: ``JACCPOT_TANGENT_TPP_M2M``; see
+        :func:`~jaccpot.pallas._tangent_grid.tangents_per_program`). Static.
 
     Returns
     -------
@@ -1792,6 +1899,7 @@ def m2m_real_levels_lanes_tangent_pallas(
         backend=backend,
         num_warps=num_warps,
         live_cent=live_cent,
+        tangents_per_program=tangents_per_program,
     )
     arrays = (
         packed,
@@ -1828,6 +1936,10 @@ def m2m_real_levels_lanes_tangent_pallas(
     idx = offs.dtype
     left = jnp.asarray(left_child, idx)
     right = jnp.asarray(right_child, idx)
+    from jaccpot.pallas._tangent_grid import tangent_groups
+    from jaccpot.pallas._tangent_grid import tangents_per_program as _tpp
+
+    tpp = _tpp("M2M", kt, tangents_per_program)
     kernel = functools.partial(
         _m2m_tan_lanes_kernel,
         p=p,
@@ -1835,13 +1947,14 @@ def m2m_real_levels_lanes_tangent_pallas(
         tables=tables,
         num_internal=int(num_internal),
         k=kt,
+        tpp=tpp,
         live_cent=bool(live_cent),
     )
 
     def body(rev: Array, carry: tuple[Array, Array]) -> tuple[Array, Array]:
         level = (int(num_levels) - 2) - rev
         flat, tflat = carry
-        return _rev_level_call(
+        return _tan_level_call(
             kernel,
             [
                 flat,
@@ -1855,10 +1968,11 @@ def m2m_real_levels_lanes_tangent_pallas(
                 (offs[level + 1] - offs[level])[None],
             ],
             num_programs=-(-width // k),
+            groups=tangent_groups(kt, tpp),
             interpret=interpret,
             backend=backend,
             num_warps=num_warps,
-            name=f"m2m_tan_real_lanes_p{p}_k{k}_t{kt}",
+            name=f"m2m_tan_real_lanes_p{p}_k{k}_t{kt}_tpp{tpp}",
         )
 
     _, t_flat = lax.fori_loop(
@@ -1888,6 +2002,7 @@ def l2l_real_levels_lanes_tangent_pallas(
     backend: str = "triton",
     num_warps: int = 1,
     live_cent: bool = True,
+    tangents_per_program: Optional[int] = None,
 ) -> Array:
     """``K`` tangents of :func:`l2l_real_levels_lanes_pallas`, on its grid and level order.
 
@@ -1923,6 +2038,9 @@ def l2l_real_levels_lanes_tangent_pallas(
         Warps per program.
     live_cent : bool
         Whether ``t_centers`` can be nonzero (``False`` drops the ladder terms).
+    tangents_per_program : Optional[int]
+        Tangents per program (``None``: ``JACCPOT_TANGENT_TPP_L2L``; see
+        :func:`~jaccpot.pallas._tangent_grid.tangents_per_program`). Static.
 
     Returns
     -------
@@ -1938,6 +2056,7 @@ def l2l_real_levels_lanes_tangent_pallas(
         backend=backend,
         num_warps=num_warps,
         live_cent=live_cent,
+        tangents_per_program=tangents_per_program,
     )
     arrays = (
         coeffs_local,
@@ -1971,18 +2090,23 @@ def l2l_real_levels_lanes_tangent_pallas(
         k_lanes=k,
     )
     par = jnp.asarray(parent, offs.dtype)
+    from jaccpot.pallas._tangent_grid import tangent_groups
+    from jaccpot.pallas._tangent_grid import tangents_per_program as _tpp
+
+    tpp = _tpp("L2L", kt, tangents_per_program)
     kernel = functools.partial(
         _l2l_tan_lanes_kernel,
         p=p,
         k_lanes=k,
         tables=tables,
         k=kt,
+        tpp=tpp,
         live_cent=bool(live_cent),
     )
 
     def body(level: Array, carry: tuple[Array, Array]) -> tuple[Array, Array]:
         flat, tflat = carry
-        return _rev_level_call(
+        return _tan_level_call(
             kernel,
             [
                 flat,
@@ -1995,10 +2119,11 @@ def l2l_real_levels_lanes_tangent_pallas(
                 (offs[level + 1] - offs[level])[None],
             ],
             num_programs=-(-width // k),
+            groups=tangent_groups(kt, tpp),
             interpret=interpret,
             backend=backend,
             num_warps=num_warps,
-            name=f"l2l_tan_real_lanes_p{p}_k{k}_t{kt}",
+            name=f"l2l_tan_real_lanes_p{p}_k{k}_t{kt}_tpp{tpp}",
         )
 
     _, t_flat = lax.fori_loop(
@@ -2024,6 +2149,7 @@ _M2M_TAN_EAGER = jax.jit(
         "backend",
         "num_warps",
         "live_cent",
+        "tangents_per_program",
     ),
 )
 #: An eager call's L2L tangent cascade (as :data:`_L2L_EAGER`).
@@ -2038,6 +2164,7 @@ _L2L_TAN_EAGER = jax.jit(
         "backend",
         "num_warps",
         "live_cent",
+        "tangents_per_program",
     ),
 )
 

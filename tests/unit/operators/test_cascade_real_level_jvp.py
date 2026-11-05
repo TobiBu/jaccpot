@@ -27,6 +27,8 @@ pytest.importorskip("yggdrax")
 
 from jaccpot.pallas._tangent import drop_tangent_axis, with_tangent_axis  # noqa: E402
 from jaccpot.pallas.cascade_real_level import (  # noqa: E402
+    _l2l_tangent_impl,
+    _m2m_tangent_impl,
     l2l_real_levels_jnp,
     l2l_real_levels_pallas_cvjp,
     l2l_real_levels_pallas_tangent,
@@ -341,6 +343,49 @@ def test_unbucketed_k_pads_and_chunks(plummer_tree, which):
     want = _call(plummer_tree, which, order, coef, cent, t_coef, t_cent, ref=True)
     assert got.shape[0] == 11
     assert _rel_max(got, want) < 1e-11
+
+
+_TPP_ONE: dict = {}
+
+
+@pytest.mark.parametrize("k", [1, 3, 8, 11])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+@pytest.mark.parametrize("which", ["m2m", "l2l"])
+def test_tangents_per_program_grid(plummer_tree, which, tpp, k):
+    """Tangents on the grid: any ``K`` (a partial last group masked in-kernel, no
+    padding) at every tangents-per-program equals the level loop's jvp, and equals
+    ``tpp = 1`` to round-off (G-tpp)."""
+    order = 2
+    tree = plummer_tree
+    coef, cent, t_coef, t_cent = _inputs(tree, which, order, jnp.float64, k, 40 + k)
+    topo = tree.m2m_topo() if which == "m2m" else tree.l2l_topo()
+    static = tree.m2m_static(order) if which == "m2m" else tree.l2l_static(order)
+    impl = _m2m_tangent_impl if which == "m2m" else _l2l_tangent_impl
+
+    def run(t):
+        (out,) = impl(
+            coef,
+            cent,
+            *topo,
+            t_coef,
+            t_cent,
+            **static,
+            interpret=True,
+            backend="triton",
+            num_warps=4,
+            live=(True, True),
+            tangents_per_program=t,
+        )
+        return np.asarray(out)
+
+    got = run(tpp)
+    key = (which, k)
+    if key not in _TPP_ONE:
+        _TPP_ONE[key] = run(1)
+    want = _call(tree, which, order, coef, cent, t_coef, t_cent, ref=True)
+    assert got.shape == (k, tree.tot, (order + 1) ** 2)
+    assert _rel_max(got, want) < 1e-11, _rel_max(got, want)
+    assert _rel_max(got, _TPP_ONE[key]) < 1e-14
 
 
 def _seam_for(tree, which, order):
