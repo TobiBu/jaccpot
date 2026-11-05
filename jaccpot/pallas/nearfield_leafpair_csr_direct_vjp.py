@@ -1056,7 +1056,8 @@ _TANGENT_ACCUM_MODES = ("input", "wide")
 
 def _nearfield_direct_tan_kernel(
     pm_ref: KernelRef,
-    tpm_ref: KernelRef,
+    tpos_ref: KernelRef,
+    tmass_ref: KernelRef,
     leaf_start_ref: KernelRef,
     leaf_count_ref: KernelRef,
     neighbors_ref: KernelRef,
@@ -1089,8 +1090,12 @@ def _nearfield_direct_tan_kernel(
     ----------
     pm_ref : KernelRef
         ``(N + pad, 4)`` sorted x, y, z, mass; rows past ``N`` are zero.
-    tpm_ref : KernelRef
-        ``(K, N + pad, 4)`` their tangents (x, y, z, mass), same layout.
+    tpos_ref : KernelRef
+        ``(K, N, 3)`` position tangents as given (no padded staging copy: the
+        kernel reads them at row indices clamped to ``N - 1``; the clamped lanes
+        are inactive pairs or masked targets).
+    tmass_ref : KernelRef
+        ``(K, N)`` mass tangents, read the same way.
     leaf_start_ref : KernelRef
         ``(L,)`` first particle of each leaf.
     leaf_count_ref : KernelRef
@@ -1114,8 +1119,8 @@ def _nearfield_direct_tan_kernel(
     tg_ref : KernelRef
         ``(K,)`` tangents of ``G``.
     *out_refs : KernelRef
-        Direct: the aliased ``(3 K, N)`` input (unused) then the ``(3 K, N)``
-        output (tangent ``k``'s x, y, z in rows ``3 k .. 3 k + 2``), each live
+        Direct: the aliased ``(K, N, 3)`` input (unused) then the ``(K, N, 3)``
+        output, the op's result layout (no transpose afterwards), each live
         target lane stored once. Blocked: one ``(1, Bt, 3 tpp)`` block of the
         per-piece partials (this group's columns).
     subtile : int
@@ -1184,10 +1189,13 @@ def _nearfield_direct_tan_kernel(
         soft = softening_ref[0]
         soft_params = (soft, softening_ref[1])
         s_lane = lax.broadcasted_iota(jnp.int32, (bs,), 0)
-        # the targets' position tangents, once per program
+        last_row = tpos_ref.shape[1] - 1
+        # the targets' position tangents, once per program (rows past N clamped:
+        # those lanes are masked targets)
+        trow = jnp.minimum(tstart + lane_idx, last_row)
         ttx: list = []
         if live_pos:
-            ttx = [tuple(tpm_ref[j, rows, a] for a in range(3)) for j in jl]
+            ttx = [tuple(tpos_ref[j, trow, a] for a in range(3)) for j in jl]
         n_acc = n_lanes + (3 if live_g else 0) + (3 if live_soft else 0)
         wide = wide_dtype is not None
         if wide:
@@ -1204,6 +1212,8 @@ def _nearfield_direct_tan_kernel(
                 sy = pm_ref[srows, 1][None, :]
                 sz = pm_ref[srows, 2][None, :]
                 sm = pm_ref[srows, 3][None, :]
+                # the tangents' source rows, clamped (past N: inactive pairs)
+                srow = jnp.minimum(sstart + j0 + s_lane, last_row)
                 j = (j0 + s_lane)[None, :]
                 dx = tx[:, None] - sx
                 dy = ty[:, None] - sy
@@ -1222,9 +1232,9 @@ def _nearfield_direct_tan_kernel(
                 for jj, jt in enumerate(jl):
                     u = [jnp.zeros_like(dx)] * 3
                     if live_pos:
-                        tsx = tpm_ref[jt, srows, 0][None, :]
-                        tsy = tpm_ref[jt, srows, 1][None, :]
-                        tsz = tpm_ref[jt, srows, 2][None, :]
+                        tsx = tpos_ref[jt, srow, 0][None, :]
+                        tsy = tpos_ref[jt, srow, 1][None, :]
+                        tsz = tpos_ref[jt, srow, 2][None, :]
                         ddx = ttx[jj][0][:, None] - tsx
                         ddy = ttx[jj][1][:, None] - tsy
                         ddz = ttx[jj][2][:, None] - tsz
@@ -1232,7 +1242,7 @@ def _nearfield_direct_tan_kernel(
                         u = [mg * ddx + tidal * dx, mg * ddy + tidal * dy]
                         u.append(mg * ddz + tidal * dz)
                     if live_mass:
-                        tmg = tpm_ref[jt, srows, 3][None, :] * g
+                        tmg = tmass_ref[jt, srow][None, :] * g
                         u = [u[0] + tmg * dx, u[1] + tmg * dy, u[2] + tmg * dz]
                     terms.extend(u)
                 if live_g:
@@ -1325,14 +1335,13 @@ def _nearfield_direct_tan_kernel(
         for jj in range(tpp):
             mask = (tvalid & (js[jj] < k_tangents)) if tails else tvalid
             for a in range(3):
-                plgpu.store(
-                    out.at[3 * jl[jj] + a, where], values[3 * jj + a], mask=mask
-                )
+                plgpu.store(out.at[jl[jj], where, a], values[3 * jj + a], mask=mask)
 
 
 def _direct_tan_call(
     pm: Array,
-    tpm: Array,
+    tpos: Array,
+    tmass: Array,
     leaf_start: Array,
     leaf_count: Array,
     neighbors: Array,
@@ -1367,8 +1376,10 @@ def _direct_tan_call(
     ----------
     pm : Array
         ``(N + pad, 4)`` sorted x, y, z, mass.
-    tpm : Array
-        ``(K, N + pad, 4)`` their tangents.
+    tpos : Array
+        ``(K, N, 3)`` position tangents.
+    tmass : Array
+        ``(K, N)`` mass tangents.
     leaf_start : Array
         ``(L,)`` int32 first particle per leaf.
     leaf_count : Array
@@ -1425,13 +1436,12 @@ def _direct_tan_call(
     Returns
     -------
     Any
-        Direct: the ``(3 K, N)`` tangents. Blocked: ``(C, n_sub Bt, 3 G tpp)``
+        Direct: the ``(K, N, 3)`` tangents. Blocked: ``(C, n_sub Bt, 3 G tpp)``
         partials (``G`` groups; columns past ``3 K`` are padding).
     """
     from jaccpot.pallas._tangent_grid import tangent_groups
 
     assert pl is not None and plgpu is not None
-    n_lanes = 3 * int(k_tangents)
     groups = tangent_groups(int(k_tangents), int(tpp))
     capacity = int(chunk_leaf.shape[0])
 
@@ -1455,7 +1465,8 @@ def _direct_tan_call(
 
     operands = [
         pm,
-        tpm,
+        tpos,
+        tmass,
         leaf_start,
         leaf_count,
         neighbors,
@@ -1471,7 +1482,7 @@ def _direct_tan_call(
     in_specs = [_full(o) for o in operands]
     extra: dict[str, Any] = {}
     if direct:
-        zeros = jnp.zeros((n_lanes, int(num_rows)), out_dtype)
+        zeros = jnp.zeros((int(k_tangents), int(num_rows), 3), out_dtype)
         in_specs.append(_full(zeros))
         out_specs: Any = _full(zeros)
         out_shape: Any = jax.ShapeDtypeStruct(zeros.shape, zeros.dtype)
@@ -1666,11 +1677,9 @@ def _near_tangent_impl(
         [positions_sorted, jnp.asarray(masses_sorted, dtype)[:, None]], axis=1
     )
     pm = jnp.pad(pm, ((0, pad), (0, 0)))
-    tpm = jnp.concatenate(
-        [jnp.asarray(t_positions, dtype), jnp.asarray(t_masses, dtype)[..., None]],
-        axis=2,
-    )
-    tpm = jnp.pad(tpm, ((0, 0), (0, pad), (0, 0)))
+    # the tangents as given: no concatenated, padded staging table
+    tpos = jnp.asarray(t_positions, dtype)
+    tmass = jnp.asarray(t_masses, dtype)
     idx = jnp.asarray(counts).dtype
     counts_i = jnp.asarray(counts, idx)
     row_start = jnp.asarray(offsets, idx)[:num_leaves]
@@ -1698,7 +1707,8 @@ def _near_tangent_impl(
     launch = functools.partial(
         _direct_tan_call,
         pm,
-        tpm,
+        tpos,
+        tmass,
         start_i,
         count_i,
         neighbors,
@@ -1716,8 +1726,8 @@ def _near_tangent_impl(
         wide_dtype=wide_dtype,
     )
     scalars = (softening, g_arr, tsoft, tg)
-    # 1. each row up to `piece` entries + the self term, in particle order: one
-    # (3 K, N) buffer, tangent k's x, y, z in rows 3 k .. 3 k + 2
+    # 1. each row up to `piece` entries + the self term, in particle order, into
+    # the (K, N, 3) result itself
     out = launch(
         jnp.arange(num_leaves, dtype=idx),
         row_start,
@@ -1762,12 +1772,13 @@ def _near_tangent_impl(
         partials, rows = _rest_pieces_in_fixed_order(
             partials[..., : 3 * k_tan], rows, jnp.where(valid, leaf_safe, -1), n
         )
-        return out_in.at[:, rows].add(jnp.moveaxis(partials, -1, 0), mode="drop")
+        cap, wpad = int(partials.shape[0]), int(partials.shape[1])
+        upd = jnp.transpose(partials.reshape(cap, wpad, k_tan, 3), (2, 0, 1, 3))
+        return out_in.at[:, rows, :].add(upd, mode="drop")
 
     if capacity > 0:
         out = lax.cond(jnp.max(counts_i) > piece_i, _rest, lambda o: o, out)
-    t_acc = jnp.transpose(jnp.reshape(out, (k_tan, 3, n)), (0, 2, 1))
-    return [t_acc.astype(dtype)]
+    return [out.astype(dtype)]
 
 
 def _near_tangent_abstract(
