@@ -21,6 +21,7 @@ pytest.importorskip("jax.experimental.pallas")
 
 from jaccpot.pallas._tangent import drop_tangent_axis, with_tangent_axis  # noqa: E402
 from jaccpot.pallas.l2p_real import (  # noqa: E402
+    _l2p_tangent_impl,
     l2p_real_particles_jnp,
     l2p_real_particles_pallas,
     l2p_real_particles_pallas_cvjp,
@@ -208,6 +209,41 @@ def test_unbucketed_k_pads_and_chunks(k):
     (want,) = _ref(args, tangents)
     assert got.shape[0] == k
     assert _rel_max(got, want) < 1e-12
+
+
+_TPP_ONE: dict = {}
+
+
+@pytest.mark.parametrize("k", [1, 3, 8, 11])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+def test_tangents_per_program_grid(tpp, k):
+    """Tangents on the grid: any ``K`` (a partial last group masked in-kernel, no
+    padding) at every tangents-per-program equals the twin's jvp, and equals
+    ``tpp = 1`` to round-off (G-tpp)."""
+    args = _case(0, jnp.float64)
+    tangents = _tangents(args, k, 30 + k)
+
+    def run(t):
+        (out,) = _l2p_tangent_impl(
+            *args,
+            *tangents,
+            order=_ORDER,
+            block=32,
+            interpret=True,
+            backend="triton",
+            num_warps=4,
+            live=(True, True, True),
+            tangents_per_program=t,
+        )
+        return np.asarray(out)
+
+    got = run(tpp)
+    if k not in _TPP_ONE:
+        _TPP_ONE[k] = run(1)
+    (want,) = _ref(args, tangents)
+    assert got.shape == (k,) + args[2].shape
+    assert _rel_max(got, want) < 1e-12, _rel_max(got, want)
+    assert _rel_max(got, _TPP_ONE[k]) < 1e-14
 
 
 def _seam_for(args):

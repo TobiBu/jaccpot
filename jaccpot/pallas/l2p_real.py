@@ -986,13 +986,15 @@ def _l2p_particle_tangent_kernel(
     rows: int,
     num_leaves: int,
     k: int,
+    tpp: int,
     live_coef: bool,
     live_delta: bool,
 ) -> None:
-    """The forward's grid and lanes (:func:`_l2p_particle_kernel`), ``K`` tangents each.
+    """The forward's grid and lanes (:func:`_l2p_particle_kernel`), ``tpp`` tangents each.
 
     Each lane finds its leaf by the forward's bisection, loads its primals once and
-    its ``K`` tangents, and stores ``K`` tangent rows
+    the tangents of this program's group (grid axis 1,
+    :mod:`jaccpot.pallas._tangent_grid`), and stores their rows
     (:func:`_l2p_lane_tangents`).
 
     Parameters
@@ -1030,7 +1032,10 @@ def _l2p_particle_tangent_kernel(
     num_leaves : int
         ``L``. Static.
     k : int
-        ``K``, the tangents per lane. Static.
+        ``K``, the tangents of the launch. Static.
+    tpp : int
+        Tangents per program: tangents ``g tpp .. g tpp + tpp - 1`` of group ``g``,
+        those past ``K`` clamped on load and not stored. Static.
     live_coef : bool
         Whether the coefficient tangent can be nonzero. Static.
     live_delta : bool
@@ -1039,10 +1044,15 @@ def _l2p_particle_tangent_kernel(
     Returns
     -------
     None
-        Writes the block's ``K`` tangent rows.
+        Writes the block's tangent rows of this group.
     """
     del out_in
     assert pl is not None and plgpu is not None
+    group = pl.program_id(1)
+    tails = int(k) % int(tpp) != 0
+    js = [group * tpp + jj for jj in range(tpp)]
+    # a partial last group reads tangent K - 1 in its spare slots, stores none
+    jl = [jnp.minimum(j, k - 1) for j in js] if tails else js
     b = pl.program_id(0)
     lane = lax.broadcasted_iota(jnp.int32, (block,), 0)
     i = b * block + lane
@@ -1066,7 +1076,7 @@ def _l2p_particle_tangent_kernel(
     coeff = [coef_ref[nd, c] for c in range(C)]
     t_coeff = None
     if live_coef:
-        t_coeff = [[t_coef_ref[j, nd, c] for c in range(C)] for j in range(k)]
+        t_coeff = [[t_coef_ref[j, nd, c] for c in range(C)] for j in jl]
     t_delta = None
     if live_delta:
         t_delta = [
@@ -1074,13 +1084,16 @@ def _l2p_particle_tangent_kernel(
                 (t_cent_ref[j, nd, a] - t_pos_ref[j, ii, a]).astype(x.dtype)
                 for a in range(3)
             )
-            for j in range(k)
+            for j in jl
         ]
     tangents = _l2p_lane_tangents(coeff, x, y, z, t_coeff, t_delta, order=order)
     dest = jnp.where(live, i, rows + lane)
-    for j, g in enumerate(tangents):
+    for jj, g in enumerate(tangents):
+        mask = (live & (js[jj] < k)) if tails else live
         for a in range(3):
-            plgpu.store(out_ref.at[j, dest, a], g[a].astype(out_ref.dtype), mask=live)
+            plgpu.store(
+                out_ref.at[jl[jj], dest, a], g[a].astype(out_ref.dtype), mask=mask
+            )
 
 
 def _l2p_tangent_impl(
@@ -1100,8 +1113,9 @@ def _l2p_tangent_impl(
     backend: str,
     num_warps: int,
     live: tuple[bool, ...],
+    tangents_per_program: int | None = None,
 ) -> list[Array]:
-    """The ``K``-tangent L2P launch (``K`` from the buckets; see the op).
+    """The ``K``-tangent L2P launch (any ``K``; see the op).
 
     Parameters
     ----------
@@ -1135,6 +1149,9 @@ def _l2p_tangent_impl(
         Warps per program.
     live : tuple[bool, ...]
         Which of the three tangents can be nonzero.
+    tangents_per_program : int | None
+        Tangents per program (``None``: ``JACCPOT_TANGENT_TPP_L2P``; see
+        :func:`~jaccpot.pallas._tangent_grid.tangents_per_program`). Static.
 
     Returns
     -------
@@ -1146,11 +1163,15 @@ def _l2p_tangent_impl(
     RuntimeError
         If Pallas is not available.
     """
+    from jaccpot.pallas._tangent_grid import tangent_groups
+    from jaccpot.pallas._tangent_grid import tangents_per_program as _tpp
+
     if pl is None:
         raise RuntimeError("jax.experimental.pallas is not available")
     n = int(positions_sorted.shape[0])
     L = int(leaf_nodes.shape[0])
     k = int(t_positions.shape[0])
+    tpp = _tpp("L2P", k, tangents_per_program)
     pos = jnp.asarray(positions_sorted)
     coef = jnp.asarray(coefficients)
     cent = jnp.asarray(centers, coef.dtype)
@@ -1192,16 +1213,17 @@ def _l2p_tangent_impl(
             rows=n,
             num_leaves=L,
             k=k,
+            tpp=tpp,
             live_coef=live_coef,
             live_delta=live_delta,
         ),
-        grid=(blocks,),
+        grid=(blocks, tangent_groups(k, tpp)),
         in_specs=[_full(o) for o in operands + [out0]],
         out_specs=_full(out0),
         out_shape=jax.ShapeDtypeStruct(out0.shape, out0.dtype),
         input_output_aliases={len(operands): 0},
         interpret=bool(interpret),
-        name=f"l2p_tan_real_particle_p{int(order)}_b{P}_k{k}",
+        name=f"l2p_tan_real_particle_p{int(order)}_b{P}_k{k}_tpp{tpp}",
         **backend_kwargs,
     )(*operands, out0)
     return [out]
@@ -1242,7 +1264,9 @@ def _make_l2p_tangent_op() -> Any:
 #: table in :mod:`jaccpot.pallas._tangent`'s users): operands ``(coefficients,
 #: centers, positions_sorted, leaf_nodes, leaf_start, leaf_count, t_coefficients,
 #: t_centers, t_positions)``, the tangents ``K``-stacked; params ``order, block,
-#: interpret, backend, num_warps, live``; returns ``([K, N, 3],)``.
+#: interpret, backend, num_warps, live`` and optionally ``tangents_per_program``;
+#: returns ``([K, N, 3],)``. Any ``K``: the kernel's tangent-group grid axis masks a
+#: partial last group.
 l2p_real_particles_pallas_tangent = _make_l2p_tangent_op()
 
 
