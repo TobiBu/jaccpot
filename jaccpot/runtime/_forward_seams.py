@@ -154,6 +154,27 @@ def resolve_tangent(seam: str, choice: Optional[str] = None) -> tuple[Callable, 
     return _REFERENCES[seam], "reference"
 
 
+def resolve_tangent_out(seam: str) -> Optional[Callable]:
+    """The seam's Pallas ``<op>_out`` sibling, or ``None`` if its module has none.
+
+    The ``_out`` op takes the seam's primal output as one more primal after the
+    seam's arrays (the M2M / L2L tangent cascades read the forward's table instead
+    of recomputing it). Only used when :func:`resolve_tangent` chose ``"pallas"``.
+
+    Parameters
+    ----------
+    seam : str
+        A key of :data:`SEAM_TANGENT_OPS`.
+
+    Returns
+    -------
+    Optional[Callable]
+        The op, or ``None``.
+    """
+    module_name, op_name = SEAM_TANGENT_OPS[seam]
+    return getattr(importlib.import_module(module_name), op_name + "_out", None)
+
+
 def _tangents(
     kernels: str,
     seam: str,
@@ -198,8 +219,7 @@ def _tangents(
         [tangents[i] for i in diff], [primals[i] for i in diff]
     )
     if output is not None and source == "pallas":
-        module_name, op_name = SEAM_TANGENT_OPS[seam]
-        out_op = getattr(importlib.import_module(module_name), op_name + "_out", None)
+        out_op = resolve_tangent_out(seam)
         if out_op is not None:
             return drop_tangent_axis(out_op(*primals, output, *tk, live=live, **params))
     return drop_tangent_axis(op(*primals, *tk, live=live, **params))

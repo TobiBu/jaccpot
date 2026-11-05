@@ -36,10 +36,8 @@ is jitted and timed with ``--tpp-k`` tangents (the recorded one tiled) for each
 tangents-per-program in {1, 2, 4, 8} (``JACCPOT_TANGENT_TPP_<SEAM>``, read at
 trace time; track K's ``jaccpot.pallas._tangent_grid``). Without that knob the
 sweep is skipped (``"skipped"`` in the JSON) and ``tpp`` is recorded as the
-installed fused body. The M2M / L2L cells time the seams' 7-primal tangent ops,
-which rerun the primal cascade before the tangent one (the production rule calls
-the ``_out`` siblings with the forward's table instead): the same offset in every
-tpp cell, so the ranking holds; the absolute time is not the rollout's.
+installed fused body. Each cell times the op the production rule called (for
+M2M / L2L the ``_out`` sibling that reads the forward's table; ``op`` in the row).
 
 ``JACCPOT_COMPILATION_CACHE_DIR`` (opt-in) is applied before anything compiles:
 with a warm cache ``compile_s`` measures a cache load, not a compile -- the row
@@ -337,11 +335,13 @@ _SEAM_ENV = {
 def _record_seams(prov: Any, x: Any, m: Any, fb: Any) -> dict:
     """Every tangent op one forward-mode step calls: its operands and params.
 
-    ``resolve_tangent`` is wrapped so each op call records its static params at
-    trace time and its operands' VALUES at run time (``jax.debug.callback`` to
-    host copies: some seams sit inside the step's loops, whose tracers cannot be
-    returned), from one run of the jitted jvp of ``differentiable_step``. The
-    first call per seam is kept; its operands come back as device arrays.
+    ``resolve_tangent`` and ``resolve_tangent_out`` (the M2M / L2L cascades' ops
+    that read the forward's table) are wrapped so each op call records the op and
+    its static params at trace time and its operands' VALUES at run time
+    (``jax.debug.callback`` to host copies: some seams sit inside the step's loops,
+    whose tracers cannot be returned), from one run of the jitted jvp of
+    ``differentiable_step``. The first call per seam is kept; its operands come
+    back as device arrays, and the sweep times the op production called.
     """
     import jax
     import jax.numpy as jnp
@@ -352,13 +352,12 @@ def _record_seams(prov: Any, x: Any, m: Any, fb: Any) -> dict:
     statics: dict = {}
     values: dict = {}
     original = fs.resolve_tangent
+    original_out = getattr(fs, "resolve_tangent_out", None)
 
-    def resolve(seam: str, choice: Optional[str] = None) -> tuple:
-        op, source = original(seam, choice)
-
+    def recorder(seam: str, op: Any, source: str) -> Any:
         def recording(*operands: Any, **params: Any) -> Any:
             if seam not in statics:
-                statics[seam] = (source, params, len(operands))
+                statics[seam] = (source, params, len(operands), op)
 
                 def store(*host: Any) -> None:
                     values.setdefault(seam, [np.array(h) for h in host])
@@ -366,9 +365,19 @@ def _record_seams(prov: Any, x: Any, m: Any, fb: Any) -> dict:
                 jax.debug.callback(store, *operands)
             return op(*operands, **params)
 
-        return recording, source
+        return recording
+
+    def resolve(seam: str, choice: Optional[str] = None) -> tuple:
+        op, source = original(seam, choice)
+        return recorder(seam, op, source), source
+
+    def resolve_out(seam: str) -> Any:
+        op = original_out(seam)
+        return None if op is None else recorder(seam, op, "pallas")
 
     fs.resolve_tangent = resolve
+    if original_out is not None:
+        fs.resolve_tangent_out = resolve_out
     try:
 
         def program(y: Any, t: Any) -> Any:
@@ -385,12 +394,14 @@ def _record_seams(prov: Any, x: Any, m: Any, fb: Any) -> dict:
         jax.effects_barrier()
     finally:
         fs.resolve_tangent = original
+        if original_out is not None:
+            fs.resolve_tangent_out = original_out
     out: dict = {}
-    for seam, (source, params, count) in statics.items():
+    for seam, (source, params, count, op) in statics.items():
         host = values.get(seam)
         if host is None or len(host) != count:
             continue
-        out[seam] = (source, [jnp.asarray(h) for h in host], params)
+        out[seam] = (source, [jnp.asarray(h) for h in host], params, op)
     return out
 
 
@@ -426,16 +437,14 @@ def tpp_sweep(args: argparse.Namespace) -> dict:
     del x, m
     gc.collect()
     k = int(args.tpp_k)
-    for seam, (source, ops, params) in recorded.items():
+    for seam, (source, ops, params, op) in recorded.items():
         env = f"JACCPOT_TANGENT_TPP_{_SEAM_ENV[seam]}"
         row: dict[str, Any] = {"source": source, "k": k, "tpp": {}}
         rec["seams"][seam] = row
         if source != "pallas" or _SEAM_ENV[seam] not in knob:
             row["skipped"] = f"tangent source {source!r} / no {env}"
             continue
-        op, _ = __import__(
-            "jaccpot.runtime._forward_seams", fromlist=["resolve_tangent"]
-        ).resolve_tangent(seam, "pallas")
+        row["op"] = str(getattr(op, "name", op))
         num_primals = int(op.num_primals)
         primals = list(ops[:num_primals])
         tangents = [jnp.tile(t, (k,) + (1,) * (t.ndim - 1)) for t in ops[num_primals:]]
