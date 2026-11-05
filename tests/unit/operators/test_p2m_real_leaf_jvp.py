@@ -23,6 +23,7 @@ pytest.importorskip("yggdrax")
 
 from jaccpot.pallas._tangent import drop_tangent_axis, with_tangent_axis  # noqa: E402
 from jaccpot.pallas.p2m_real_leaf import (  # noqa: E402
+    _p2m_tangent_impl,
     p2m_real_leaves_jnp,
     p2m_real_leaves_pallas,
     p2m_real_leaves_pallas_cvjp,
@@ -193,6 +194,42 @@ def test_unbucketed_k_pads_and_chunks(tree):
     (want,) = _ref(tree, args, tangents, 3)
     assert got.shape[0] == 11
     assert _rel_max(got, want) < 1e-12
+
+
+_TPP_ONE: dict = {}
+
+
+@pytest.mark.parametrize("k", [1, 3, 8, 11])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+def test_tangents_per_program_grid(tree, tpp, k):
+    """Tangents on the grid: any ``K`` (a partial last group masked in-kernel, no
+    padding) at every tangents-per-program equals the twin's jvp, and equals
+    ``tpp = 1`` to round-off (G-tpp)."""
+    order = 3
+    args = tree.args(jnp.float64)
+    tangents = _tangents(args, k, 20 + k)
+
+    def run(t):
+        (out,) = _p2m_tangent_impl(
+            *args,
+            *tangents,
+            **tree.static(order),
+            leaf_width=tree.leaf,
+            interpret=True,
+            backend="triton",
+            num_warps=None,
+            live=(True, True, True),
+            tangents_per_program=t,
+        )
+        return np.asarray(out)
+
+    got = run(tpp)
+    if k not in _TPP_ONE:
+        _TPP_ONE[k] = run(1)
+    (want,) = _ref(tree, args, tangents, order)
+    assert got.shape == (k, tree.tot, (order + 1) ** 2)
+    assert _rel_max(got, want) < 1e-12, _rel_max(got, want)
+    assert _rel_max(got, _TPP_ONE[k]) < 1e-14
 
 
 def test_twin_tangent_equals_the_jvp_of_the_production_reference(tree):
