@@ -347,3 +347,78 @@ It was checked on CPU only: every job script ran locally at tiny N with the exac
 one bench bug, now fixed: `multigpu_segment_gate.py` crashed on every one-device mesh row.
 
 Expected cost: about 19 node-hours.
+
+## A2 — diagnostics and domain robustness (2026-11-05)
+
+Branches `a2/diagnostics-robustness` in jaccpot and yggdrax (from f868c393 / 235e1f9). Four items: #488, the
+64-level tree bound, an IC guard, and a prototype escaper policy.
+
+### #488: why the energy diagnostic went blind
+
+The force and the energy disagreed about fitting because they ran on **different level-loop widths**. The level loops'
+batch width lives in a process-level registry (`_level_shapes`). Programs read it when they TRACE, and no provider
+key holds it. A tree re-plan that widens only that batch therefore clears the engine's compiled runners
+(`_replan_tree_from_needs`), so the force scans retrace with the new width. `ProductionRunner._energy_programs`
+was never cleared: the energy program compiled before the re-plan kept the old width and reported
+`energy_ok=False` at every edge whose widest level outgrew it. The force segments ran on with `retries 0`.
+
+- The 4.7e7 merger (`c_fp64_t06`, geometric 0.6, fp64 state) shows it: one retry at step 3040 with leaf, far and
+  near caps unchanged (a width-only re-plan), then blind energy from step 6150 to the end. In a fresh process the
+  energy fitted (the issue's workaround).
+- CPU reproduction, N = 512: the cusp of `test_strict_runners_on_provider.py` drifting a tenth of the way into four
+  blobs. The energy program was compiled on the cusp at rest (width 18); the first segment re-planned the width to 33
+  with the leaf capacity at 128. Before the fix, steps 1 and 2 were blind (step 2 with retries 0). Step 3's leaf
+  re-plan (128 -> 1024, a new key) made the energy fit again.
+
+**The fix** (`jaccpot/production.py`):
+
+- The energy key holds the level registry (`_level_registry_key`). The same reproduction then has no blind row, and
+  its energies equal a fresh run's bitwise (1130.512663611531, 1130.0507250483863, 1129.9680966311746).
+- A rebuild that still does not fit is re-planned for the energy alone, at most twice (`_segment_retry_mode`):
+  - the rebuild's needs come from a small program;
+  - `FusedForceProvider.replanned(caps_only=True)` re-plans at the edge's positions;
+  - the energy program on the grown provider is compiled ahead of time;
+  - all of it runs inside `_trace_state_kept`, so the force's plan, compiled runners, walk caps and level registry
+    come back unchanged;
+  - the grown program is kept for the plan and tried first at later edges.
+
+  Checked with the registry forced to width 4: one re-plan, `W` bitwise the full plan's (-12.166413280530833), and
+  the registry, cache object and validated caps all unchanged.
+- A row that is still blind (retry off, a named cap) warns: `RuntimeWarning` with the time, the overflow bits and the
+  re-plans tried. A failed `E0` warns too. Rows carry `energy_replans`.
+- The mesh energy (`MeshSegmentRunner.potential_energy`) shares its program cache with the mesh force and gets the
+  same warning, but has no energy-only re-plan (open).
+
+### Tree depth > 64: now loud
+
+yggdrax's level tables hold `MAX_TREE_LEVELS` = 64 levels and `num_levels` is clipped to them. A node deeper than
+that is in no level, so every level-ordered sweep (M2M, L2L) skipped it **silently**. It happens when many leaves
+share one level-21 cell, i.e. a box set by far outliers. Before this change:
+
+| path | before | now |
+|---|---|---|
+| yggdrax eager build | clipped, silent | `TreeDepthError` naming the box, the level-21 cell, the farthest particle and the 99.9th-percentile radius (`domain_report`) |
+| jaccpot eager prepare (jitted tree build) | level loops bounded at `min(64, depth + 8)`, silent | `_resolve_upward_num_levels` raises `TreeDepthError` (box and cell from the tree's bounds) |
+| fused scan | flagged, then a wasted re-plan (an eager re-prepare at 1e8), then an error that said "raise leaf_capacity" | never re-planned past 64 (`_segment_retry_mode`); the error says it is yggdrax's bound, with the box and the outliers at the segment's start |
+
+Traced builds are unchanged (no program changes): their callers fold the depth into their verdicts, as jaccpot's
+rebuild already did.
+
+### The IC guard
+
+`jaccpot.domain.domain_check` gives the Morton box, the level-21 cell, the farthest particle, the 99.9th-percentile
+radius about the median centre, the box's dominance over the bulk and a depth bound. The particles in the central
+level-21 cell give `64 + ceil(log2 leaves)`: an upper bound, since a tree of unique cell codes has at most 64
+levels.
+
+Cost: device reductions in one jitted program plus a strided subsample of 2^20 rows. It allocates no
+[N]-sized temporaries.
+
+`ProductionRunner` runs it before the first segment as `SegmentConfig(domain_guard=...)`:
+
+- `"warn"` (default) warns when the box is more than 20x the bulk's diameter;
+- `"error"` refuses the run;
+- `"off"` skips the guard.
+
+It reads the state only. A `TreeDepthError` from the first prepare is re-raised with the guard's report. The depth
+itself is always checked by the prepare: the guard's bound is advisory.

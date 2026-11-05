@@ -109,6 +109,14 @@ _STRICT_LANE_FILES: tuple[str, ...] = (
     "tests/integration/strict/test_float64_lane.py",
     "tests/integration/strict/test_caps_only_prepare.py",
 )
+# The energy diagnostic's re-plan (#488) and the escaper prototype (A2): a cusp
+# drifting into four blobs through the runner (the CSR near field in interpret
+# mode) and leapfrog runs with an escaper split, ~10 min of compilation on CPU;
+# `integration-strict` had no room for them (23.6 of its 25 min, above).
+_STRICT_A2_FILES: tuple[str, ...] = (
+    "tests/integration/strict/test_energy_replan.py",
+    "tests/integration/strict/test_escapers.py",
+)
 # The differentiable fused step and the rollout over it (S9): every Pallas kernel in
 # interpret mode, and reverse programs of the whole lane (2-5 min of compilation
 # each on CPU). With them `integration-strict` was cancelled at its cap on #490
@@ -200,6 +208,7 @@ SHARDS: dict[str, list[str]] = {
             for path in (
                 *_STRICT_RUNNER_FILES,
                 *_STRICT_LANE_FILES,
+                *_STRICT_A2_FILES,
                 *_STRICT_GRAD_FILES,
                 _STRICT_GRAD_ROLLOUT,
                 _STRICT_GRAD_RUNNER,
@@ -210,6 +219,7 @@ SHARDS: dict[str, list[str]] = {
     ],
     "integration-strict-runner": list(_STRICT_RUNNER_FILES),
     "integration-strict-lane": list(_STRICT_LANE_FILES),
+    "integration-strict-a2": list(_STRICT_A2_FILES),
     "integration-strict-grad": list(_STRICT_GRAD_FILES),
     "integration-strict-grad-rollout": [
         _STRICT_GRAD_ROLLOUT,

@@ -166,6 +166,11 @@ jobs:
           - shard: integration-strict-lane
             typecheck: "0"
             timeout: 25
+          # The energy re-plan (#488) and the escaper prototype (A2), out of
+          # `integration-strict` from the start (no room under its cap).
+          - shard: integration-strict-a2
+            typecheck: "0"
+            timeout: 25
           # The differentiable fused step and the rollout over it (S9, #490): every
           # Pallas kernel in interpret mode and reverse programs of the whole lane;
           # with them `integration-strict` was cancelled at its cap. Measured as

@@ -216,6 +216,7 @@ N = 512: 1 of 3072 state components, 1.9e-6, after 3 x 2 steps against 6).
 | `diagnostics` | all | of `"momentum"`, `"angular_momentum"`, `"com"`, `"kinetic"`, `"energy"` |
 | `diagnostics_every_energy` | 10 | edges between energy diagnostics |
 | `restart_every`, `restart_path` | 0, `None` | a restart file every n segments; `{step}` / `{segment}` are formatted into the path, otherwise each restart replaces the last |
+| `domain_guard` | `"warn"` | the IC guard before a run's first segment (`jaccpot.domain.domain_guard`, A2): warns when a few far particles set the Morton box (more than 20x the diameter holding 99.9 % of the particles), with the box, the level-21 cell, the farthest particle and a tree-depth bound; `"error"` refuses the run; `"off"` measures nothing. It reads the state only: no program changes. |
 
 **Segment lengths.** `num_steps` is part of a scan's compile key: every distinct segment
 length compiles its own scan (a ragged 14-step last segment recompiled for 52.8 s at 25M
@@ -322,7 +323,8 @@ fetched to the host), against step 0's baselines (`RunResult.baselines`):
 | `com`, `com_drift` | `sum m x / M`; `|COM - COM0 - P0/M (t - t0)|` (against its free motion) |
 | `kinetic`, `kinetic_change` | `K = 1/2 sum m v^2`; `(K - K0) / K0` |
 | `potential_self`, `potential_external`, `potential` | `W_self = 1/2 sum m phi` (the fused lane's O(N) potential at the edge's positions), `W_ext = sum m Phi_ext` (`external_potential_fn`; 0 without), `W = W_self + W_ext` |
-| `energy`, `energy_drift`, `energy_ok` | `E = K + W`; `(E - E0) / |E0|`; whether the potential's rebuild fitted its capacities (otherwise the energy fields are `None`) |
+| `energy`, `energy_drift`, `energy_ok` | `E = K + W`; `(E - E0) / |E0|`; whether the potential's rebuild fitted its capacities (otherwise the energy fields are `None`, and the row WARNS) |
+| `energy_replans` | the energy-only re-plans the potential needed at this edge (#488; 0 normally) |
 
 An external field changes P and L physically; the drifts then measure that.
 
@@ -338,6 +340,24 @@ external_params]) -> [N]` is the field's potential per unit mass, with the field
 contract and parameters. The energy program's trace leaves the engine's trace-time state
 as it was (`_trace_state_kept`), so the trajectory with it is the one without (R4,
 bitwise).
+
+**It is never silently blind (#488, A2).** The energy program's key holds the level
+registry (the level loops' batch widths, read when a program traces and in no provider
+key): before, a width-only tree re-plan left the energy program on the old width, and
+the 4.7e7 merger lost every energy row from t 6.15 to the end while the force ran with
+`retries 0`. A rebuild that still does not fit is re-planned for the energy alone --
+the rebuild's needs, `FusedForceProvider.replanned` at the edge's positions, at most
+twice, all inside `_trace_state_kept`, so the force's plan and programs are untouched --
+and the grown program is kept for the plan. Only when that fails (the segment retry off,
+a named cap) is the row blind, and then it warns (`RuntimeWarning` with the time, the
+overflow bits and the re-plans tried); a blind `E0` warns too.
+
+**Wide boxes (A2).** A tree deeper than yggdrax's `MAX_TREE_LEVELS` (64) raises --
+`yggdrax.TreeDepthError` at the eager prepare, a `RuntimeError` from the scan (never
+re-planned: no bound covers it) -- with the Morton box, the level-21 cell and the
+farthest particle. The IC guard above warns first. Far particles can leave the tree on
+the escaper path (`jaccpot.escapers`, a prototype: see `docs/production_2026-11.md`,
+A2).
 
 ## Restart files
 
