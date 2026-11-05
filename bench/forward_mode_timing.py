@@ -134,8 +134,10 @@ def _setup(args: argparse.Namespace) -> None:
     if args.cpu_interpret:
         jax.default_backend = lambda: "gpu"  # the large-N profile's backend gate
     jax.config.update("jax_enable_x64", True)
-    from jaccpot.runtime.compile_cache import maybe_enable_compilation_cache
-
+    try:  # an installed jaccpot without it: no cache (it is opt-in anyway)
+        from jaccpot.runtime.compile_cache import maybe_enable_compilation_cache
+    except ImportError:
+        return
     maybe_enable_compilation_cache()
 
 
