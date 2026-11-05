@@ -87,6 +87,7 @@ __all__ = [
     "p2m_real_leaves_forward",
     "primal_exact",
     "resolve_tangent",
+    "resolve_tangent_out",
     "tangent_gate",
 ]
 
