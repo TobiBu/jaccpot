@@ -1073,14 +1073,17 @@ def _nearfield_direct_tan_kernel(
     source_tile: int,
     softening_kernel: str,
     k_tangents: int,
+    tpp: int,
     live: tuple[bool, bool, bool, bool],
     direct: bool,
     wide_dtype: Any,
 ) -> None:
-    """One target subtile of one row piece: its ``K`` acceleration tangents.
+    """One target subtile of one row piece: its acceleration tangents of one group.
 
     The loop skeleton is the forward's (and the reverse's) with source tiles and the
     ``r`` flag; the pair body is the analytic tangent (see the section comment).
+    Grid axis 2 is the tangent group (:mod:`jaccpot.pallas._tangent_grid`): the
+    program carries tangents ``g tpp .. g tpp + tpp - 1``.
 
     Parameters
     ----------
@@ -1111,10 +1114,10 @@ def _nearfield_direct_tan_kernel(
     tg_ref : KernelRef
         ``(K,)`` tangents of ``G``.
     *out_refs : KernelRef
-        Direct: ``3 K`` aliased ``(N,)`` inputs (unused) then ``3 K`` ``(N,)``
-        outputs (tangent ``k``'s x, y, z at ``3 k .. 3 k + 2``), each live target
-        lane stored once. Blocked: one ``(1, Bt, 3 K)`` block of the per-piece
-        partials.
+        Direct: the aliased ``(3 K, N)`` input (unused) then the ``(3 K, N)``
+        output (tangent ``k``'s x, y, z in rows ``3 k .. 3 k + 2``), each live
+        target lane stored once. Blocked: one ``(1, Bt, 3 tpp)`` block of the
+        per-piece partials (this group's columns).
     subtile : int
         ``Bt``. Static.
     source_tile : int
@@ -1122,7 +1125,10 @@ def _nearfield_direct_tan_kernel(
     softening_kernel : str
         The pair kernel. Static.
     k_tangents : int
-        ``K``. Static.
+        ``K``, the tangents of the launch. Static.
+    tpp : int
+        Tangents per program; those past ``K`` are clamped on load and not stored
+        (direct) or land in padding columns (blocked). Static.
     live : tuple[bool, bool, bool, bool]
         Which of the position, mass, softening and ``G`` tangents are not known
         zero. Static.
@@ -1141,9 +1147,14 @@ def _nearfield_direct_tan_kernel(
     live_pos, live_mass, live_soft, live_g = live
     # (1/r) dg/dr: the tidal term, and Plummer's d/d(eps^2) (half of it)
     want_dgr = live_pos or (live_soft and softening_kernel == "plummer")
-    n_lanes = 3 * k_tangents
+    n_lanes = 3 * tpp
     c = pl.program_id(0)
     sub = pl.program_id(1)
+    group = pl.program_id(2)
+    tails = int(k_tangents) % int(tpp) != 0
+    js = [group * tpp + jj for jj in range(tpp)]
+    # a partial last group reads tangent K - 1 in its spare slots
+    jl = [jnp.minimum(j, k_tangents - 1) for j in js] if tails else js
     bt = int(subtile)
     bs = int(source_tile)
     tl = chunk_leaf_ref[c]
@@ -1176,9 +1187,7 @@ def _nearfield_direct_tan_kernel(
         # the targets' position tangents, once per program
         ttx: list = []
         if live_pos:
-            ttx = [
-                tuple(tpm_ref[k, rows, a] for a in range(3)) for k in range(k_tangents)
-            ]
+            ttx = [tuple(tpm_ref[j, rows, a] for a in range(3)) for j in jl]
         n_acc = n_lanes + (3 if live_g else 0) + (3 if live_soft else 0)
         wide = wide_dtype is not None
         if wide:
@@ -1210,20 +1219,20 @@ def _nearfield_direct_tan_kernel(
                 )
                 mg = sm * g
                 terms = []
-                for k in range(k_tangents):
+                for jj, jt in enumerate(jl):
                     u = [jnp.zeros_like(dx)] * 3
                     if live_pos:
-                        tsx = tpm_ref[k, srows, 0][None, :]
-                        tsy = tpm_ref[k, srows, 1][None, :]
-                        tsz = tpm_ref[k, srows, 2][None, :]
-                        ddx = ttx[k][0][:, None] - tsx
-                        ddy = ttx[k][1][:, None] - tsy
-                        ddz = ttx[k][2][:, None] - tsz
+                        tsx = tpm_ref[jt, srows, 0][None, :]
+                        tsy = tpm_ref[jt, srows, 1][None, :]
+                        tsz = tpm_ref[jt, srows, 2][None, :]
+                        ddx = ttx[jj][0][:, None] - tsx
+                        ddy = ttx[jj][1][:, None] - tsy
+                        ddz = ttx[jj][2][:, None] - tsz
                         tidal = sm * dgr * (dx * ddx + dy * ddy + dz * ddz)
                         u = [mg * ddx + tidal * dx, mg * ddy + tidal * dy]
                         u.append(mg * ddz + tidal * dz)
                     if live_mass:
-                        tmg = tpm_ref[k, srows, 3][None, :] * g
+                        tmg = tpm_ref[jt, srows, 3][None, :] * g
                         u = [u[0] + tmg * dx, u[1] + tmg * dy, u[2] + tmg * dz]
                     terms.extend(u)
                 if live_g:
@@ -1292,29 +1301,33 @@ def _nearfield_direct_tan_kernel(
         s0 = shared[:3] if live_g else None
         e0 = shared[-3:] if live_soft else None
         values = []
-        for k in range(k_tangents):
+        for jj, jt in enumerate(jl):
             for a in range(3):
                 v = (
-                    -g_value * sums[3 * k + a]
+                    -g_value * sums[3 * jj + a]
                     if (live_pos or live_mass)
                     else jnp.zeros_like(sums[0])
                 )
                 if s0 is not None:
-                    v = v - tg_ref[k].astype(v.dtype) * s0[a]
+                    v = v - tg_ref[jt].astype(v.dtype) * s0[a]
                 if e0 is not None:
-                    v = v - g_value * tsoft_ref[k].astype(v.dtype) * e0[a]
+                    v = v - g_value * tsoft_ref[jt].astype(v.dtype) * e0[a]
                 values.append(v.astype(out_dtype))
         if out_block is not None:
             zero_out = jnp.zeros((bt,), out_dtype)
             for comp in range(n_lanes):
                 out_block[0, :, comp] = jnp.where(tvalid, values[comp], zero_out)
             return
-        outs = out_refs[n_lanes:]
-        n_rows = outs[0].shape[0]
+        out = out_refs[-1]
+        n_rows = out.shape[1]
         # masked lanes point PAST the outputs, as the forward's stores do
         where = jnp.where(tvalid, tstart + lane_idx, n_rows + lane)
-        for comp in range(n_lanes):
-            plgpu.store(outs[comp].at[where], values[comp], mask=tvalid)
+        for jj in range(tpp):
+            mask = (tvalid & (js[jj] < k_tangents)) if tails else tvalid
+            for a in range(3):
+                plgpu.store(
+                    out.at[3 * jl[jj] + a, where], values[3 * jj + a], mask=mask
+                )
 
 
 def _direct_tan_call(
@@ -1343,6 +1356,7 @@ def _direct_tan_call(
     interpret: bool,
     softening_kernel: str,
     k_tangents: int,
+    tpp: int,
     live: tuple[bool, bool, bool, bool],
     wide_dtype: Any,
     name: str,
@@ -1399,6 +1413,8 @@ def _direct_tan_call(
         The pair kernel.
     k_tangents : int
         ``K``.
+    tpp : int
+        Tangents per program (grid axis 2 over ``ceil(K / tpp)`` groups).
     live : tuple[bool, bool, bool, bool]
         Tangent liveness (positions, masses, softening, ``G``).
     wide_dtype : Any
@@ -1409,10 +1425,14 @@ def _direct_tan_call(
     Returns
     -------
     Any
-        Direct: ``3 K`` arrays of ``N``. Blocked: ``(C, n_sub Bt, 3 K)`` partials.
+        Direct: the ``(3 K, N)`` tangents. Blocked: ``(C, n_sub Bt, 3 G tpp)``
+        partials (``G`` groups; columns past ``3 K`` are padding).
     """
+    from jaccpot.pallas._tangent_grid import tangent_groups
+
     assert pl is not None and plgpu is not None
     n_lanes = 3 * int(k_tangents)
+    groups = tangent_groups(int(k_tangents), int(tpp))
     capacity = int(chunk_leaf.shape[0])
 
     def _kernel(*refs):
@@ -1422,6 +1442,7 @@ def _direct_tan_call(
             source_tile=bs,
             softening_kernel=softening_kernel,
             k_tangents=int(k_tangents),
+            tpp=int(tpp),
             live=live,
             direct=direct,
             wide_dtype=wide_dtype,
@@ -1450,21 +1471,24 @@ def _direct_tan_call(
     in_specs = [_full(o) for o in operands]
     extra: dict[str, Any] = {}
     if direct:
-        zeros = [jnp.zeros((int(num_rows),), out_dtype) for _ in range(n_lanes)]
-        in_specs += [_full(z) for z in zeros]
-        out_specs: Any = [_full(z) for z in zeros]
-        out_shape: Any = [jax.ShapeDtypeStruct(z.shape, z.dtype) for z in zeros]
-        extra["input_output_aliases"] = {len(operands) + k: k for k in range(n_lanes)}
-        operands += zeros
+        zeros = jnp.zeros((n_lanes, int(num_rows)), out_dtype)
+        in_specs.append(_full(zeros))
+        out_specs: Any = _full(zeros)
+        out_shape: Any = jax.ShapeDtypeStruct(zeros.shape, zeros.dtype)
+        extra["input_output_aliases"] = {len(operands): 0}
+        operands.append(zeros)
     else:
-        out_specs = pl.BlockSpec((1, bt, n_lanes), lambda c, sub: (c, sub, 0))
-        out_shape = jax.ShapeDtypeStruct((capacity, n_sub * bt, n_lanes), out_dtype)
+        width = 3 * int(tpp)
+        out_specs = pl.BlockSpec((1, bt, width), lambda c, sub, g: (c, sub, g))
+        out_shape = jax.ShapeDtypeStruct(
+            (capacity, n_sub * bt, groups * width), out_dtype
+        )
     return pl.pallas_call(
         _kernel,
         out_shape=out_shape,
         in_specs=in_specs,
         out_specs=out_specs,
-        grid=(capacity, n_sub),
+        grid=(capacity, n_sub, groups),
         compiler_params=plgpu.CompilerParams(
             num_warps=int(num_warps), num_stages=int(num_stages)
         ),
@@ -1549,8 +1573,9 @@ def _near_tangent_impl(
     static: _DirectStatic,
     live: tuple[bool, ...] = (True, True, True, True),
     accum: Optional[str] = None,
+    tangents_per_program: Optional[int] = None,
 ) -> list:
-    """The Pallas tangent kernels for one ``K`` bucket.
+    """The Pallas tangent kernels for any ``K``.
 
     See :data:`nearfield_leafpair_csr_sorted_direct_pallas_tangent`.
 
@@ -1588,6 +1613,9 @@ def _near_tangent_impl(
         Liveness of the four tangents.
     accum : Optional[str]
         ``"input"`` / ``"wide"`` / ``None`` (the environment).
+    tangents_per_program : Optional[int]
+        Tangents per program (``None``: ``JACCPOT_TANGENT_TPP_NEAR``; see
+        :func:`~jaccpot.pallas._tangent_grid.tangents_per_program`). Static.
 
     Returns
     -------
@@ -1601,6 +1629,8 @@ def _near_tangent_impl(
     ValueError
         On tangent shapes that do not match the primals.
     """
+    from jaccpot.pallas._tangent_grid import tangents_per_program as _tpp
+
     if pl is None or plgpu is None:
         raise RuntimeError("jax.experimental.pallas is not available")
     positions_sorted = jnp.asarray(positions_sorted)
@@ -1660,8 +1690,9 @@ def _near_tangent_impl(
         )
     piece = max(int(row_limit), max(1, int(static.chunk)))
     piece_i = jnp.asarray(piece, idx)
+    tpp = _tpp("NEAR", k_tan, tangents_per_program)
     live_tag = "".join(t for t, on in zip("xmeg", live4) if on)
-    tag = f"t{bt}_s{bs}_w{leaf_width}_c{piece}_K{k_tan}_{live_tag}" + (
+    tag = f"t{bt}_s{bs}_w{leaf_width}_c{piece}_K{k_tan}_tpp{tpp}_{live_tag}" + (
         "_wide" if wide_dtype is not None else ""
     )
     launch = functools.partial(
@@ -1680,12 +1711,14 @@ def _near_tangent_impl(
         interpret=bool(static.interpret),
         softening_kernel=kernel_name,
         k_tangents=k_tan,
+        tpp=tpp,
         live=live4,
         wide_dtype=wide_dtype,
     )
     scalars = (softening, g_arr, tsoft, tg)
-    # 1. each row up to `piece` entries + the self term, in particle order
-    outs = launch(
+    # 1. each row up to `piece` entries + the self term, in particle order: one
+    # (3 K, N) buffer, tangent k's x, y, z in rows 3 k .. 3 k + 2
+    out = launch(
         jnp.arange(num_leaves, dtype=idx),
         row_start,
         jnp.minimum(counts_i, piece_i),
@@ -1695,12 +1728,11 @@ def _near_tangent_impl(
         num_rows=n,
         name=f"near_tan_direct_first_{tag}",
     )
-    outs = list(outs)
     # 2. the rows' remaining pieces: partials, summed in one fixed order per row and
     # added once (the forward's `_rest`, op for op)
     capacity = leafpair_extra_chunk_capacity(num_entries, piece)
 
-    def _rest(outs_in: list) -> list:
+    def _rest(out_in: Array) -> Array:
         per_leaf = jnp.maximum((counts_i + piece_i - 1) // piece_i - 1, 0)
         ends = jnp.cumsum(per_leaf, dtype=idx)
         first = ends - per_leaf
@@ -1728,18 +1760,13 @@ def _near_tangent_impl(
         rows = start_i[leaf_safe][:, None] + lane[None, :]
         rows = jnp.where(lane[None, :] < tcount[:, None], rows, n)
         partials, rows = _rest_pieces_in_fixed_order(
-            partials, rows, jnp.where(valid, leaf_safe, -1), n
+            partials[..., : 3 * k_tan], rows, jnp.where(valid, leaf_safe, -1), n
         )
-        return [
-            o.at[rows].add(partials[..., comp], mode="drop")
-            for comp, o in enumerate(outs_in)
-        ]
+        return out_in.at[:, rows].add(jnp.moveaxis(partials, -1, 0), mode="drop")
 
     if capacity > 0:
-        outs = lax.cond(jnp.max(counts_i) > piece_i, _rest, lambda o: o, outs)
-    t_acc = jnp.stack(
-        [jnp.stack(outs[3 * k : 3 * k + 3], axis=1) for k in range(k_tan)], axis=0
-    )
+        out = lax.cond(jnp.max(counts_i) > piece_i, _rest, lambda o: o, out)
+    t_acc = jnp.transpose(jnp.reshape(out, (k_tan, 3, n)), (0, 2, 1))
     return [t_acc.astype(dtype)]
 
 
@@ -1779,7 +1806,9 @@ def _near_tangent_abstract(
 #: static, live) -> (t_accelerations (K, N, 3),)``. ``static`` is the seam's
 #: :class:`_DirectStatic`; the force-scale lane has no tangent. Optional ``accum``
 #: (``"input"`` / ``"wide"``; default ``JACCPOT_NEARFIELD_TANGENT_ACCUM`` or
-#: ``"input"``). Every softening kernel. The reference is
+#: ``"input"``) and ``tangents_per_program`` (default ``JACCPOT_TANGENT_TPP_NEAR``);
+#: any ``K`` (the kernels' tangent-group grid axis masks a partial last group).
+#: Every softening kernel. The reference is
 #: :func:`nearfield_leafpair_csr_sorted_direct_pallas_tangent_jnp`.
 nearfield_leafpair_csr_sorted_direct_pallas_tangent = make_tangent_op(
     "nearfield_leafpair_csr_sorted_direct",

@@ -43,6 +43,7 @@ from jaccpot.pallas.nearfield_leafpair_csr import (
 )
 from jaccpot.pallas.nearfield_leafpair_csr_direct_vjp import (
     _DirectStatic,
+    _near_tangent_impl,
     _near_tangent_twin,
     nearfield_leafpair_csr_sorted_direct_pallas_tangent,
     nearfield_leafpair_csr_sorted_direct_pallas_tangent_jnp,
@@ -188,6 +189,37 @@ def test_runs_and_rest_pieces(case, row_limit, k, dtype):
     got, want = _both(c, "ferrers3", k, dtype, row_limit=row_limit)
     assert np.max(np.abs(np.asarray(want))) > 0
     assert _rel(got, want) < _TOL[dtype], _rel(got, want)
+
+
+_TPP_ONE: dict = {}
+
+
+@pytest.mark.parametrize("k", [1, 3, 8, 11])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+def test_tangents_per_program_grid(tpp, k):
+    """Tangents on the grid: any ``K`` (a partial last group masked in-kernel, no
+    padding) at every tangents-per-program equals the reference -- the first
+    pieces' particle-order stores and the rest pieces' blocked partials -- and
+    equals ``tpp = 1`` to round-off (G-tpp)."""
+    c = _case(7, W=6, dtype=np.float64)
+    assert int(np.max(np.asarray(c.row_counts))) > 4  # 3+ pieces of 2
+    args = _operands(c, np.float64, k, seed=k)
+    st = _static(c, "plummer", row_limit=2)
+
+    def run(t):
+        (out,) = _near_tangent_impl(*args, static=st, tangents_per_program=t)
+        return np.asarray(out)
+
+    got = run(tpp)
+    if k not in _TPP_ONE:
+        _TPP_ONE[k] = run(1)
+    (want,) = nearfield_leafpair_csr_sorted_direct_pallas_tangent_jnp(
+        *args, static=st, live=_LIVE
+    )
+    assert got.shape == (k, c.n, 3)
+    assert _rel(got, want) < _TOL[np.float64], _rel(got, want)
+    assert _rel(got, _TPP_ONE[k]) < 1e-14
+    assert not np.any(got[:, c.n_live :])
 
 
 @pytest.mark.parametrize(
