@@ -43,6 +43,7 @@ from jaccpot.pallas.nearfield_leafpair_csr import (
 )
 from jaccpot.pallas.nearfield_leafpair_csr_direct_vjp import (
     _DirectStatic,
+    _near_tangent_impl,
     _near_tangent_twin,
     nearfield_leafpair_csr_sorted_direct_pallas_tangent,
     nearfield_leafpair_csr_sorted_direct_pallas_tangent_jnp,
@@ -188,6 +189,77 @@ def test_runs_and_rest_pieces(case, row_limit, k, dtype):
     got, want = _both(c, "ferrers3", k, dtype, row_limit=row_limit)
     assert np.max(np.abs(np.asarray(want))) > 0
     assert _rel(got, want) < _TOL[dtype], _rel(got, want)
+
+
+_TPP_ONE: dict = {}
+
+
+@pytest.mark.parametrize("k", [1, 3, 8, 11])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+def test_tangents_per_program_grid(tpp, k):
+    """Tangents on the grid: any ``K`` (a partial last group masked in-kernel, no
+    padding) at every tangents-per-program equals the reference -- the first
+    pieces' particle-order stores and the rest pieces' blocked partials -- and
+    equals ``tpp = 1`` to round-off (G-tpp)."""
+    err, err_one = _tpp_grid(tpp, k)
+    assert err < _TOL[np.float64], err
+    assert err_one < 1e-14, err_one
+
+
+@pytest.mark.parametrize("k", [3, 8])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+def test_native_tangents_per_program_grid(tpp, k):
+    """G-tpp natively, float64 (skips without an Ampere card)."""
+    _native_or_skip(False)
+    err, err_one = _tpp_grid(tpp, k, interpret=False)
+    assert err < _TOL[np.float64], err
+    assert err_one < 1e-14, err_one
+
+
+def _tpp_grid(tpp, k, *, interpret=True):
+    c = _case(7, W=6, dtype=np.float64)
+    assert int(np.max(np.asarray(c.row_counts))) > 4  # 3+ pieces of 2
+    args = _operands(c, np.float64, k, seed=k)
+    st = _static(c, "plummer", row_limit=2, interpret=interpret)
+
+    def run(t):
+        (out,) = _near_tangent_impl(*args, static=st, tangents_per_program=t)
+        return np.asarray(out)
+
+    got = run(tpp)
+    key = (k, interpret)
+    if key not in _TPP_ONE:
+        _TPP_ONE[key] = run(1)
+    (want,) = nearfield_leafpair_csr_sorted_direct_pallas_tangent_jnp(
+        *args, static=st, live=_LIVE
+    )
+    assert got.shape == (k, c.n, 3)
+    assert not np.any(got[:, c.n_live :])
+    return _rel(got, want), _rel(got, _TPP_ONE[key])
+
+
+@pytest.mark.parametrize(
+    "live", [(True, False, False, False), (False, True, False, True)]
+)
+def test_dead_placeholders_are_never_read(live):
+    """Dead tangents bound as their ``(1, ...)`` placeholders (NaN, so a read
+    would show): ``K`` comes from the live ones; no staging table built from them."""
+    c = _case(7, W=6, dtype=np.float64)
+    args = _operands(c, np.float64, 3, seed=4)
+    dense = tuple(t if on else jnp.zeros_like(t) for t, on in zip(args[9:], live))
+    sparse = tuple(
+        t if on else jnp.full((1,) * t.ndim, jnp.nan) for t, on in zip(dense, live)
+    )
+    st = _static(c, "plummer", row_limit=2)
+    (got,) = _near_tangent_impl(
+        *args[:9], *sparse, static=st, live=live, tangents_per_program=2
+    )
+    (want,) = nearfield_leafpair_csr_sorted_direct_pallas_tangent_jnp(
+        *args[:9], *dense, static=st, live=live
+    )
+    assert got.shape == want.shape
+    assert np.all(np.isfinite(np.asarray(got)))
+    assert _rel(got, want) < _TOL[np.float64], _rel(got, want)
 
 
 @pytest.mark.parametrize(

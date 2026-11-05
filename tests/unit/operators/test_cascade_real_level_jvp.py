@@ -27,14 +27,18 @@ pytest.importorskip("yggdrax")
 
 from jaccpot.pallas._tangent import drop_tangent_axis, with_tangent_axis  # noqa: E402
 from jaccpot.pallas.cascade_real_level import (  # noqa: E402
+    _l2l_tangent_impl,
+    _m2m_tangent_impl,
     l2l_real_levels_jnp,
     l2l_real_levels_pallas_cvjp,
     l2l_real_levels_pallas_tangent,
     l2l_real_levels_pallas_tangent_jnp,
+    l2l_real_levels_pallas_tangent_out,
     m2m_real_levels_jnp,
     m2m_real_levels_pallas_cvjp,
     m2m_real_levels_pallas_tangent,
     m2m_real_levels_pallas_tangent_jnp,
+    m2m_real_levels_pallas_tangent_out,
     pallas_cascade_level_supported,
 )
 
@@ -341,6 +345,138 @@ def test_unbucketed_k_pads_and_chunks(plummer_tree, which):
     want = _call(plummer_tree, which, order, coef, cent, t_coef, t_cent, ref=True)
     assert got.shape[0] == 11
     assert _rel_max(got, want) < 1e-11
+
+
+_TPP_ONE: dict = {}
+
+
+@pytest.mark.parametrize("k", [1, 3, 8, 11])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+@pytest.mark.parametrize("which", ["m2m", "l2l"])
+def test_tangents_per_program_grid(plummer_tree, which, tpp, k):
+    """Tangents on the grid: any ``K`` (a partial last group masked in-kernel, no
+    padding) at every tangents-per-program equals the level loop's jvp, and equals
+    ``tpp = 1`` to round-off (G-tpp)."""
+    err, err_one = _tpp_grid(plummer_tree, which, tpp, k)
+    assert err < 1e-11, err
+    assert err_one < 1e-14, err_one
+
+
+@pytest.mark.parametrize("k", [3, 8])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+@pytest.mark.parametrize("which", ["m2m", "l2l"])
+def test_native_tangents_per_program_grid(plummer_tree, which, tpp, k):
+    """G-tpp natively, float64 (skips without an Ampere card)."""
+    _native_or_skip(False)
+    err, err_one = _tpp_grid(plummer_tree, which, tpp, k, interpret=False)
+    assert err < 1e-11, err
+    assert err_one < 1e-14, err_one
+
+
+def _tpp_grid(tree, which, tpp, k, *, interpret=True):
+    order = 2
+    coef, cent, t_coef, t_cent = _inputs(tree, which, order, jnp.float64, k, 40 + k)
+    topo = tree.m2m_topo() if which == "m2m" else tree.l2l_topo()
+    static = tree.m2m_static(order) if which == "m2m" else tree.l2l_static(order)
+    impl = _m2m_tangent_impl if which == "m2m" else _l2l_tangent_impl
+
+    def run(t):
+        (out,) = impl(
+            coef,
+            cent,
+            *topo,
+            t_coef,
+            t_cent,
+            **static,
+            interpret=interpret,
+            backend="triton",
+            num_warps=4,
+            live=(True, True),
+            tangents_per_program=t,
+        )
+        return np.asarray(out)
+
+    got = run(tpp)
+    key = (which, k, interpret)
+    if key not in _TPP_ONE:
+        _TPP_ONE[key] = run(1)
+    want = _call(tree, which, order, coef, cent, t_coef, t_cent, ref=True)
+    assert got.shape == (k, tree.tot, (order + 1) ** 2)
+    return _rel_max(got, want), _rel_max(got, _TPP_ONE[key])
+
+
+@pytest.mark.parametrize("which", ["m2m", "l2l"])
+def test_the_output_reading_op_equals_the_reference(plummer_tree, which):
+    """``*_pallas_tangent_out`` reads the seam's OUTPUT as an eighth primal and
+    neither recomputes nor stores the primal cascade: both halves, ``K = 3``."""
+    order = 3
+    tree = plummer_tree
+    coef, cent, t_coef, t_cent = _inputs(tree, which, order, jnp.float64, 3, 9)
+    out = _forward(tree, which, order, coef, cent)
+    op = (
+        m2m_real_levels_pallas_tangent_out
+        if which == "m2m"
+        else l2l_real_levels_pallas_tangent_out
+    )
+    topo = tree.m2m_topo() if which == "m2m" else tree.l2l_topo()
+    static = tree.m2m_static(order) if which == "m2m" else tree.l2l_static(order)
+    for tc, tx in (
+        (t_coef, jnp.zeros_like(t_cent)),
+        (jnp.zeros_like(t_coef), t_cent),
+    ):
+        (got,) = op(
+            coef,
+            cent,
+            *topo,
+            out,
+            tc,
+            tx,
+            **static,
+            interpret=True,
+            backend="triton",
+            num_warps=4,
+            live=(True, True),
+        )
+        want = _call(tree, which, order, coef, cent, tc, tx, ref=True)
+        assert np.linalg.norm(np.asarray(want)) > 0
+        assert _rel_max(got, want) < 1e-11, _rel_max(got, want)
+
+
+@pytest.mark.parametrize("live", [(True, False), (False, True)])
+@pytest.mark.parametrize("which", ["m2m", "l2l"])
+def test_dead_placeholders_are_never_read(plummer_tree, which, live):
+    """A dead tangent bound as its ``(1, ...)`` placeholder (NaN, so a read would
+    show): ``K`` comes from the live one; a dead coefficient tangent becomes the
+    zero table the levels' centre terms are written into."""
+    order = 2
+    tree = plummer_tree
+    coef, cent, t_coef, t_cent = _inputs(tree, which, order, jnp.float64, 3, 11)
+    dense = (
+        t_coef if live[0] else jnp.zeros_like(t_coef),
+        t_cent if live[1] else jnp.zeros_like(t_cent),
+    )
+    sparse = tuple(
+        t if on else jnp.full((1,) * t.ndim, jnp.nan) for t, on in zip(dense, live)
+    )
+    impl = _m2m_tangent_impl if which == "m2m" else _l2l_tangent_impl
+    topo = tree.m2m_topo() if which == "m2m" else tree.l2l_topo()
+    static = tree.m2m_static(order) if which == "m2m" else tree.l2l_static(order)
+    (got,) = impl(
+        coef,
+        cent,
+        *topo,
+        *sparse,
+        **static,
+        interpret=True,
+        backend="triton",
+        num_warps=4,
+        live=live,
+        tangents_per_program=2,
+    )
+    want = _call(tree, which, order, coef, cent, *dense, ref=True)
+    assert got.shape == want.shape
+    assert np.linalg.norm(np.asarray(want)) > 0
+    assert _rel_max(got, want) < 1e-11, _rel_max(got, want)
 
 
 def _seam_for(tree, which, order):
