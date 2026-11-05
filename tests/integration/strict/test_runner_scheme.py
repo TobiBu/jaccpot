@@ -70,7 +70,13 @@ class _KDK:
         return state_open.at[:, 1].set(v + 0.5 * (acceleration + acceleration_new) * dt)
 
 
-def _run(segment, *, scheme=None, dt=DT, num_steps=6, **kw):
+#: one segment of all the steps: one scan program per runner (the segment edges are
+#: the runner's, not the scheme's, and test_production_runner.py pins them; the
+#: restart test below crosses one)
+STEPS = 4
+
+
+def _run(segment, *, scheme=None, dt=DT, num_steps=STEPS, **kw):
     state, masses = _system()
     params = kw.pop("external_params", None)
     runner = ProductionRunner(
@@ -101,9 +107,9 @@ def test_the_kdk_scheme_is_the_builtin_runner(form, monkeypatch):
     scan program of its own (the scheme's key is part of the compile key)."""
     kw: dict = {}
     if form == "static":
-        segment = _static(steps=2)
+        segment = _static(steps=STEPS)
     else:
-        segment = SegmentConfig(steps=2, diagnostics_every=0)
+        segment = SegmentConfig(steps=STEPS, diagnostics_every=0)
     if form == "halo":
         kw = dict(
             external_acceleration_fn=nfw_halo_params,
@@ -125,20 +131,19 @@ def test_the_kdk_scheme_is_the_builtin_runner(form, monkeypatch):
 
 def test_a_scheme_is_what_steps():
     """A scheme that halves dt in both of its halves is the built-in at dt / 2
-    (halving a binary float is exact, and so is every product after it)."""
-    _, want = _run(_static(steps=2), dt=DT / 2)
-    _, got = _run(_static(steps=2), scheme=_KDK(dt_factor=0.5))
+    (halving a binary float is exact, and so is every product after it): a scheme
+    the runner ignored would give the dt run's state instead."""
+    _, want = _run(_static(steps=STEPS), dt=DT / 2)
+    _, got = _run(_static(steps=STEPS), scheme=_KDK(dt_factor=0.5))
     assert _same(got.state, want.state)
-    _, full = _run(_static(steps=2))
-    assert not _same(got.state, full.state)
 
 
 def test_a_scheme_that_is_not_rowwise_keeps_the_input_order(monkeypatch):
     """The tree-order carry hands a scheme permuted rows: a scheme that reads
     other rows keeps the input order, and its run is the input-order run."""
-    _, want = _run(_static(steps=2))
+    _, want = _run(_static(steps=STEPS))
     monkeypatch.setenv("JACCPOT_STRICT_CARRY_ORDER", "tree")
-    runner, got = _run(_static(steps=2), scheme=_KDK(rowwise=False))
+    runner, got = _run(_static(steps=STEPS), scheme=_KDK(rowwise=False))
     assert all(k[-1] is False for k in _particle_runners(runner))
     assert _same(got.state, want.state)
 
@@ -148,19 +153,19 @@ def test_a_restart_records_the_scheme(tmp_path):
     built-in continues with a warning that names it."""
     path = tmp_path / "restart.npz"
     seg = _static(steps=2, restart_every=1, restart_path=str(path))
-    _, straight = _run(_static(steps=2), scheme=_KDK(), num_steps=6)
+    _, straight = _run(_static(steps=2), scheme=_KDK(), num_steps=4)
     _, first = _run(seg, scheme=_KDK(), num_steps=2)
     _, meta = load_restart(path)
     assert meta["scheme"] == scheme_record(_KDK())
     resumed = ProductionRunner(
         _solver(), settings=SETTINGS, segment=_static(steps=2), scheme=_KDK()
-    ).run(dt=DT, num_steps=6, restart_from=path)
+    ).run(dt=DT, num_steps=4, restart_from=path)
     assert resumed.restored["bitwise"], resumed.restored
     assert _same(resumed.state, straight.state)
     with pytest.warns(UserWarning, match="not bitwise"):
         other = ProductionRunner(
             _solver(), settings=SETTINGS, segment=_static(steps=2)
-        ).run(dt=DT, num_steps=4, restart_from=path)
+        ).run(dt=DT, num_steps=2, restart_from=path)
     assert other.restored["mismatches"] == ["scheme"]
     # and the built-in's own files carry no scheme entry
     plain = tmp_path / "plain.npz"
