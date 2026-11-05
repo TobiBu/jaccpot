@@ -63,6 +63,8 @@ from jaccpot._searchsorted import searchsorted_method
 __all__ = [
     "CROSS_NEEDS_FIELDS",
     "CrossCapacities",
+    "GRAD_SINK_FAR_FIELDS",
+    "GRAD_SINK_NEAR_FIELDS",
     "cross_near_acceleration",
     "cross_near_acceleration_direct",
     "cross_needs",
@@ -136,6 +138,37 @@ _NEEDS_LOWER_BOUND_BIT = {
 #: ``leaf_width``. The control exchanges write W-wide tiles instead
 #: (``positions``, ``masses``, ``mask``); :func:`_near_import_tiles` reads either.
 _FLAT_NEAR_FIELDS = ("particles", "row_start", "row_count", "leaf_width")
+
+#: What :func:`make_cross_hook`'s ``grad_sink`` holds after a trace of the default
+#: (symmetric) exchange, the frozen layout the reverse seams replay
+#: (:class:`jaccpot.distributed.grad.CrossGradPlan`). The far exchange: the local
+#: node behind every send row, its liveness, the per-peer send and receive row
+#: counts, the receive buffer and the M2L tuple read off it.
+GRAD_SINK_FAR_FIELDS = (
+    "send_node",
+    "alive",
+    "send_sizes",
+    "recv_sizes",
+    "recv",
+    "cross_far",
+    "far_hashes",
+)
+#: The near exchange: each sent particle's sorted row and liveness, the per-peer
+#: particle counts, the receive buffer, each received row's range in it and the
+#: cross near pairs (target leaf node, received row) with their count.
+GRAD_SINK_NEAR_FIELDS = (
+    "src",
+    "live_q",
+    "part_sizes",
+    "recv_p",
+    "recv_psizes",
+    "row_start",
+    "row_count",
+    "target_node",
+    "source_row",
+    "count",
+    "near_hashes",
+)
 
 _CROSS_MAC_GEOMETRY_ENV = "JACCPOT_CROSS_MAC_GEOMETRY"
 
@@ -1258,6 +1291,49 @@ def _leaf_under(cells: Array, node_ranges: Array, num_internal: int) -> Array:
     )
 
 
+def _peer_pair_hashes(
+    live: Array, mine: Array, peer: Array, theirs: Array, me: Array, S: int, ndev: int
+) -> Array:
+    """Order-free hashes of this device's cross pairs, one row per peer.
+
+    Each pair is keyed in the gathered ``[ndev x S]`` summary space by its two
+    ends, lower key first, so the device at the other end of every pair keys it
+    alike: on a symmetric exchange ``H[me, d] == H[d, me]`` for every ``d`` (the
+    gradient's symmetry verdict, :mod:`jaccpot.distributed.grad`). The sums are
+    :func:`~jaccpot.runtime._large_n_grad._pair_hash_sums`' (two seeded 64-bit
+    hashes, wrapping sums: exact in any order).
+
+    Parameters
+    ----------
+    live : Array
+        ``(P,)`` live pairs.
+    mine, peer, theirs : Array
+        ``(P,)`` my summary index, the peer device and its summary index
+        (:func:`_symmetric_pair_sides`).
+    me : Array
+        This device's index.
+    S : int
+        Summary block width.
+    ndev : int
+        Mesh size.
+
+    Returns
+    -------
+    Array
+        ``uint64[ndev, 2]``: per peer, the two hash sums of its pairs.
+    """
+    from jaccpot.runtime._large_n_grad import _pair_hash_sums
+
+    idx = jnp.int32
+    a = jnp.asarray(me).astype(idx) * S + jnp.asarray(mine).astype(idx)
+    b = jnp.asarray(peer).astype(idx) * S + jnp.asarray(theirs).astype(idx)
+    lo, hi = jnp.minimum(a, b), jnp.maximum(a, b)
+    peer = jnp.asarray(peer).astype(idx)
+    return jnp.stack(
+        [_pair_hash_sums(lo, hi, live & (peer == d))[:, 0] for d in range(int(ndev))]
+    )
+
+
 def _symmetric_exchange(
     gathered: Array,
     me: Array,
@@ -1274,6 +1350,7 @@ def _symmetric_exchange(
     with_near: bool,
     error_order: int = 0,
     node_mass: Optional[Array] = None,
+    grad_sink: Optional[dict] = None,
 ) -> dict:
     """The cross field with only multipoles and particles on the wire.
 
@@ -1323,6 +1400,12 @@ def _symmetric_exchange(
         ``[nodes]`` this device's node masses (its upward pass's mass moments);
         with ``error_order`` they travel with the multipoles, one more column of
         the far payload, for eq (16b)'s far half on the receiver.
+    grad_sink : Optional[dict]
+        The reverse-mode record (:func:`make_cross_hook`'s ``grad_sink``): given,
+        the frozen layout of both exchanges (:data:`GRAD_SINK_FAR_FIELDS`,
+        :data:`GRAD_SINK_NEAR_FIELDS`) and each peer's order-free pair hashes
+        (``pair_hashes``) are written into it, tracers of this trace. ``None``
+        (default): nothing is recorded and the program is unchanged.
 
     Returns
     -------
@@ -1418,6 +1501,17 @@ def _symmetric_exchange(
         out["cross_masses"] = recv[:, n_coeff + 3]
     out["exp_far"] = exp_f
     out["imp_far"] = imp_f
+    if grad_sink is not None:
+        grad_sink.update(
+            send_node=send_node,
+            alive=alive[:, 0],
+            send_sizes=exp_f.sizes,
+            recv_sizes=imp_f.sizes,
+            recv=recv,
+            cross_far=out["cross_far"],
+            n_coeff=n_coeff,
+            far_hashes=_peer_pair_hashes(fl, f_mine, f_peer, f_theirs, me, S, ndev),
+        )
     out["far_overflow"] = (
         res.far_overflow
         | res.near_overflow
@@ -1567,6 +1661,20 @@ def _symmetric_exchange(
             | near_mismatch
         ),
     )
+    if grad_sink is not None:
+        grad_sink.update(
+            src=src,
+            live_q=live_q,
+            part_sizes=part_sizes,
+            recv_p=recv_p,
+            recv_psizes=recv_psizes,
+            row_start=r_start,
+            row_count=r_count,
+            target_node=leaf,
+            source_row=row_n,
+            count=res.near_count,
+            near_hashes=_peer_pair_hashes(nl, n_mine, n_peer, n_theirs, me, S, ndev),
+        )
     return out
 
 
@@ -2527,6 +2635,52 @@ def _with_separation_floor(
     return floored_walk
 
 
+def _refuse_grad_sink(*, symmetric: bool, near_sink: Optional[dict]) -> None:
+    """Refuse a reverse-mode record off what its seams replay.
+
+    The reverse seams (:mod:`jaccpot.distributed.grad`) replay the default
+    exchange: the symmetric walk's identical pair sets at both ends, the flat near
+    import and the direct near layout. Anything else would give a gradient of a
+    different force.
+
+    Parameters
+    ----------
+    symmetric : bool
+        The hook runs the symmetric exchange.
+    near_sink : Optional[dict]
+        The hook's near sink.
+
+    Raises
+    ------
+    NotImplementedError
+        Off the symmetric exchange, without a near sink, or on the table near
+        layout.
+    """
+    from jaccpot.nearfield._fast_lane import _csr_near_layout
+
+    if not symmetric:
+        raise NotImplementedError(
+            "make_cross_hook(grad_sink=...): the multi-GPU gradient replays the "
+            "default SYMMETRIC exchange only. This configuration selects a control "
+            "(JACCPOT_CROSS_SYMMETRIC=0, JACCPOT_CROSS_TWO_SIDED=0 / two_sided=False, "
+            "JACCPOT_CROSS_NEAR_TILES=1, JACCPOT_CROSS_FAR_RECEIVER_WALK=1, "
+            "JACCPOT_CROSS_NEAR_RECEIVER_WALK=1, max_leaves_per_cell != 1, or a "
+            "near_theta / export_theta of its own)."
+        )
+    if near_sink is None:
+        raise NotImplementedError(
+            "make_cross_hook(grad_sink=...) needs the near sink: the cross near "
+            "term is part of the force the gradient differentiates"
+        )
+    if _csr_near_layout(leaf_ranges=()) != "direct":
+        raise NotImplementedError(
+            "make_cross_hook(grad_sink=...): the cross near term's reverse is the "
+            "direct layout's; JACCPOT_NEARFIELD_LAYOUT=table or "
+            "JACCPOT_NEARFIELD_ACCUM=wide selects the table kernel (wide "
+            "accumulation), which has none."
+        )
+
+
 def make_cross_hook(
     *,
     ndev: int,
@@ -2541,6 +2695,7 @@ def make_cross_hook(
     two_sided: Optional[bool] = None,
     separation_floor: float = 0.0,
     error_criterion: bool = False,
+    grad_sink: Optional[dict] = None,
 ) -> Callable[..., Optional[tuple]]:
     """Build the ``cross_hook`` for a mesh of ``ndev`` devices.
 
@@ -2608,6 +2763,17 @@ def make_cross_hook(
         (``FastMultipoleMethod``'s refresh does both, ``_call_cross_hook``).
         Symmetric exchange only (the default path). ``mac_type`` stays the
         geometric name (``theta`` is then unused by the walks). Static.
+    grad_sink:
+        Optional dict the hook writes the reverse-mode record into, in the same
+        trace (tracers, read inside it): the frozen layout of the far and near
+        exchanges (:data:`GRAD_SINK_FAR_FIELDS`, :data:`GRAD_SINK_NEAR_FIELDS`),
+        the verdict's inputs (``far_overflow``, ``near_overflow``; per-peer
+        order-free pair hashes ``far_hashes`` / ``near_hashes``) and the static
+        layout (``ndev``, ``axis_name``, ``caps``, ``n_local``, ``n_coeff``,
+        ``leaf_width``). :class:`jaccpot.distributed.grad.CrossGradPlan` is made
+        from it. ``None`` (default): nothing recorded, the program unchanged.
+        Given, the hook refuses every control exchange and the near layouts the
+        reverse seams do not read (see Raises). Needs ``near_sink``.
 
     Returns
     -------
@@ -2626,6 +2792,11 @@ def make_cross_hook(
         theta) or the ``aabb`` MAC geometry control: their walks re-test imported
         rows that carry no eq (16a) table, and the far half's f_b needs the
         expansion centres to be the walk centres.
+        And for ``grad_sink`` off the default exchange: any control
+        (``JACCPOT_CROSS_SYMMETRIC=0``, ``JACCPOT_CROSS_TWO_SIDED=0``, tiles on the
+        wire, a receiver walk, ``max_leaves_per_cell != 1``, a near or export theta
+        of its own), no ``near_sink``, or a cross near term on the table layout
+        (``JACCPOT_NEARFIELD_LAYOUT=table``, ``JACCPOT_NEARFIELD_ACCUM=wide``).
     """
     if str(mac_type) in ("dehnen_error", "dehnen_theta"):
         raise NotImplementedError(
@@ -2659,6 +2830,8 @@ def make_cross_hook(
             "max_leaves_per_cell != 1, or a near/export theta of its own), whose "
             "walks re-test imported rows that carry no eq (16a) table."
         )
+    if grad_sink is not None:
+        _refuse_grad_sink(symmetric=symmetric, near_sink=near_sink)
     if error_criterion and _cross_mac_geometry_mode() != "com":
         raise NotImplementedError(
             "make_cross_hook(error_criterion=True) needs the COM MAC geometry "
@@ -2685,6 +2858,8 @@ def make_cross_hook(
         # a RE-TRACE must not see the previous trace's tracers
         flag_sink.clear()
         needs_sink.clear()
+        if grad_sink is not None:
+            grad_sink.clear()
         if bool(error_criterion) != (criterion is not None):
             raise RuntimeError(
                 "the cross hook was built with error_criterion="
@@ -2772,6 +2947,7 @@ def make_cross_hook(
                 with_near=near_sink is not None,
                 error_order=order,
                 node_mass=None if criterion is None else upward.mass_moments.mass,
+                **({} if grad_sink is None else {"grad_sink": grad_sink}),
             )
             far_overflow = pub.overflow | sym["far_overflow"]
             flag_sink["far"] = far_overflow
@@ -2781,6 +2957,22 @@ def make_cross_hook(
                 near_sink["count"] = sym["count"]
                 near_sink["overflow"] = pub.overflow | sym["overflow"]
                 flag_sink["near"] = near_sink["overflow"]
+            if grad_sink is not None:
+                grad_sink.update(
+                    far_overflow=far_overflow,
+                    near_overflow=near_sink["overflow"],  # pyright: ignore
+                    ndev=int(ndev),
+                    axis_name=axis_name,
+                    caps=cap,
+                    n_local=n_local,
+                    leaf_width=int(cap.leaf_width),
+                    error_order=order,
+                    **(
+                        {}
+                        if criterion is None
+                        else {"cross_masses": sym["cross_masses"]}
+                    ),
+                )
             cells_needed, nodes_needed = _summary_needs(tree, cap, two_sided=True)
             needs = dict(
                 sym["needs"],

@@ -572,6 +572,7 @@ def _prepare_solidfmm_downward_sweep(
     use_pallas: bool = False,
     timing_recorder: Optional[Callable[[str, float], None]] = None,
     force_scale: Optional[FarForceScaleInputs] = None,
+    cross_reverse: Optional[Callable[..., Array]] = None,
 ) -> Union[TreeDownwardData, tuple[TreeDownwardData, Array]]:
     """Prepare M2L accumulation and the L2L cascade for the real locals.
 
@@ -644,6 +645,11 @@ def _prepare_solidfmm_downward_sweep(
         Only where :func:`_far_force_scale_in_downward_available` holds. With
         ``cross_multipoles`` its arrays cover ``[local ; imported]`` (the cross
         far pairs' sources are read there), the radii the local targets'.
+    cross_reverse : Optional[Callable[..., Array]]
+        The multi-GPU gradient's M2L seam on the merged cross-domain CSR
+        (:func:`~jaccpot.runtime.kernels._downward_prep._solidfmm_downward_accumulate_from_multipoles`);
+        with ``cross_multipoles`` on the CSR lanes kernel only. ``None``
+        (default): the production seam.
 
     Returns
     -------
@@ -656,8 +662,17 @@ def _prepare_solidfmm_downward_sweep(
     ValueError
         If a chunk-size option is not positive, or ``force_scale`` is passed
         where the sweep cannot compute it: off those kernels, or not covering the
-        imported nodes of a cross-domain list.
+        imported nodes of a cross-domain list. And ``cross_reverse`` without
+        cross-domain sources, with ``force_scale``, or where the M2L is not the
+        CSR lanes kernel on a target-sorted list.
     """
+    if cross_reverse is not None and (
+        cross_multipoles is None or force_scale is not None
+    ):
+        raise ValueError(
+            "cross_reverse (the multi-GPU M2L seam) needs the cross-domain sources "
+            "(cross_multipoles) and no far force scale"
+        )
     if force_scale is not None:
         local_nodes = int(jnp.asarray(upward.multipoles.centers).shape[0])
         if not _far_force_scale_in_downward_available(tree, total_nodes=local_nodes):
@@ -720,6 +735,11 @@ def _prepare_solidfmm_downward_sweep(
     dtype = downward_init.dtype
 
     if pair_count == 0:
+        if cross_reverse is not None:
+            raise ValueError(
+                "cross_reverse: the local far list has no capacity, so the sweep "
+                "would drop the cross-domain sources"
+            )
         empty_locals = LocalExpansionData(
             order=p,
             centers=centers,
@@ -868,6 +888,7 @@ def _prepare_solidfmm_downward_sweep(
                 m2l_impl=resolved_m2l_impl,
                 targets_sorted=targets_sorted,
                 symmetric_pairs=symmetric_pairs,
+                **({} if cross_reverse is None else {"cross_reverse": cross_reverse}),
             )
         locals_updated = _record_timed_array(
             "_refresh_timing_dual_m2l_compute_seconds",

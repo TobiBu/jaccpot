@@ -559,6 +559,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
     targets_sorted: bool = False,
     force_scale: Optional[FarForceScaleInputs] = None,
     symmetric_pairs: bool = False,
+    cross_reverse: Optional[Callable[..., Array]] = None,
 ) -> Union[Array, tuple[Array, Array]]:
     """Run one M2L accumulation pass over the flat pair list (real basis).
 
@@ -624,6 +625,16 @@ def _solidfmm_downward_accumulate_from_multipoles(
         With ``targets_sorted``: the list holds every directed pair both ways
         (:class:`_SymmetricTargetSortedFarPairCOO`), so the CSR lanes kernel's
         reverse sorts nothing. The forward is unchanged. Static.
+    cross_reverse : Optional[Callable[..., Array]]
+        The multi-GPU gradient's M2L seam (:mod:`jaccpot.distributed.grad`, seam
+        A): called in place of
+        :func:`~jaccpot.pallas.m2l_real_csr_lanes.m2l_real_csr_lanes_pallas_cvjp`
+        with its arguments, positionally, on the merged ``[local ; imported]``
+        CSR -- a forward that is that launch and a reverse that completes the
+        imported rows' cotangents across the mesh. Only on the CSR lanes kernel
+        with ``n_targets`` (cross-domain sources behind the local ones) and a
+        target-sorted list, and not in forward mode. ``None`` (default): the
+        production seam.
 
     Returns
     -------
@@ -634,12 +645,29 @@ def _solidfmm_downward_accumulate_from_multipoles(
     Raises
     ------
     ValueError
-        ``force_scale`` off the CSR lanes kernel.
+        ``force_scale`` off the CSR lanes kernel; ``cross_reverse`` off the CSR
+        lanes kernel, without ``n_targets``, on a list that is not target-sorted,
+        or with ``force_scale``: the cross source terms would silently leave the
+        gradient.
     """
 
     from jaccpot.runtime._forward_seams import jnp_stage
 
     csr_lane = _m2l_csr_pallas_active()
+    if cross_reverse is not None and (
+        not csr_lane
+        or n_targets is None
+        or not targets_sorted
+        or force_scale is not None
+    ):
+        raise ValueError(
+            "cross_reverse (the multi-GPU M2L seam) runs on the CSR M2L lanes "
+            "kernel with cross-domain sources (n_targets) on a target-sorted list "
+            f"only, without the far force scale; got csr_lane={csr_lane}, "
+            f"n_targets={n_targets}, targets_sorted={bool(targets_sorted)}, "
+            f"force_scale={force_scale is not None}. Anywhere else the cross "
+            "source terms would silently leave the gradient."
+        )
     if force_scale is not None and not csr_lane:
         raise ValueError(
             "the far force scale is summed in the CSR M2L lanes kernel only; "
@@ -697,6 +725,9 @@ def _solidfmm_downward_accumulate_from_multipoles(
             from jaccpot.runtime._forward_seams import m2l_real_csr_lanes_forward
 
             m2l_seam = m2l_real_csr_lanes_forward
+        elif cross_reverse is not None:
+            # the multi-GPU gradient's seam: the same launch forward
+            m2l_seam = cross_reverse
         m2l_inc = m2l_seam(
             multipoles_coeffs,
             centers,
