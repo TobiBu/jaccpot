@@ -129,6 +129,12 @@ tests/integration/test_real_basis_runtime.py::test_real_basis_far_field_converge
 tests/unit/core/test_time_derivatives.py::test_real_source_motion_with_the_far_field_matches_direct_sum
 tests/unit/operators/test_pallas_float64_sweep.py::test_l2l_lanes_float64_equal_the_level_loop[interpret-p6]
 tests/unit/operators/test_pallas_float64_sweep.py::test_m2m_lanes_float64_equal_the_level_loop[interpret-p6]
+tests/unit/operators/test_m2l_real_csr_lanes_jvp.py::test_jacfwd_through_a_custom_jvp_seam[False-11]
+tests/unit/operators/test_m2l_real_csr_lanes_jvp.py::test_jacfwd_through_a_custom_jvp_seam[True-11]
+tests/unit/operators/test_nearfield_direct_jvp.py::test_jacfwd_through_a_custom_jvp_seam[ferrers3-3]
+tests/unit/operators/test_nearfield_direct_jvp.py::test_jacfwd_through_a_custom_jvp_seam[plummer-3]
+tests/unit/operators/test_nearfield_direct_jvp.py::test_jacfwd_through_a_custom_jvp_seam[ferrers3-11]
+tests/unit/operators/test_nearfield_direct_jvp.py::test_jacfwd_through_a_custom_jvp_seam[plummer-11]
 tests/unit/runtime/test_fb_force_scale_estimator.py::test_a_tighter_prepass_angle_gets_the_eq_16a_scale_closer_to_the_truth
 tests/unit/runtime/test_fb_force_scale_estimator.py::test_a_tighter_prepass_angle_gives_a_tighter_estimate
 tests/unit/runtime/test_fb_force_scale_estimator.py::test_an_evaluation_does_not_overwrite_the_fb_cache
