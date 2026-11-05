@@ -225,10 +225,21 @@ cols = lin.apply({"positions": D}, directions_per_pass=2)   # D: [n_dirs, N, 3]
   estimated peak and the largest `k` that fits a card (`card_bytes`, default an
   A100-40 at 0.95). An estimate from one card and one configuration: measure with
   `bench/forward_mode_memory.py` before a production run.
-* **Compile time and the persistent compilation cache.** Forward-mode programs
-  compile for minutes (round 1, A100, 2e6 `jacfwd`: `K = 1` ~5 min, `K = 4` 23 min,
-  `K = 8` ~75 min); a smaller `directions_per_pass` also compiles the tangent
-  kernels at the smaller `K`. Set **`JACCPOT_COMPILATION_CACHE_DIR=<dir>`** (opt-in,
+* **Compile time, tangents per program, and the persistent compilation cache.**
+  Round 1's tangent kernels unrolled all `K` columns in one Triton program body, and
+  their compile grew superlinearly in `K` (A100, 2e6 `jacfwd`: `K = 1` ~5 min,
+  `K = 4` 23 min, `K = 8` ~75 min). Since round 2 every Pallas tangent kernel (P2M,
+  M2M, L2L, M2L, L2P, near field) has a grid axis over *tangent groups*: one program
+  carries `tpp` columns (`jaccpot.pallas._tangent_grid`), a partial last group is
+  masked, so any `K` runs without padding. Choose `tpp` per seam with
+  **`JACCPOT_TANGENT_TPP_<SEAM>`** (`SEAM` in `P2M M2M L2L M2L L2P NEAR`; values
+  1/2/4/8, default 2, clamped to the power of two at or above `K`; `tpp = K` is the
+  old fused body). A smaller `tpp` compiles faster and spills less but recomputes
+  the shared primal terms once per group. Compile of the 2e6 `jacfwd` at `K = 8`,
+  tpp 2 everywhere: ~7 min (418 s, contended A100; per kernel at tpp 1 / 2 / 8:
+  M2M 137 / 377 / 4243 s, L2L 37 / 131 / 1598 s, M2L 45 / 114 / 1565 s). The
+  run-time defaults come from the HoreKa sweep (`bench/forward_mode_timing.py`).
+  Set **`JACCPOT_COMPILATION_CACHE_DIR=<dir>`** (opt-in,
   off by default) and the `ProductionRunner`, `GradientPlan` and the forward-mode
   benches point JAX's persistent compilation cache there
   (`jaccpot.runtime.compile_cache.maybe_enable_compilation_cache`: once per

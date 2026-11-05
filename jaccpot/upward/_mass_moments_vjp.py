@@ -208,11 +208,13 @@ def _mass_moments_tangent_impl(
     node_ranges : Array
         ``[nodes, 2]`` inclusive particle ranges.
     t_positions : Array
-        ``[K, N, 3]`` position tangents.
+        ``[K, N, 3]`` position tangents (a ``(1, 1, 1)`` placeholder when dead).
     t_masses : Array
-        ``[K, N]`` mass tangents.
+        ``[K, N]`` mass tangents (a ``(1, 1)`` placeholder when dead).
     live : tuple[bool, ...]
-        Static: which of the two tangents are nonzero.
+        Static: which of the two tangents are nonzero. A dead one is never read
+        (the op is made with ``dead_placeholders=True``; at least one is live, an
+        all-dead op returns zeros without calling this).
 
     Returns
     -------
@@ -233,8 +235,9 @@ def _mass_moments_tangent_impl(
     live_x, live_m = bool(live[0]), bool(live[1])
     nodes = int(ranges.shape[0])
 
-    def one(tangent: tuple[Array, Array]) -> tuple[Array, Array]:
-        tx, tm = tangent
+    def one(tangent: tuple[Array, ...]) -> tuple[Array, Array]:
+        tx = tangent[0] if live_x else None
+        tm = tangent[-1] if live_m else None
         d_moment = jnp.zeros((nodes, 3), acc)
         d_mass = jnp.zeros((nodes,), acc)
         if live_x:
@@ -251,14 +254,19 @@ def _mass_moments_tangent_impl(
         d_com = jnp.where(empty[:, None], jnp.zeros((), acc), d_com)
         return d_mass.astype(masses.dtype), d_com.astype(positions.dtype)
 
-    return lax.map(one, (t_positions, t_masses))
+    mapped = tuple(t for t, on in ((t_positions, live_x), (t_masses, live_m)) if on)
+    return lax.map(one, mapped)
 
 
 #: The tangent op of :func:`_mass_moments_forward` (a ``jnp`` impl: the prefix sums
 #: are memory-bound scans, and ``lax.map`` keeps one direction's ``N``-sized float64
-#: rows alive at a time).
+#: rows alive at a time). Any ``K``; a dead tangent stays its placeholder.
 mass_moments_tangent = make_tangent_op(
-    "mass_moments", _mass_moments_tangent_impl, num_primals=3
+    "mass_moments",
+    _mass_moments_tangent_impl,
+    num_primals=3,
+    dead_placeholders=True,
+    any_k=True,
 )
 
 

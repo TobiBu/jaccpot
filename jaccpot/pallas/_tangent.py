@@ -46,9 +46,13 @@ Contract of a tangent op
   tuples), passed to the kernel implementation unchanged.
 * returns -- the tangent outputs, each with the leading ``K`` axis.
 
-The kernel implementation sees ``K`` only from :data:`TANGENT_K_BUCKETS` (padded
-with zero tangents, chunked above the largest), so each seam compiles at most four
-tangent kernels however many columns ``jacfwd`` asks for.
+By default the kernel implementation sees ``K`` only from :data:`TANGENT_K_BUCKETS`
+(padded with zero tangents, chunked above the largest), so each seam compiles at
+most four tangent kernels however many columns ``jacfwd`` asks for. An op made with
+``make_tangent_op(..., any_k=True)`` (the six Pallas tangent kernels since round 2:
+``K`` is a grid axis over tangent groups, :mod:`jaccpot.pallas._tangent_grid`) is
+called once at the operands' own ``K``: no padded ``concatenate`` copy at
+``K = 3, 5, 6, 7`` and no chunking above 8.
 
 Dead tangents (round 2)
 -----------------------
@@ -69,7 +73,8 @@ the implementation then sees depends on the op:
   zero of the chunk's ``K`` (``(Kb, *shape)``), built per chunk just before the
   call -- what the implementation saw before, so no kernel changes.
 
-If every tangent is dead the op returns zeros without a launch. A LIVE tangent
+If every tangent is dead the op returns zeros without a launch (the placeholders
+then keep the leading ``K``, so the zeros have the caller's tangent axis). A LIVE tangent
 the vmap did not batch (the same for every column) while another one is batched
 is broadcast to the columns, as before (correct; does not arise on the
 production rollout: COMMON round-2 track G STATUS); if NO live tangent is batched
@@ -217,10 +222,14 @@ class TangentOp:
         live = params.get("live")
         dead: list[Any] = [None] * len(tangents)
         if live is not None and len(tuple(live)) == len(tangents):
-            for i, (t, on) in enumerate(zip(tangents, tuple(live))):
-                if not bool(on) and jnp.ndim(t) >= 1:
+            flags = [not bool(on) and jnp.ndim(t) >= 1 for t, on in zip(tangents, live)]
+            # every tangent dead: the placeholders keep the caller's K (the only
+            # place it is still recorded), so the zero outputs get the right axis
+            keep_k = all(flags)
+            for i, (t, off) in enumerate(zip(tangents, flags)):
+                if off:
                     dead[i] = tuple(int(d) for d in jnp.shape(t)[1:])
-                    tangents[i] = _placeholder(t)
+                    tangents[i] = _placeholder(t, keep_k=keep_k)
         _check_tangent_axis(
             [t for t, d in zip(tangents, dead) if d is None] or tangents[:1],
             self.name,
@@ -230,24 +239,31 @@ class TangentOp:
         )
 
 
-def _placeholder(t: Array) -> Array:
+def _placeholder(t: Array, *, keep_k: bool = False) -> Array:
     """A dead tangent's stand-in: ``(1, 1, ...)`` zeros of its rank and dtype.
 
     Parameters
     ----------
     t : Array
         The dense tangent (leading axis ``K``).
+    keep_k : bool
+        Keep the leading axis ``K`` (``(K, 1, ...)``): every tangent of the op is
+        dead, and :func:`_tangent_k` reads ``K`` off the placeholders.
 
     Returns
     -------
     Array
-        ``zeros((1,) * t.ndim)``.
+        ``zeros((1,) * t.ndim)``, or ``zeros((K,) + (1,) * (t.ndim - 1))``.
     """
-    return jnp.zeros((1,) * jnp.ndim(t), jnp.result_type(t))
+    lead = int(jnp.shape(t)[0]) if keep_k else 1
+    return jnp.zeros((lead,) + (1,) * (jnp.ndim(t) - 1), jnp.result_type(t))
 
 
 def _tangent_k(tangents: Sequence[Array], dead: Sequence[Any]) -> int:
-    """``K`` of an op's tangents: the live operands' leading axis (1 if none).
+    """``K`` of an op's tangents: the live operands' leading axis.
+
+    With every operand dead, the placeholders' largest leading axis (they keep
+    ``K`` then: :meth:`TangentOp.__call__`).
 
     Parameters
     ----------
@@ -262,6 +278,8 @@ def _tangent_k(tangents: Sequence[Array], dead: Sequence[Any]) -> int:
         ``K``.
     """
     ks = [int(jnp.shape(t)[0]) for t, d in zip(tangents, dead) if d is None]
+    if not ks:
+        ks = [int(jnp.shape(t)[0]) for t in tangents if jnp.ndim(t) >= 1]
     return max(ks) if ks else 1
 
 
@@ -306,9 +324,10 @@ def _chunked(
     num_primals: int,
     *,
     dead_placeholders: bool = False,
+    any_k: bool = False,
     shapes: Callable[..., Sequence[Any]] | None = None,
 ) -> Callable[..., list[Array]]:
-    """Run ``impl`` over the tangent axis in bucket-sized chunks.
+    """Run ``impl`` over the tangent axis in bucket-sized chunks (or once, ``any_k``).
 
     Parameters
     ----------
@@ -319,6 +338,11 @@ def _chunked(
     dead_placeholders : bool
         Hand dead tangents to ``impl`` as their ``(1, ...)`` placeholders;
         ``False``: as dense zeros of the chunk's ``K`` (module docstring).
+    any_k : bool
+        ``impl`` takes any ``K`` (a tangent-group grid axis masks the partial last
+        group, :mod:`jaccpot.pallas._tangent_grid`): one call at the operands'
+        ``K``, no bucket padding (``concatenate``) and no chunks of
+        :data:`MAX_TANGENT_K`.
     shapes : Callable[..., Sequence[Any]] | None
         ``shapes(*dense operand specs, **params)``: the output shapes, for an op
         whose tangents are ALL dead (zeros, no launch); ``None``: ``eval_shape``
@@ -347,6 +371,11 @@ def _chunked(
             else:
                 outs = jax.eval_shape(functools.partial(impl, **params), *specs)
             return [jnp.zeros(o.shape, o.dtype) for o in outs]
+        if any_k:
+            whole = (
+                tangents if dead_placeholders else _expand_dead(tangents, dead, k_total)
+            )
+            return list(impl(*primals, *whole, **params))
         pieces: list[list[Array]] = []
         for start in range(0, k_total, MAX_TANGENT_K):
             k = min(MAX_TANGENT_K, k_total - start)
@@ -379,6 +408,7 @@ def make_tangent_op(
     num_primals: int,
     abstract_eval: Callable[..., Sequence[jax.ShapeDtypeStruct]] | None = None,
     dead_placeholders: bool = False,
+    any_k: bool = False,
 ) -> TangentOp:
     """Register a tangent op whose lowering is ``impl``.
 
@@ -402,6 +432,10 @@ def make_tangent_op(
         ``impl`` accepts a dead tangent as its ``(1, ...)`` placeholder (takes
         ``K`` from the live tangents, never reads a dead one); ``False``: it gets
         dense zeros of the chunk's ``K`` (module docstring, "Dead tangents").
+    any_k : bool
+        ``impl`` takes any ``K >= 1`` and is called once at the operands' ``K``
+        (no bucket padding, no chunks); ``False``: only bucket ``K``-s
+        (:data:`TANGENT_K_BUCKETS`), chunked above :data:`MAX_TANGENT_K`.
 
     Returns
     -------
@@ -414,6 +448,7 @@ def make_tangent_op(
         impl,
         num_primals,
         dead_placeholders=dead_placeholders,
+        any_k=any_k,
         shapes=abstract_eval,
     )
 

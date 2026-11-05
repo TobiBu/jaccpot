@@ -111,23 +111,18 @@ def tangent_k(*tangents: Any) -> int:
 def tangent_op_options() -> dict:
     """``make_tangent_op`` keywords of the six Pallas tangent ops.
 
-    ``dead_placeholders=True`` where :func:`~jaccpot.pallas._tangent.make_tangent_op`
-    takes it (track G's round 2): the implementations take ``K`` from
-    :func:`tangent_k` and never read a dead tangent, so a dead one may stay its
-    ``(1, ...)`` placeholder. Empty where the keyword does not exist.
+    ``dead_placeholders=True``: the implementations take ``K`` from
+    :func:`tangent_k` and never read a dead tangent, so a dead one stays its
+    ``(1, ...)`` placeholder. ``any_k=True``: the tangent-group grid axis masks a
+    partial last group, so the op is called once at the operands' ``K`` (no bucket
+    padding, no chunks of 8).
 
     Returns
     -------
     dict
         Keyword arguments.
     """
-    import inspect
-
-    from jaccpot.pallas._tangent import make_tangent_op
-
-    if "dead_placeholders" in inspect.signature(make_tangent_op).parameters:
-        return {"dead_placeholders": True}
-    return {}
+    return {"dead_placeholders": True, "any_k": True}
 
 
 #: Lanes per program of :func:`late_zeros`.

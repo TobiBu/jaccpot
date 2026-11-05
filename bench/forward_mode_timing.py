@@ -36,7 +36,10 @@ is jitted and timed with ``--tpp-k`` tangents (the recorded one tiled) for each
 tangents-per-program in {1, 2, 4, 8} (``JACCPOT_TANGENT_TPP_<SEAM>``, read at
 trace time; track K's ``jaccpot.pallas._tangent_grid``). Without that knob the
 sweep is skipped (``"skipped"`` in the JSON) and ``tpp`` is recorded as the
-installed fused body.
+installed fused body. The M2M / L2L cells time the seams' 7-primal tangent ops,
+which rerun the primal cascade before the tangent one (the production rule calls
+the ``_out`` siblings with the forward's table instead): the same offset in every
+tpp cell, so the ranking holds; the absolute time is not the rollout's.
 
 ``JACCPOT_COMPILATION_CACHE_DIR`` (opt-in) is applied before anything compiles:
 with a warm cache ``compile_s`` measures a cache load, not a compile -- the row
