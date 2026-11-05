@@ -12,7 +12,8 @@ segments of 10 steps at dt 1e-3 with the energy at every edge:
   noise (the no-split control's, the FMM and fp32 floor) and the momentum is
   conserved to the FMM's accuracy (the coupling's pair forces are equal and
   opposite), under ``dehnen`` and ``dehnen_error``;
-* a restart mid-run and a chained run equal the run in one go, bitwise;
+* a restart mid-run (written by the run itself) and a chained run equal the run in
+  one go, bitwise;
 * the result and the callbacks see the caller's row order;
 * with escapers on and nobody escaping, the run IS the run without them (the
   default programs), bitwise.
@@ -108,8 +109,15 @@ def _scan_keys(runner) -> set:
     return {k for k in cache if k and k[0] == "strict_velocity_verlet_particles"}
 
 
-@pytest.fixture(scope="module", params=["dehnen", "dehnen_error"])
-def run(request):
+#: one worker per MAC (``--dist loadgroup``): the module fixture runs once each
+_MACS = [
+    pytest.param(mac, marks=pytest.mark.xdist_group(f"escapers_{mac}"))
+    for mac in ("dehnen", "dehnen_error")
+]
+
+
+@pytest.fixture(scope="module", params=_MACS)
+def run(request, tmp_path_factory):
     mac = request.param
     state, masses = _system()
     seen: list = []
@@ -119,17 +127,19 @@ def run(request):
             (np.asarray(edge.state).copy(), np.asarray(edge.masses).copy(), edge.step)
         )
 
-    runner = _runner(mac)
+    # the run writes its mid-run restart (segment 3) for the restart test
+    path = str(tmp_path_factory.mktemp(f"esc_{mac}") / "restart.npz")
+    runner = _runner(mac, restart_every=SEGMENTS // 2, restart_path=path)
     runner.callbacks = (look,)
     res = runner.run(state, masses, dt=DT, num_steps=STEPS * SEGMENTS)
     control = _runner(mac, escapers=None).run(
         state, masses, dt=DT, num_steps=STEPS * SEGMENTS
     )
-    return mac, state, masses, runner, res, control, seen
+    return mac, state, masses, runner, res, control, seen, path
 
 
 def test_the_split_changes_and_compiles_one_scan(run):
-    _, _, _, runner, res, _, _ = run
+    _, _, _, runner, res, _, _, _ = run
     rows = [e.diagnostics for e in res.edges]
     counts = [r["n_escapers"] for r in rows]
     moved = [r["escaper_transfers"] for r in rows]
@@ -146,7 +156,7 @@ def test_the_split_changes_and_compiles_one_scan(run):
 
 
 def test_the_ledger_conserves_the_energy_and_the_momentum(run):
-    _, state, masses, _, res, control, _ = run
+    _, state, masses, _, res, control, _, _ = run
     rows = [e.diagnostics for e in res.edges if e.diagnostics.get("energy")]
     e0 = res.baselines["energy"]
     worst = max(abs(r["energy_ledgered_drift"]) for r in rows)
@@ -166,7 +176,7 @@ def test_the_ledger_conserves_the_energy_and_the_momentum(run):
 
 
 def test_the_caller_sees_its_own_rows(run):
-    _, state, masses, _, res, _, seen = run
+    _, state, masses, _, res, _, seen, _ = run
     assert np.array_equal(np.asarray(res.masses), np.asarray(masses))
     r = np.linalg.norm(np.asarray(res.state)[:, 0], axis=1)
     assert np.all(r[N : N + K] > R_ESCAPE) and np.all(r[:N] < R_ESCAPE)
@@ -176,14 +186,10 @@ def test_the_caller_sees_its_own_rows(run):
     assert np.array_equal(seen[-1][0], np.asarray(res.state))
 
 
-def test_restart_and_chained_equal_one_go(run, tmp_path):
-    mac, state, masses, _, res, _, _ = run
-    path = str(tmp_path / "esc_restart.npz")
+def test_restart_and_chained_equal_one_go(run):
+    mac, state, masses, _, res, _, _, path = run
     half = STEPS * SEGMENTS // 2
-    first = _runner(mac, restart_every=SEGMENTS // 2, restart_path=path).run(
-        state, masses, dt=DT, num_steps=STEPS * SEGMENTS
-    )
-    assert np.array_equal(np.asarray(first.state), np.asarray(res.state))
+    assert res.restarts == [path]
     resumed = _runner(mac).run(dt=DT, num_steps=STEPS * SEGMENTS, restart_from=path)
     assert resumed.restored["bitwise"], resumed.restored
     assert np.array_equal(np.asarray(resumed.state), np.asarray(res.state))
@@ -195,12 +201,15 @@ def test_restart_and_chained_equal_one_go(run, tmp_path):
     assert chained.escapers["n_bound"] == res.escapers["n_bound"]
 
 
+@pytest.mark.xdist_group("escapers_dehnen")
 def test_nobody_escaping_is_the_run_without_escapers():
     state, masses = _system(fliers=False)
     on = _runner("dehnen", escapers=EscaperPolicy(100.0)).run(
         state, masses, dt=DT, num_steps=2 * STEPS
     )
-    off = _runner("dehnen", escapers=None).run(state, masses, dt=DT, num_steps=2 * STEPS)
+    off = _runner("dehnen", escapers=None).run(
+        state, masses, dt=DT, num_steps=2 * STEPS
+    )
     assert on.escapers["order"] is None and on.escapers["n_bound"] == N
     assert np.array_equal(np.asarray(on.state), np.asarray(off.state))
     for a, b in zip(on.edges, off.edges):

@@ -166,9 +166,16 @@ jobs:
           - shard: integration-strict-lane
             typecheck: "0"
             timeout: 25
-          # The energy re-plan (#488) and the escaper prototype (A2), out of
+          # The energy re-plan (#488, A2), out of
           # `integration-strict` from the start (no room under its cap).
           - shard: integration-strict-a2
+            typecheck: "0"
+            timeout: 25
+          # The escaper path in ProductionRunner (wave 3, ESC): runs with an
+          # escaper split under both MACs, controls, a restart and a chained run;
+          # out of `integration-strict-a2`, which it pushed past its cap (27.9 min
+          # together at `-n 2` on a loaded host).
+          - shard: integration-strict-esc
             typecheck: "0"
             timeout: 25
           # The runner's integration-scheme seam (multi-node plan I1, 2026-11-05): the

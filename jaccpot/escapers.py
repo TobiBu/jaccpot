@@ -315,7 +315,9 @@ def coupling(positions: Any, masses: Any, n_b: Any, G: Any) -> tuple:
     d = positions - x_b.astype(dtype)[None, :]
     r2 = jnp.sum(d * d, axis=1)
     # tree rows: no 1/r (a row at X_b would be inf, and inf * 0 is nan)
-    inv_r = jnp.where(live, jnp.zeros((), dtype), 1.0 / jnp.sqrt(jnp.where(live, 1, r2)))
+    inv_r = jnp.where(
+        live, jnp.zeros((), dtype), 1.0 / jnp.sqrt(jnp.where(live, 1, r2))
+    )
     inv_r3 = inv_r * inv_r * inv_r
     g = jnp.asarray(G, dtype)
     a_e = (-g * m_b.astype(dtype)) * d * inv_r3[:, None]
@@ -324,9 +326,7 @@ def coupling(positions: Any, masses: Any, n_b: Any, G: Any) -> tuple:
         (m_e * inv_r3)[:, None] * d, axis=0, dtype=wide
     )
     acc = jnp.where(live[:, None], a_u.astype(dtype)[None, :], a_e)
-    scale = jnp.where(
-        live, jnp.zeros((), dtype), jnp.sqrt(jnp.sum(a_e * a_e, axis=1))
-    )
+    scale = jnp.where(live, jnp.zeros((), dtype), jnp.sqrt(jnp.sum(a_e * a_e, axis=1)))
     return acc, scale, live
 
 
@@ -362,8 +362,7 @@ def coupling_energy(state: Any, masses: Any, n_b: Any, G: Any) -> dict:
     m_e = jnp.where(live, 0.0, m)
     return {
         "couple": -jnp.asarray(G, wide) * m_b * jnp.sum(m_e / r),
-        "kinetic_escapers": 0.5
-        * jnp.sum(m_e * jnp.sum(vel.astype(wide) ** 2, axis=1)),
+        "kinetic_escapers": 0.5 * jnp.sum(m_e * jnp.sum(vel.astype(wide) ** 2, axis=1)),
         "mass_bound": m_b,
         "mass_escapers": jnp.sum(m_e),
     }

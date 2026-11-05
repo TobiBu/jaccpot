@@ -103,11 +103,14 @@ def main() -> None:
     seg = [e.wall_s for e in res.edges[1:]]
     row["segment_wall_s"] = seg
     row["step_s"] = statistics.median(seg[1:]) / a.steps if len(seg) > 1 else None
-    row["edge_s"] = (
-        (row["wall_s"] - sum(seg)) / max(1, len(seg)) if seg else None
-    )
+    row["edge_s"] = (row["wall_s"] - sum(seg)) / max(1, len(seg)) if seg else None
     row["edges"] = [
-        {"step": e.step, "retries": e.retries, "wall_s": e.wall_s, "diag": e.diagnostics}
+        {
+            "step": e.step,
+            "retries": e.retries,
+            "wall_s": e.wall_s,
+            "diag": e.diagnostics,
+        }
         for e in res.edges
     ]
     row["escapers"] = (

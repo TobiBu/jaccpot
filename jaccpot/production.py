@@ -1530,7 +1530,9 @@ def _split_energy_body(
         if field is None:
             w_ext = jnp.zeros((), jnp.float64)
         else:
-            ext = field(state_in) if external_in is None else field(state_in, external_in)
+            ext = (
+                field(state_in) if external_in is None else field(state_in, external_in)
+            )
             w_ext = jnp.sum(m * jnp.asarray(ext).astype(jnp.float64))
         extra = coupling_energy(state_in, masses_in, live_in, g)
         return (
@@ -2065,9 +2067,7 @@ class ProductionRunner:
                     **({} if start_live is None else {"live_rows": start_live}),
                 )
                 if start["ok"]:
-                    w0 = (
-                        start["self"] + start["external"] + start.get("couple", 0.0)
-                    )
+                    w0 = start["self"] + start["external"] + start.get("couple", 0.0)
                     baselines["potential"] = w0
                     baselines["energy"] = float(baselines["kinetic"]) + w0
                 else:
@@ -2778,9 +2778,7 @@ class ProductionRunner:
                 del replanned
                 replans += 1
                 compiled = (
-                    jax.jit(
-                        self._energy_body(current, force_key, split=len(args) > 4)
-                    )
+                    jax.jit(self._energy_body(current, force_key, split=len(args) > 4))
                     .lower(*args)
                     .compile()
                 )
@@ -2835,9 +2833,7 @@ class ProductionRunner:
             return topology.needs(), topology.overflow_bits()
 
         if len(args) > 4:
-            needs, bits = jax.device_get(
-                jax.jit(needs_of_split)(*args[:3], args[4])
-            )
+            needs, bits = jax.device_get(jax.jit(needs_of_split)(*args[:3], args[4]))
         else:
             needs, bits = jax.device_get(jax.jit(needs_of)(*args[:3]))
         return np.asarray(needs).astype(np.int64), int(bits)
