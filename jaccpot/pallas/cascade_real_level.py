@@ -1143,6 +1143,40 @@ l2l_real_levels_fb_pallas_cvjp.defvjp(_l2l_fb_cvjp_fwd, _l2l_fb_cvjp_bwd)
 # derivative (``operators/_transverse_degeneracy_jvp.py``).
 
 
+def _dense_coefficient_tangent(
+    t_coef: Array, t_centers: Array, live: tuple[bool, ...], table: Array
+) -> Array:
+    """The coefficient tangent as the ``[K, nodes, C]`` table the cascade updates.
+
+    A dead one may arrive as its ``(1, ...)`` placeholder
+    (``dead_placeholders``): the cascade still writes every level's geometry terms
+    into it, so it becomes zeros of ``K`` (the largest leading tangent axis).
+
+    Parameters
+    ----------
+    t_coef : Array
+        ``[K, nodes, C]`` (or a ``(1, ...)`` placeholder when dead).
+    t_centers : Array
+        ``[K, nodes, 3]`` (or a placeholder when dead).
+    live : tuple[bool, ...]
+        Liveness of ``(t_coef, t_centers)``.
+    table : Array
+        The primal table (shape and dtype).
+
+    Returns
+    -------
+    Array
+        ``[K, nodes, C]``.
+    """
+    from jaccpot.pallas._tangent_grid import tangent_k
+
+    del live  # a dense dead tangent is zero already
+    k = tangent_k(t_coef, t_centers)
+    if int(t_coef.shape[0]) == k:
+        return t_coef
+    return jnp.zeros((k,) + tuple(jnp.shape(table)), jnp.asarray(table).dtype)
+
+
 def _m2m_tangent_out_impl(
     packed: Array,
     centers: Array,
@@ -1216,8 +1250,9 @@ def _m2m_tangent_out_impl(
     from jaccpot.pallas.cascade_real_lanes import m2m_real_levels_lanes_tangent_pallas
 
     del packed, parent, num_warps
+    t_packed = _dense_coefficient_tangent(t_packed, t_centers, live, out_packed)
     if not (bool(live[0]) or bool(live[1])):
-        return [jnp.zeros(t_packed.shape, jnp.asarray(out_packed).dtype)]
+        return [t_packed]
     k = _cascade_lanes_k()
     return [
         m2m_real_levels_lanes_tangent_pallas(
@@ -1313,8 +1348,11 @@ def _l2l_tangent_out_impl(
     from jaccpot.pallas.cascade_real_lanes import l2l_real_levels_lanes_tangent_pallas
 
     del coeffs_local, left_child, right_child, num_warps
+    t_coeffs_local = _dense_coefficient_tangent(
+        t_coeffs_local, t_centers, live, out_locals
+    )
     if not (bool(live[0]) or bool(live[1])):
-        return [jnp.zeros(t_coeffs_local.shape, jnp.asarray(out_locals).dtype)]
+        return [t_coeffs_local]
     k = _cascade_lanes_k()
     return [
         l2l_real_levels_lanes_tangent_pallas(
@@ -1510,7 +1548,8 @@ def _cascade_tangent_shapes(*specs: Any, **params: Any) -> list[jax.ShapeDtypeSt
         ``[K, nodes, C]`` in the coefficients' dtype.
     """
     del params
-    return [jax.ShapeDtypeStruct(tuple(specs[-2].shape), specs[0].dtype)]
+    k = max(int(specs[-2].shape[0]), int(specs[-1].shape[0]))
+    return [jax.ShapeDtypeStruct((k,) + tuple(specs[-2].shape[1:]), specs[0].dtype)]
 
 
 def _make_cascade_tangent_op(which: str, *, from_output: bool) -> Any:
@@ -1520,11 +1559,14 @@ def _make_cascade_tangent_op(which: str, *, from_output: bool) -> Any:
         impl = _m2m_tangent_out_impl if which == "m2m" else _l2l_tangent_out_impl
     else:
         impl = _m2m_tangent_impl if which == "m2m" else _l2l_tangent_impl
+    from jaccpot.pallas._tangent_grid import tangent_op_options
+
     return make_tangent_op(
         f"{which}_real_levels" + ("_out" if from_output else ""),
         impl,
         num_primals=8 if from_output else 7,
         abstract_eval=_cascade_tangent_shapes,
+        **tangent_op_options(),
     )
 
 

@@ -249,6 +249,35 @@ def test_native_tangents_per_program_grid(tree, tpp, k, dtype):
     assert err_one < (1e-14 if dtype == jnp.float64 else 1e-6), err_one
 
 
+@pytest.mark.parametrize("live", [(True, False, True), (False, True, False)])
+def test_dead_placeholders_are_never_read(tree, live):
+    """A dead tangent bound as its ``(1, ...)`` placeholder (track G's
+    ``dead_placeholders``; NaN here, so a read would show): ``K`` comes from the
+    live tangents and the result equals the dense-zero call's reference."""
+    order = 3
+    args = tree.args(jnp.float64)
+    dense = tuple(
+        t if on else jnp.zeros_like(t) for t, on in zip(_tangents(args, 3, 5), live)
+    )
+    sparse = tuple(
+        t if on else jnp.full((1,) * t.ndim, jnp.nan) for t, on in zip(dense, live)
+    )
+    (got,) = _p2m_tangent_impl(
+        *args,
+        *sparse,
+        **tree.static(order),
+        leaf_width=tree.leaf,
+        interpret=True,
+        backend="triton",
+        num_warps=None,
+        live=live,
+        tangents_per_program=2,
+    )
+    (want,) = _ref(tree, args, dense, order)
+    assert got.shape == want.shape
+    assert _rel_max(got, want) < 1e-12
+
+
 def test_twin_tangent_equals_the_jvp_of_the_production_reference(tree):
     """``_p2m_leaves_real`` (the batched XLA P2M) is an independent second anchor."""
     order = 4

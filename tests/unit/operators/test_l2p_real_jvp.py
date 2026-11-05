@@ -262,6 +262,36 @@ def _tpp_grid(tpp, k, *, interpret=True):
     return _rel_max(got, want), _rel_max(got, _TPP_ONE[key])
 
 
+@pytest.mark.parametrize(
+    "live", [(True, False, True), (False, True, False), (True, False, False)]
+)
+def test_dead_placeholders_are_never_read(live):
+    """A dead tangent bound as its ``(1, ...)`` placeholder (NaN, so a read would
+    show): ``K`` comes from the live tangents; per-operand liveness of the centre
+    and position tangents."""
+    args = _case(0, jnp.float64)
+    dense = tuple(
+        t if on else jnp.zeros_like(t) for t, on in zip(_tangents(args, 3, 6), live)
+    )
+    sparse = tuple(
+        t if on else jnp.full((1,) * t.ndim, jnp.nan) for t, on in zip(dense, live)
+    )
+    (got,) = _l2p_tangent_impl(
+        *args,
+        *sparse,
+        order=_ORDER,
+        block=32,
+        interpret=True,
+        backend="triton",
+        num_warps=4,
+        live=live,
+        tangents_per_program=2,
+    )
+    (want,) = _ref(args, dense)
+    assert got.shape == want.shape
+    assert _rel_max(got, want) < 1e-12
+
+
 def _seam_for(args):
     leaf_nodes, leaf_start, leaf_count = args[3:]
 

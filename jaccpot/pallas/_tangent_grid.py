@@ -26,7 +26,7 @@ work; the production defaults come from the HoreKa sweep.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 #: The tangents-per-program values a tangent kernel is compiled for.
 TANGENT_TPP_CHOICES: tuple[int, ...] = (1, 2, 4, 8)
@@ -88,6 +88,125 @@ def tangents_per_program(seam: str, k: int, override: Optional[int] = None) -> i
     return min(value, _next_pow2(k))
 
 
+def tangent_k(*tangents: Any) -> int:
+    """``K`` of a launch: the largest leading axis of its tangent operands.
+
+    A dead tangent may arrive as a ``(1, ...)`` placeholder
+    (``make_tangent_op(..., dead_placeholders=True)``), so ``K`` is never read off
+    one fixed operand.
+
+    Parameters
+    ----------
+    *tangents : Any
+        The tangent operands (arrays or shape/dtype structs).
+
+    Returns
+    -------
+    int
+        ``max_i tangents[i].shape[0]``.
+    """
+    return max(int(t.shape[0]) for t in tangents)
+
+
+def tangent_op_options() -> dict:
+    """``make_tangent_op`` keywords of the six Pallas tangent ops.
+
+    ``dead_placeholders=True`` where :func:`~jaccpot.pallas._tangent.make_tangent_op`
+    takes it (track G's round 2): the implementations take ``K`` from
+    :func:`tangent_k` and never read a dead tangent, so a dead one may stay its
+    ``(1, ...)`` placeholder. Empty where the keyword does not exist.
+
+    Returns
+    -------
+    dict
+        Keyword arguments.
+    """
+    import inspect
+
+    from jaccpot.pallas._tangent import make_tangent_op
+
+    if "dead_placeholders" in inspect.signature(make_tangent_op).parameters:
+        return {"dead_placeholders": True}
+    return {}
+
+
+#: Lanes per program of :func:`late_zeros`.
+_ZEROS_BLOCK = 1024
+
+
+def late_zeros(
+    shape: tuple[int, ...],
+    dtype: Any,
+    dep: Any,
+    *,
+    interpret: bool,
+    backend: str = "triton",
+) -> Any:
+    """A zero table for a tangent kernel to update in place, made AFTER ``dep``.
+
+    ``jnp.zeros`` is an operand-free broadcast: XLA hoists it and merges the
+    same-shaped zero tables of every force evaluation in a program (the two forces
+    of a KDK step) into ONE multi-output fusion at the program's start, so every
+    such table is live from the start (2e6 ``jacfwd``, ``K = 8``: two
+    ``f32[8, nodes, 49]`` P2M tables and four ``f32[8, N, 3]`` L2P / near tables,
+    measured 2026-11-05). This is a Pallas fill whose operand is a one-element
+    slice of ``dep`` (an input of the consuming call): it can neither run before
+    ``dep`` exists nor be merged with another evaluation's fill.
+
+    Parameters
+    ----------
+    shape : tuple[int, ...]
+        The table's shape.
+    dtype : Any
+        Its dtype.
+    dep : Any
+        An array the consumer reads (e.g. its first primal).
+    interpret : bool
+        Pallas interpret mode.
+    backend : str
+        Pallas GPU lowering.
+
+    Returns
+    -------
+    Any
+        Zeros of ``shape`` and ``dtype``.
+    """
+    import math
+
+    import jax
+    import jax.numpy as jnp
+    from jax import lax
+    from jax.experimental import pallas as pl
+    from jax.experimental.pallas import triton as plgpu
+
+    from jaccpot.pallas._compat import pallas_backend_kwargs
+
+    size = int(math.prod(shape))
+    if size == 0:
+        return jnp.zeros(shape, dtype)
+    wide = size >= 2**31 - _ZEROS_BLOCK
+    idx_dtype = jnp.int64 if wide else jnp.int32
+
+    def kernel(dep_ref: Any, out_ref: Any) -> None:
+        del dep_ref
+        base = pl.program_id(0).astype(idx_dtype) * _ZEROS_BLOCK
+        idx = base + lax.broadcasted_iota(idx_dtype, (_ZEROS_BLOCK,), 0)
+        plgpu.store(out_ref.at[idx], jnp.zeros((_ZEROS_BLOCK,), dtype), mask=idx < size)
+
+    token = jnp.reshape(jnp.asarray(dep), (-1,))[:1]
+    out = pl.pallas_call(
+        kernel,
+        grid=(-(-size // _ZEROS_BLOCK),),
+        in_specs=[pl.BlockSpec((1,), lambda i: (0,))],
+        out_specs=pl.BlockSpec((size,), lambda i: (0,)),
+        out_shape=jax.ShapeDtypeStruct((size,), dtype),
+        interpret=bool(interpret),
+        name="tangent_late_zeros",
+        **pallas_backend_kwargs(backend, interpret),
+    )(token)
+    return jnp.reshape(out, shape)
+
+
 def tangent_groups(k: int, tpp: int) -> int:
     """Programs along the tangent-group grid axis: ``ceil(k / tpp)``.
 
@@ -110,6 +229,9 @@ __all__ = [
     "TANGENT_SEAMS",
     "TANGENT_TPP_CHOICES",
     "TANGENT_TPP_DEFAULT",
+    "late_zeros",
     "tangent_groups",
+    "tangent_k",
+    "tangent_op_options",
     "tangents_per_program",
 ]

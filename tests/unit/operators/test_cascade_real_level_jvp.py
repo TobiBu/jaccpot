@@ -442,6 +442,43 @@ def test_the_output_reading_op_equals_the_reference(plummer_tree, which):
         assert _rel_max(got, want) < 1e-11, _rel_max(got, want)
 
 
+@pytest.mark.parametrize("live", [(True, False), (False, True)])
+@pytest.mark.parametrize("which", ["m2m", "l2l"])
+def test_dead_placeholders_are_never_read(plummer_tree, which, live):
+    """A dead tangent bound as its ``(1, ...)`` placeholder (NaN, so a read would
+    show): ``K`` comes from the live one; a dead coefficient tangent becomes the
+    zero table the levels' centre terms are written into."""
+    order = 2
+    tree = plummer_tree
+    coef, cent, t_coef, t_cent = _inputs(tree, which, order, jnp.float64, 3, 11)
+    dense = (
+        t_coef if live[0] else jnp.zeros_like(t_coef),
+        t_cent if live[1] else jnp.zeros_like(t_cent),
+    )
+    sparse = tuple(
+        t if on else jnp.full((1,) * t.ndim, jnp.nan) for t, on in zip(dense, live)
+    )
+    impl = _m2m_tangent_impl if which == "m2m" else _l2l_tangent_impl
+    topo = tree.m2m_topo() if which == "m2m" else tree.l2l_topo()
+    static = tree.m2m_static(order) if which == "m2m" else tree.l2l_static(order)
+    (got,) = impl(
+        coef,
+        cent,
+        *topo,
+        *sparse,
+        **static,
+        interpret=True,
+        backend="triton",
+        num_warps=4,
+        live=live,
+        tangents_per_program=2,
+    )
+    want = _call(tree, which, order, coef, cent, *dense, ref=True)
+    assert got.shape == want.shape
+    assert np.linalg.norm(np.asarray(want)) > 0
+    assert _rel_max(got, want) < 1e-11, _rel_max(got, want)
+
+
 def _seam_for(tree, which, order):
     op = _OPS[which][0]
     topo = tree.m2m_topo() if which == "m2m" else tree.l2l_topo()

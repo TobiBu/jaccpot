@@ -1189,12 +1189,11 @@ def _nearfield_direct_tan_kernel(
         soft = softening_ref[0]
         soft_params = (soft, softening_ref[1])
         s_lane = lax.broadcasted_iota(jnp.int32, (bs,), 0)
-        last_row = tpos_ref.shape[1] - 1
         # the targets' position tangents, once per program (rows past N clamped:
-        # those lanes are masked targets)
-        trow = jnp.minimum(tstart + lane_idx, last_row)
+        # those lanes are masked targets); a dead tangent is never read
         ttx: list = []
         if live_pos:
+            trow = jnp.minimum(tstart + lane_idx, tpos_ref.shape[1] - 1)
             ttx = [tuple(tpos_ref[j, trow, a] for a in range(3)) for j in jl]
         n_acc = n_lanes + (3 if live_g else 0) + (3 if live_soft else 0)
         wide = wide_dtype is not None
@@ -1213,7 +1212,7 @@ def _nearfield_direct_tan_kernel(
                 sz = pm_ref[srows, 2][None, :]
                 sm = pm_ref[srows, 3][None, :]
                 # the tangents' source rows, clamped (past N: inactive pairs)
-                srow = jnp.minimum(sstart + j0 + s_lane, last_row)
+                srow = sstart + j0 + s_lane
                 j = (j0 + s_lane)[None, :]
                 dx = tx[:, None] - sx
                 dy = ty[:, None] - sy
@@ -1232,9 +1231,10 @@ def _nearfield_direct_tan_kernel(
                 for jj, jt in enumerate(jl):
                     u = [jnp.zeros_like(dx)] * 3
                     if live_pos:
-                        tsx = tpos_ref[jt, srow, 0][None, :]
-                        tsy = tpos_ref[jt, srow, 1][None, :]
-                        tsz = tpos_ref[jt, srow, 2][None, :]
+                        prow = jnp.minimum(srow, tpos_ref.shape[1] - 1)
+                        tsx = tpos_ref[jt, prow, 0][None, :]
+                        tsy = tpos_ref[jt, prow, 1][None, :]
+                        tsz = tpos_ref[jt, prow, 2][None, :]
                         ddx = ttx[jj][0][:, None] - tsx
                         ddy = ttx[jj][1][:, None] - tsy
                         ddz = ttx[jj][2][:, None] - tsz
@@ -1242,7 +1242,8 @@ def _nearfield_direct_tan_kernel(
                         u = [mg * ddx + tidal * dx, mg * ddy + tidal * dy]
                         u.append(mg * ddz + tidal * dz)
                     if live_mass:
-                        tmg = tmass_ref[jt, srow][None, :] * g
+                        mrow = jnp.minimum(srow, tmass_ref.shape[1] - 1)
+                        tmg = tmass_ref[jt, mrow][None, :] * g
                         u = [u[0] + tmg * dx, u[1] + tmg * dy, u[2] + tmg * dz]
                     terms.extend(u)
                 if live_g:
@@ -1439,7 +1440,7 @@ def _direct_tan_call(
         Direct: the ``(K, N, 3)`` tangents. Blocked: ``(C, n_sub Bt, 3 G tpp)``
         partials (``G`` groups; columns past ``3 K`` are padding).
     """
-    from jaccpot.pallas._tangent_grid import tangent_groups
+    from jaccpot.pallas._tangent_grid import late_zeros, tangent_groups
 
     assert pl is not None and plgpu is not None
     groups = tangent_groups(int(k_tangents), int(tpp))
@@ -1482,7 +1483,11 @@ def _direct_tan_call(
     in_specs = [_full(o) for o in operands]
     extra: dict[str, Any] = {}
     if direct:
-        zeros = jnp.zeros((int(k_tangents), int(num_rows), 3), out_dtype)
+        # rows no leaf holds stay zero: a table made after this call's inputs
+        # exist, never hoisted and merged with another force's (late_zeros)
+        zeros = late_zeros(
+            (int(k_tangents), int(num_rows), 3), out_dtype, pm, interpret=interpret
+        )
         in_specs.append(_full(zeros))
         out_specs: Any = _full(zeros)
         out_shape: Any = jax.ShapeDtypeStruct(zeros.shape, zeros.dtype)
@@ -1561,6 +1566,9 @@ def _scalar_tangent(t: Array, k: int, dtype: Any) -> Array:
         If ``t`` is not one value per tangent.
     """
     t = jnp.asarray(t, dtype)
+    if k != 1 and int(t.size) == 1 and t.ndim >= 1 and int(t.shape[0]) == 1:
+        # a dead tangent's (1, ...) placeholder (``dead_placeholders``)
+        return jnp.zeros((k,), dtype)
     if int(t.size) != k:
         raise ValueError(f"a scalar's tangent must hold K={k} values, got {t.shape}")
     return t.reshape((k,))
@@ -1640,6 +1648,7 @@ def _near_tangent_impl(
     ValueError
         On tangent shapes that do not match the primals.
     """
+    from jaccpot.pallas._tangent_grid import tangent_k
     from jaccpot.pallas._tangent_grid import tangents_per_program as _tpp
 
     if pl is None or plgpu is None:
@@ -1649,10 +1658,10 @@ def _near_tangent_impl(
     n = int(positions_sorted.shape[0])
     num_leaves = int(leaf_start.shape[0])
     leaf_width = int(static.leaf_width)
-    k_tan = int(t_positions.shape[0])
-    if tuple(t_positions.shape) != (k_tan, n, 3) or tuple(t_masses.shape) != (
-        k_tan,
-        n,
+    # a dead tangent may be its (1, ...) placeholder: never read (``live``)
+    k_tan = tangent_k(t_positions, t_masses, t_softening_sq, t_G)
+    if (bool(live[0]) and tuple(t_positions.shape) != (k_tan, n, 3)) or (
+        bool(live[1]) and tuple(t_masses.shape) != (k_tan, n)
     ):
         raise ValueError(
             f"tangents must be ({k_tan}, {n}, 3) and ({k_tan}, {n}), got "
@@ -1801,8 +1810,7 @@ def _near_tangent_abstract(
         ``[ShapeDtypeStruct((K, N, 3))]``.
     """
     del params
-    t_positions = operands[8]
-    k_tan = int(t_positions.shape[0])
+    k_tan = max(int(t.shape[0]) for t in operands[8:12])
     return [
         jax.ShapeDtypeStruct(
             (k_tan, int(positions_sorted.shape[0]), 3), positions_sorted.dtype
@@ -1821,11 +1829,18 @@ def _near_tangent_abstract(
 #: any ``K`` (the kernels' tangent-group grid axis masks a partial last group).
 #: Every softening kernel. The reference is
 #: :func:`nearfield_leafpair_csr_sorted_direct_pallas_tangent_jnp`.
+def _near_tangent_op_options() -> dict:
+    from jaccpot.pallas._tangent_grid import tangent_op_options
+
+    return tangent_op_options()
+
+
 nearfield_leafpair_csr_sorted_direct_pallas_tangent = make_tangent_op(
     "nearfield_leafpair_csr_sorted_direct",
     _near_tangent_impl,
     num_primals=9,
     abstract_eval=_near_tangent_abstract,
+    **_near_tangent_op_options(),
 )
 
 

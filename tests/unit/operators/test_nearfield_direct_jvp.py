@@ -239,6 +239,30 @@ def _tpp_grid(tpp, k, *, interpret=True):
 
 
 @pytest.mark.parametrize(
+    "live", [(True, False, False, False), (False, True, False, True)]
+)
+def test_dead_placeholders_are_never_read(live):
+    """Dead tangents bound as their ``(1, ...)`` placeholders (NaN, so a read
+    would show): ``K`` comes from the live ones; no staging table built from them."""
+    c = _case(7, W=6, dtype=np.float64)
+    args = _operands(c, np.float64, 3, seed=4)
+    dense = tuple(t if on else jnp.zeros_like(t) for t, on in zip(args[9:], live))
+    sparse = tuple(
+        t if on else jnp.full((1,) * t.ndim, jnp.nan) for t, on in zip(dense, live)
+    )
+    st = _static(c, "plummer", row_limit=2)
+    (got,) = _near_tangent_impl(
+        *args[:9], *sparse, static=st, live=live, tangents_per_program=2
+    )
+    (want,) = nearfield_leafpair_csr_sorted_direct_pallas_tangent_jnp(
+        *args[:9], *dense, static=st, live=live
+    )
+    assert got.shape == want.shape
+    assert np.all(np.isfinite(np.asarray(got)))
+    assert _rel(got, want) < _TOL[np.float64], _rel(got, want)
+
+
+@pytest.mark.parametrize(
     "live",
     [
         (True, False, False, False),

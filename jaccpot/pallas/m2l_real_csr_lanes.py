@@ -1794,7 +1794,7 @@ def _m2l_tangent_impl(
     ValueError
         On a shape mismatch or an ``n_targets`` outside ``[0, n]``.
     """
-    from jaccpot.pallas._tangent_grid import tangent_groups
+    from jaccpot.pallas._tangent_grid import tangent_groups, tangent_k
     from jaccpot.pallas._tangent_grid import tangents_per_program as _tpp
 
     del symmetric
@@ -1806,11 +1806,11 @@ def _m2l_tangent_impl(
     n = int(mult.shape[0])
     if int(mult.shape[1]) != C:
         raise ValueError(f"multipoles must have {C} coefficients for order {p}")
-    k_tan = int(t_multipoles.shape[0])
-    if tuple(t_multipoles.shape) != (k_tan, n, C) or tuple(t_centers.shape) != (
-        k_tan,
-        n,
-        3,
+    # a dead tangent may be its (1, ...) placeholder: never read (``live``)
+    k_tan = tangent_k(t_multipoles, t_centers)
+    live_mult, live_cent = (bool(x) for x in live)
+    if (live_mult and tuple(t_multipoles.shape) != (k_tan, n, C)) or (
+        live_cent and tuple(t_centers.shape) != (k_tan, n, 3)
     ):
         raise ValueError(
             "tangents must be [K, n, C] and [K, n, 3], got "
@@ -1819,7 +1819,6 @@ def _m2l_tangent_impl(
     nt = n if n_targets is None else int(n_targets)
     if not (0 <= nt <= n):
         raise ValueError(f"n_targets must lie in [0, {n}], got {nt}")
-    live_mult, live_cent = (bool(x) for x in live)
     src_sorted, offsets, counts = _m2l_tangent_csr(
         sources,
         targets,
@@ -1899,7 +1898,7 @@ def _m2l_tangent_abstract(
     t_multipoles : Any
         ``[K, n, C]`` shape/dtype.
     t_centers : Any
-        Unused.
+        ``[K, n, 3]`` shape/dtype (its leading axis may give ``K``).
     **params : Any
         The op's parameters (``n_targets`` is read).
 
@@ -1908,10 +1907,11 @@ def _m2l_tangent_abstract(
     list
         ``[ShapeDtypeStruct((K, n_targets, C))]``.
     """
-    del centers, sources, targets, active_pair_count, t_centers
+    del centers, sources, targets, active_pair_count
     n, C = (int(s) for s in multipoles.shape)
     nt = n if params.get("n_targets") is None else int(params["n_targets"])
-    return [jax.ShapeDtypeStruct((int(t_multipoles.shape[0]), nt, C), multipoles.dtype)]
+    k = max(int(t_multipoles.shape[0]), int(t_centers.shape[0]))
+    return [jax.ShapeDtypeStruct((k, nt, C), multipoles.dtype)]
 
 
 #: Forward-mode tangent of :func:`m2l_real_csr_lanes_pallas_cvjp` (the seam table of
@@ -1923,11 +1923,18 @@ def _m2l_tangent_abstract(
 #: ``active_pair_count``
 #: is a dummy ``int32 [1]`` when ``has_active_count`` is False (the seam's ``None``).
 #: The reference is :func:`m2l_real_csr_lanes_pallas_tangent_jnp`.
+def _m2l_tangent_op_options() -> dict:
+    from jaccpot.pallas._tangent_grid import tangent_op_options
+
+    return tangent_op_options()
+
+
 m2l_real_csr_lanes_pallas_tangent = make_tangent_op(
     "m2l_real_csr_lanes",
     _m2l_tangent_impl,
     num_primals=5,
     abstract_eval=_m2l_tangent_abstract,
+    **_m2l_tangent_op_options(),
 )
 
 

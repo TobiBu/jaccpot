@@ -965,7 +965,11 @@ def _p2m_block_tangent_kernel(
     cx = cent_ref[lf, 0][:, None]
     cy = cent_ref[lf, 1][:, None]
     cz = cent_ref[lf, 2][:, None]
-    tc = [[t_cent_ref[j, lf, a][:, None] for a in range(3)] for j in jl]
+    tc = (
+        [[t_cent_ref[j, lf, a][:, None] for a in range(3)] for j in jl]
+        if live_cent
+        else []
+    )
     lane = lax.broadcasted_iota(jnp.int32, (block, chunk), 1)
     n_coef = (p + 1) * (p + 1)
     zero_lanes = jnp.zeros((block, chunk), dtype)
@@ -1093,7 +1097,7 @@ def _p2m_tangent_impl(
         If ``JACCPOT_P2M_BLOCK`` is ``0`` or negative.
     """
     from jaccpot._env import env_int
-    from jaccpot.pallas._tangent_grid import tangent_groups
+    from jaccpot.pallas._tangent_grid import late_zeros, tangent_groups, tangent_k
     from jaccpot.pallas._tangent_grid import tangents_per_program as _tpp
 
     del leaf_width
@@ -1114,11 +1118,20 @@ def _p2m_tangent_impl(
     dtype = jnp.result_type(positions_sorted.dtype, masses_sorted.dtype)
     n = int(positions_sorted.shape[0])
     L = int(leaf_ranges.shape[0])
-    k = int(t_positions.shape[0])
-    table = jnp.zeros((k, int(total_nodes), C), dtype)
+    # a dead tangent may be its (1, ...) placeholder: never read (``live``)
+    k = tangent_k(t_positions, t_masses, t_leaf_centers)
     flags = (bool(live[0]), bool(live[1]), bool(live[2]))
     if n == 0 or L == 0 or not any(flags):
-        return [table]
+        return [jnp.zeros((k, int(total_nodes), C), dtype)]
+    # the table the kernel writes its leaves' rows into: made after this call's
+    # inputs exist, never hoisted and merged with another force's (late_zeros)
+    table = late_zeros(
+        (k, int(total_nodes), C),
+        dtype,
+        positions_sorted,
+        interpret=bool(interpret),
+        backend=backend,
+    )
     pos = jnp.asarray(positions_sorted, dtype)
     mass = jnp.asarray(masses_sorted, dtype)
     ranges = jnp.asarray(leaf_ranges)
@@ -1185,19 +1198,24 @@ def _p2m_tangent_shapes(*specs: Any, **params: Any) -> list[jax.ShapeDtypeStruct
     list[jax.ShapeDtypeStruct]
         ``[K, total_nodes, (p+1)^2]``.
     """
-    pos, mass, t_pos = specs[0], specs[1], specs[4]
-    shape = (t_pos.shape[0], int(params["total_nodes"]), sh_size(int(params["order"])))
+    from jaccpot.pallas._tangent_grid import tangent_k
+
+    pos, mass = specs[0], specs[1]
+    k = tangent_k(*specs[4:7])
+    shape = (k, int(params["total_nodes"]), sh_size(int(params["order"])))
     return [jax.ShapeDtypeStruct(shape, jnp.result_type(pos.dtype, mass.dtype))]
 
 
 def _make_p2m_tangent_op() -> Any:
     from jaccpot.pallas._tangent import make_tangent_op
+    from jaccpot.pallas._tangent_grid import tangent_op_options
 
     return make_tangent_op(
         "p2m_real_leaves",
         _p2m_tangent_impl,
         num_primals=4,
         abstract_eval=_p2m_tangent_shapes,
+        **tangent_op_options(),
     )
 
 

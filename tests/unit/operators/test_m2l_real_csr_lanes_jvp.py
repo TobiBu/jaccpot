@@ -247,6 +247,30 @@ def _tpp_grid(tpp, k, *, interpret=True):
 
 
 @pytest.mark.parametrize("live", [(True, False), (False, True)])
+def test_dead_placeholders_are_never_read(live):
+    """A dead tangent bound as its ``(1, ...)`` placeholder (NaN, so a read would
+    show): ``K`` comes from the live tangent."""
+    c = _case(2, 2, np.float64)
+    tm, tc = _tangents(c, 3, seed=2)
+    dense = (
+        tm if live[0] else jnp.zeros_like(tm),
+        tc if live[1] else jnp.zeros_like(tc),
+    )
+    sparse = tuple(
+        t if on else jnp.full((1,) * t.ndim, jnp.nan) for t, on in zip(dense, live)
+    )
+    params = _params(c, False, live=live)
+    (got,) = _m2l_tangent_impl(
+        c.mult, c.cent, *_list(c, False), *sparse, **params, tangents_per_program=2
+    )
+    (want,) = m2l_real_csr_lanes_pallas_tangent_jnp(
+        c.mult, c.cent, *_list(c, False), *dense, **params
+    )
+    assert got.shape == want.shape
+    assert _rel(got, want) < 1e-12
+
+
+@pytest.mark.parametrize("live", [(True, False), (False, True)])
 def test_each_tangent_alone(live):
     """A known-zero tangent (``live``) skips its terms; the rest is unchanged."""
     c = _case(2, 2, np.float64)
