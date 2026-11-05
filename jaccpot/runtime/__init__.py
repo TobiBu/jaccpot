@@ -11,7 +11,7 @@ _LAZY = {
     "jacfwd_batched": "jaccpot.runtime.forward_batching",
 }
 
-__all__ = sorted(_LAZY)
+__all__ = ["apply_in_chunks", "forward_memory_estimate", "jacfwd_batched"]
 
 
 def __getattr__(name: str) -> Any:

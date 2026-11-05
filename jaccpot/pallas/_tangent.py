@@ -168,6 +168,9 @@ class TangentOp:
         The registered primitive.
     num_primals : int
         How many leading operands are primals.
+    dead_placeholders : bool
+        Its implementation takes dead tangents as ``(1, ...)`` placeholders
+        (:func:`make_tangent_op`).
     """
 
     def __init__(
@@ -262,9 +265,7 @@ def _tangent_k(tangents: Sequence[Array], dead: Sequence[Any]) -> int:
     return max(ks) if ks else 1
 
 
-def _expand_dead(
-    tangents: Sequence[Array], dead: Sequence[Any], k: int
-) -> list[Array]:
+def _expand_dead(tangents: Sequence[Array], dead: Sequence[Any], k: int) -> list[Array]:
     """The tangents with each dead placeholder a dense ``(k, *shape)`` zero.
 
     Parameters
@@ -353,7 +354,9 @@ def _chunked(
             chunk = []
             for t, d in zip(tangents, dead):
                 if d is not None:
-                    chunk.append(t if dead_placeholders else _expand_dead([t], [d], kb)[0])
+                    chunk.append(
+                        t if dead_placeholders else _expand_dead([t], [d], kb)[0]
+                    )
                     continue
                 piece = t[start : start + k]
                 if kb > k:
@@ -416,7 +419,9 @@ def make_tangent_op(
 
     prim.def_impl(run)
 
-    def _abstract(*avals: Any, dead_shapes: Any = None, **params: Any) -> list[ShapedArray]:
+    def _abstract(
+        *avals: Any, dead_shapes: Any = None, **params: Any
+    ) -> list[ShapedArray]:
         specs = [jax.ShapeDtypeStruct(a.shape, a.dtype) for a in avals]
         dead = list(dead_shapes) if dead_shapes else [None] * (len(specs) - num_primals)
         tspecs = specs[num_primals:]

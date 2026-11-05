@@ -31,7 +31,7 @@ card.
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -230,10 +230,6 @@ def jacfwd_batched(
         ``K``). With ``has_aux`` the aux is the primal's, computed once more
         after the loop.
 
-    Raises
-    ------
-    ValueError
-        If ``directions_per_pass`` is not ``None`` or a positive int.
     """
     k = _check_directions(directions_per_pass)
     if k is None:
@@ -325,12 +321,14 @@ F8_PEAK_BYTES_PER_PARTICLE: dict[int, tuple[float, float]] = {
 A100_40_BYTES_LIMIT = 40_286_289_920
 
 
-def _interp_loglog(n: float, table: dict[int, tuple[float, float]], i: int) -> float:
+def _interp_loglog(
+    n: Union[int, float], table: dict[int, tuple[float, float]], i: int
+) -> float:
     """Entry ``i`` of ``table`` at ``n``: log-log interpolation, end slopes beyond.
 
     Parameters
     ----------
-    n : float
+    n : Union[int, float]
         Particle count.
     table : dict[int, tuple[float, float]]
         :data:`F8_PEAK_BYTES_PER_PARTICLE`.

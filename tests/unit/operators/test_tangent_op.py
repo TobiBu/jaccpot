@@ -308,7 +308,9 @@ def test_a_dead_tangent_is_never_broadcast_to_the_columns(data, columns, op):
         assert tx_shape == (kb, _N)
         assert tm_shape == ((1, 1) if op == "placeholders" else (kb, _N))
     # the program binds the primitive with the placeholder, not a [K, N] zero
-    text = str(jax.make_jaxpr(jax.jacfwd(lambda th: seam(x + A @ th, m)))(jnp.zeros(columns)))
+    text = str(
+        jax.make_jaxpr(jax.jacfwd(lambda th: seam(x + A @ th, m)))(jnp.zeros(columns))
+    )
     assert f"f64[{columns},{_N}]" in text
     assert "dead_shapes=(None, (32,))" in text
 

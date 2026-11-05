@@ -42,9 +42,7 @@ def _point() -> dict:
 def test_jacfwd_batched_is_jacfwd(k):
     x = _point()
     want, aux_want = jax.jit(jax.jacfwd(_fun, has_aux=True))(x)
-    got, aux_got = jax.jit(jacfwd_batched(_fun, directions_per_pass=k, has_aux=True))(
-        x
-    )
+    got, aux_got = jax.jit(jacfwd_batched(_fun, directions_per_pass=k, has_aux=True))(x)
     assert jax.tree_util.tree_structure(got) == jax.tree_util.tree_structure(want)
     for g, w in zip(jax.tree_util.tree_leaves(got), jax.tree_util.tree_leaves(want)):
         assert g.shape == w.shape and g.dtype == w.dtype
@@ -107,7 +105,8 @@ def test_apply_in_chunks_is_vmap(k):
 
 @pytest.mark.parametrize("bad", [0, -1, 1.5, True])
 def test_bad_directions_per_pass(bad):
-    with pytest.raises(ValueError):
+    # ValueError; a float is a TypeError under JACCPOT_RUNTIME_TYPECHECK=1
+    with pytest.raises((ValueError, TypeError)):
         jacfwd_batched(_fun, directions_per_pass=bad)
 
 
@@ -119,7 +118,10 @@ def test_memory_model():
     assert not eight["fits"]
     mid = forward_memory_estimate(25_000_000, 8)
     assert abs(mid["bytes_per_particle"] - (266.1 + 8 * 143.1)) < 0.5
-    per = [forward_memory_estimate(n, 1)["bytes_per_particle"] for n in (1e6, 1e7, 1e9)]
+    per = [
+        forward_memory_estimate(n, 1)["bytes_per_particle"]
+        for n in (10**6, 10**7, 10**9)
+    ]
     assert per[0] > per[1] > per[2] > 0
     small = forward_memory_estimate(2_000_000, 1)
     assert small["largest_k_that_fits"] == 8

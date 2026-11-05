@@ -1270,12 +1270,9 @@ class GradientPlan:
             ``(value, jacobian, result, plan)``: the jacobian is
             ``jax.jacfwd``'s, the output's structure over each input's (a dict by
             name); with ``directions_per_pass`` equal to the single pass's to
-            round-off. Refused on a failed verdict, as :meth:`jvp`.
-
-        Raises
-        ------
-        ValueError
-            If ``directions_per_pass`` is not ``None`` or a positive int.
+            round-off. Refused on a failed verdict, as :meth:`jvp`; a
+            ``directions_per_pass`` that is not ``None`` or a positive int raises
+            ``ValueError``.
         """
         from jaccpot.production import _trace_state_kept
         from jaccpot.runtime.forward_batching import _check_directions
@@ -1418,12 +1415,8 @@ class LinearMap:
         Returns
         -------
         Any
-            The output tangent.
-
-        Raises
-        ------
-        ValueError
-            If the names do not match ``wrt``.
+            The output tangent (``ValueError`` if the names do not match
+            ``wrt``).
         """
         return self._f_lin(self._check(tangents))[0]
 
@@ -1446,12 +1439,8 @@ class LinearMap:
         Returns
         -------
         Any
-            The output tangents, every leaf with the leading axis ``D``.
-
-        Raises
-        ------
-        ValueError
-            If the names do not match ``wrt``.
+            The output tangents, every leaf with the leading axis ``D``
+            (``ValueError`` if the names do not match ``wrt``).
         """
         from jaccpot.runtime.forward_batching import apply_in_chunks
 
