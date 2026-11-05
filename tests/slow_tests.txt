@@ -15,6 +15,8 @@ tests/integration/strict/test_float64_lane.py::test_float64_force_reaches_below_
 tests/integration/strict/test_float64_lane.py::test_float64_verlet_is_the_direct_verlet_to_round_off[particles]
 tests/integration/strict/test_float64_lane.py::test_the_tree_order_carry_keeps_a_float64_state
 tests/integration/strict/test_forward_mode.py::test_jacfwd_over_parameters_is_jacrev
+tests/integration/strict/test_forward_mode.py::test_jacfwd_in_chunks_is_the_single_pass[11]
+tests/integration/strict/test_forward_mode.py::test_jacfwd_in_chunks_is_the_single_pass[8]
 tests/integration/strict/test_forward_mode.py::test_linearize_over_three_directions_is_three_jvps
 tests/integration/strict/test_forward_mode.py::test_the_gradient_plans_forward_twins
 tests/integration/strict/test_forward_mode.py::test_the_jvp_primal_is_the_production_forward[dehnen_error]

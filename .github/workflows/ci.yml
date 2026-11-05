@@ -226,6 +226,14 @@ jobs:
             workers: 1
             jax_cache: "off"
             timeout: 90
+          # G-batch (round 2): jacfwd(directions_per_pass in {1, 3}) against the single
+          # pass, 8 and 11 columns, three jacfwd programs each (local, 2026-11-05: both
+          # cases at -n 2 in 23 min; peak per case: see the round-2 track G STATUS).
+          - shard: integration-strict-grad-forward-batch
+            typecheck: "0"
+            workers: 1
+            jax_cache: "off"
+            timeout: 60
           - shard: mutual-static-device
             typecheck: "0"
             timeout: 15

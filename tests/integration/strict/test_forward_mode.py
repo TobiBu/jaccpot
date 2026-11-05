@@ -19,6 +19,9 @@ interpret mode on CPU):
 * F5 -- ``jax.jacfwd`` over a few parameters (``G``, ``eps2``, ``dt``, a mass scale)
   equals the reverse path's ``jax.jacrev``, and the batched tangents equal single
   jvps to round-off;
+* G-batch -- ``jacfwd`` in chunks of ``directions_per_pass`` in {1, 3} directions
+  (``jacfwd_batched``) equals the single pass over 8 and 11 parameters, and the
+  gradient plan's ``jacfwd(directions_per_pass=1)`` its single pass;
 * F7 -- caps sized on a configuration with fewer pairs: the step's verdict fails
   and its tangent is NaN (never a plausible wrong number);
 * F9 -- ``jax.linearize`` applied to three directions equals three jvps.
@@ -406,6 +409,71 @@ def test_jacfwd_over_parameters_is_jacrev():
 
 
 # ---------------------------------------------------------------------------
+# G-batch: jacfwd in chunks of directions is the single pass.
+# ---------------------------------------------------------------------------
+
+
+def _embedded(lane: Any, num: int) -> Any:
+    """``f(theta)``: the rollout's two weighted sums, ``num`` parameters embedded.
+
+    Every input moves with every parameter (fixed random coefficients): the start
+    positions and velocities along ``num`` random fields, the masses, ``G``,
+    ``eps2`` and ``dt`` by random relative scales; ``theta = 0`` is the lane's
+    point. So each Jacobian column has every tangent live.
+    """
+    primals = _primals(lane)
+    x0, v0, m = primals[0], primals[1], primals[2]
+    rng = np.random.default_rng(11)
+    ux = jnp.asarray(1e-2 * rng.normal(size=(num,) + tuple(x0.shape)))
+    uv = jnp.asarray(1e-2 * rng.normal(size=(num,) + tuple(v0.shape)))
+    um, ug, ue, ud = (jnp.asarray(1e-2 * rng.normal(size=(num,))) for _ in range(4))
+    run = _rollout(lane, "forward")
+
+    def f(theta):
+        _, out = run(
+            x0 + jnp.tensordot(theta, ux, axes=1),
+            v0 + jnp.tensordot(theta, uv, axes=1),
+            m * (1.0 + theta @ um),
+            1.0 + theta @ ug,
+            SOFTENING**2 * (1.0 + theta @ ue),
+            primals[5],
+            DT * (1.0 + theta @ ud),
+        )
+        return jnp.stack(
+            [
+                jnp.sum(lane.weight * out.positions),
+                jnp.sum(lane.weight * out.velocities),
+            ]
+        )
+
+    return f
+
+
+@pytest.mark.parametrize("num", [8, 11])
+def test_jacfwd_in_chunks_is_the_single_pass(num):
+    """G-batch: ``jacfwd_batched(directions_per_pass=k)`` for ``k`` in {1, 3} equals
+    ``jax.jacfwd`` (one pass: the tangent kernels at ``K = 8``, or ``8 + 4`` for
+    11 columns) to round-off, every column nonzero; ``k = 3`` pads the last chunk
+    with zero directions (8 = 3 + 3 + 2, 11 = 3 + 3 + 3 + 2)."""
+    from jaccpot.runtime.forward_batching import jacfwd_batched
+
+    lane = _lane("plummer")
+    f = _embedded(lane, num)
+    theta = jnp.zeros((num,))
+    single = np.asarray(jax.jit(jax.jacfwd(f))(theta))
+    _drop_executables()
+    assert single.shape == (2, num)
+    assert np.all(single != 0.0)
+    scale = np.max(np.abs(single), axis=0)
+    for k in (1, 3):
+        got = np.asarray(jax.jit(jacfwd_batched(f, directions_per_pass=k))(theta))
+        _drop_executables()
+        assert got.shape == single.shape
+        err = np.max(np.abs(got - single) / scale)
+        assert err <= 1e-12, (k, err, got, single)
+
+
+# ---------------------------------------------------------------------------
 # F7: an overflow makes the tangent NaN.
 # ---------------------------------------------------------------------------
 
@@ -553,6 +621,17 @@ def test_the_gradient_plans_forward_twins():
     )
     assert abs(column - float(one.tangent)) <= 1e-12 * abs(column)
     assert float(jac.value) == float(one.value)
+    _drop_executables()
+    # directions_per_pass: the loop's column to round-off, its value (the primal
+    # after the loop) bitwise
+    chunked = plan.jacfwd(
+        _plan_loss, wrt=("external_params",), inputs=k_array, directions_per_pass=1
+    )
+    in_chunks = float(chunked.tangent["external_params"]["k"])
+    assert abs(in_chunks - column) <= 1e-12 * abs(column)
+    assert float(chunked.value) == float(jac.value)
+    assert _bitwise_equal(chunked.result.positions, jac.result.positions)
+    _drop_executables()
 
     rng = np.random.default_rng(1)
     u = rng.uniform(0.0, 1.0, 512)

@@ -129,6 +129,7 @@ __all__ = [
     "GradSegment",
     "GradientPlan",
     "GradientResult",
+    "LinearMap",
 ]
 
 #: what :meth:`GradientPlan.value_and_grad` can differentiate, by name
@@ -1095,6 +1096,7 @@ class GradientPlan:
         wrt: tuple,
         static: dict,
         start_force: str,
+        directions_per_pass: Optional[int] = None,
     ) -> Callable[..., Any]:
         """The jitted forward-mode program of ``kind``, compiled once per key.
 
@@ -1110,6 +1112,8 @@ class GradientPlan:
             The static inputs.
         start_force : str
             As :meth:`rollout`.
+        directions_per_pass : Optional[int]
+            ``jacfwd`` only: as :meth:`jacfwd`.
 
         Returns
         -------
@@ -1119,6 +1123,8 @@ class GradientPlan:
             (out, result))``.
         """
         key = (kind, fn, wrt, repr(sorted(static.items())), start_force)
+        if directions_per_pass is not None:
+            key = key + (("directions_per_pass", int(directions_per_pass)),)
         program = self._programs.get(key)
         if program is None:
             objective = self._forward_objective(fn, static, start_force)
@@ -1134,6 +1140,10 @@ class GradientPlan:
                     return out, t_out, result
 
                 program = jax.jit(run)
+            elif directions_per_pass is not None:
+                program = jax.jit(
+                    _batched_jacfwd_program(objective, int(directions_per_pass))
+                )
             else:
 
                 def jac(diff: dict, dynamic: dict) -> tuple:
@@ -1220,6 +1230,7 @@ class GradientPlan:
         wrt: Sequence[str] = ("dt", "force_params", "external_params"),
         inputs: Optional[dict] = None,
         start_force: str = "outside",
+        directions_per_pass: Optional[int] = None,
     ) -> "ForwardResult":
         """The Jacobian of ``fn(rollout(inputs), inputs)`` by forward mode.
 
@@ -1228,6 +1239,15 @@ class GradientPlan:
         tangent axis, up to 8 per launch), in ONE jitted program. For a few
         parameters (an orbit, a halo, a mass scale) through a long rollout:
         the memory is :meth:`jvp`'s times the tangent count, flat in the steps.
+
+        ``directions_per_pass=k`` bounds that: still one jitted program, now a
+        ``lax.map`` over chunks of ``k`` directions, each a ``jax.jvp`` vmapped
+        over its ``k`` columns (the tangent kernels see ``K = k``) with the
+        primal recomputed per chunk, plus one primal after the loop for the
+        returned value (:func:`~jaccpot.runtime.forward_batching.jacfwd_batched`).
+        Memory is ``W(k)`` instead of ``W(K)``; compute is ``ceil(K / k) + 1``
+        primals instead of one. At ``N = 1e8`` on an A100-40 use ``k = 1``
+        (:func:`~jaccpot.runtime.forward_batching.forward_memory_estimate`).
 
         Parameters
         ----------
@@ -1240,19 +1260,32 @@ class GradientPlan:
             As :meth:`jvp`.
         start_force : str
             As :meth:`rollout`.
+        directions_per_pass : Optional[int]
+            Jacobian columns per pass; ``None`` (default): all in one pass, the
+            program ``jax.jacfwd`` builds.
 
         Returns
         -------
         ForwardResult
             ``(value, jacobian, result, plan)``: the jacobian is
             ``jax.jacfwd``'s, the output's structure over each input's (a dict by
-            name). Refused on a failed verdict, as :meth:`jvp`.
+            name); with ``directions_per_pass`` equal to the single pass's to
+            round-off. Refused on a failed verdict, as :meth:`jvp`.
+
+        Raises
+        ------
+        ValueError
+            If ``directions_per_pass`` is not ``None`` or a positive int.
         """
         from jaccpot.production import _trace_state_kept
+        from jaccpot.runtime.forward_batching import _check_directions
 
         wrt = tuple(wrt)
+        k = _check_directions(directions_per_pass)
         diff, static, dynamic = self._forward_split(inputs, wrt)
-        program = self._forward_program("jacfwd", fn, wrt, static, start_force)
+        program = self._forward_program(
+            "jacfwd", fn, wrt, static, start_force, directions_per_pass=k
+        )
         with _trace_state_kept(self.engine):
             _install_plan(self.engine, self.segments[-1].plan)
             jacobian, (value, result) = program(diff, dynamic)
@@ -1290,8 +1323,11 @@ class GradientPlan:
         -------
         ForwardResult
             ``(value, linear, result, plan)``: ``linear(tangents: dict) ->
-            output tangent``, the tangents by name over ``wrt``. Refused on a
-            failed verdict, as :meth:`jvp`.
+            output tangent``, the tangents by name over ``wrt`` (a
+            :class:`LinearMap`; ``linear.apply(directions,
+            directions_per_pass=k)`` applies it to a leading axis of
+            directions, ``k`` per pass). Refused on a failed verdict, as
+            :meth:`jvp`.
         """
         from jaccpot.production import _trace_state_kept
 
@@ -1304,15 +1340,125 @@ class GradientPlan:
                 lambda d: objective(d, dynamic), diff
             )
         check_rollout(result, gradient=True)
+        return ForwardResult(value, LinearMap(f_lin, wrt), result, self)
 
-        def linear(tangents: dict) -> Any:
-            if set(tangents) != set(wrt):
-                raise ValueError(
-                    f"tangents {sorted(tangents)} do not match wrt {sorted(wrt)}"
-                )
-            return f_lin({name: tangents[name] for name in wrt})[0]
 
-        return ForwardResult(value, linear, result, self)
+def _batched_jacfwd_program(
+    objective: Callable[[dict, dict], tuple], directions_per_pass: int
+) -> Callable[[dict, dict], tuple]:
+    """``jac(diff, dynamic) -> (jacobian, (out, result))``, ``k`` columns per pass.
+
+    :meth:`GradientPlan.jacfwd`'s program with ``directions_per_pass``: the
+    columns by :func:`~jaccpot.runtime.forward_batching.jacfwd_columns` (a
+    ``lax.map`` over chunks, each a vmapped ``jax.jvp``), then the value and the
+    rollout result from one primal run ordered AFTER the loop by an
+    ``optimization_barrier`` over the columns and every input -- so nothing
+    ``N``-sized is alive across the loop beyond the inputs.
+
+    Parameters
+    ----------
+    objective : Callable[[dict, dict], tuple]
+        :meth:`GradientPlan._forward_objective`'s.
+    directions_per_pass : int
+        Columns per pass.
+
+    Returns
+    -------
+    Callable[[dict, dict], tuple]
+        The (unjitted) program, the single pass's output structure.
+    """
+    from jaccpot.runtime.forward_batching import jacfwd_columns, jacfwd_unravel
+
+    def jac(diff: dict, dynamic: dict) -> tuple:
+        def push(t: dict) -> Any:
+            return jax.jvp(
+                lambda d: objective(d, dynamic), (diff,), (t,), has_aux=True
+            )[1]
+
+        columns, _ = jacfwd_columns(push, diff, directions_per_pass)
+        columns, diff_after, dynamic_after = jax.lax.optimization_barrier(
+            (columns, diff, dynamic)
+        )
+        out, result = objective(diff_after, dynamic_after)
+        return jacfwd_unravel(diff, out, columns), (out, result)
+
+    return jac
+
+
+class LinearMap:
+    """:meth:`GradientPlan.linearize`'s linear map: one direction, or many in chunks.
+
+    Parameters
+    ----------
+    f_lin : Callable[[dict], Any]
+        ``jax.linearize``'s map of the gradient run, on the tangents by name.
+    wrt : tuple
+        The differentiated inputs.
+    """
+
+    def __init__(self, f_lin: Callable[[dict], Any], wrt: tuple) -> None:
+        self._f_lin = f_lin
+        self.wrt = tuple(wrt)
+
+    def _check(self, tangents: dict) -> dict:
+        if set(tangents) != set(self.wrt):
+            raise ValueError(
+                f"tangents {sorted(tangents)} do not match wrt {sorted(self.wrt)}"
+            )
+        return {name: tangents[name] for name in self.wrt}
+
+    def __call__(self, tangents: dict) -> Any:
+        """The output tangent along one direction.
+
+        Parameters
+        ----------
+        tangents : dict
+            One tangent per differentiated input, by name.
+
+        Returns
+        -------
+        Any
+            The output tangent.
+
+        Raises
+        ------
+        ValueError
+            If the names do not match ``wrt``.
+        """
+        return self._f_lin(self._check(tangents))[0]
+
+    def apply(
+        self, directions: dict, *, directions_per_pass: Optional[int] = None
+    ) -> Any:
+        """The output tangents along many directions (a matrix product).
+
+        Parameters
+        ----------
+        directions : dict
+            One entry per differentiated input, by name, each with a leading
+            axis ``D`` of directions.
+        directions_per_pass : Optional[int]
+            Directions per pass ``k``: a ``lax.map`` over chunks of ``k``, each
+            a ``vmap`` (the tangent kernels see ``K = k``); ``None``: one
+            ``vmap`` over all ``D``
+            (:func:`~jaccpot.runtime.forward_batching.apply_in_chunks`).
+
+        Returns
+        -------
+        Any
+            The output tangents, every leaf with the leading axis ``D``.
+
+        Raises
+        ------
+        ValueError
+            If the names do not match ``wrt``.
+        """
+        from jaccpot.runtime.forward_batching import apply_in_chunks
+
+        checked = self._check(directions)
+        return apply_in_chunks(
+            lambda t: self._f_lin(t)[0], checked, directions_per_pass
+        )
 
 
 class ForwardResult(NamedTuple):
