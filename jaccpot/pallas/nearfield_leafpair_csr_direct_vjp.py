@@ -385,11 +385,11 @@ def _direct_rev_call(
     neighbors : Array
         ``(E,)`` neighbour leaf indices.
     row_start : Array
-        ``(L,)`` first entry of each row's piece.
+        ``(T,)`` first entry of each target leaf's piece; ``T`` sets the grid.
     row_count : Array
-        ``(L,)`` entries of each row's piece.
+        ``(T,)`` entries of each row's piece.
     row_first : Array
-        ``(L,)`` ``1`` where the self term rides.
+        ``(T,)`` ``1`` where the self term rides.
     softening : Array
         ``(2,)`` softening parameters.
     g : Array
@@ -418,7 +418,7 @@ def _direct_rev_call(
     list
         The lanes plus this launch's sums.
     """
-    num_leaves = int(leaf_start.shape[0])
+    num_leaves = int(row_start.shape[0])  # the target leaves: leaf_start's first T
 
     def _kernel(*refs):
         return _nearfield_direct_rev_kernel(
@@ -483,6 +483,8 @@ def nearfield_leafpair_csr_sorted_direct_reverse_pallas(
     source_tile: int | None = None,
     num_warps: int | None = None,
     num_stages: int = 1,
+    include_self: bool = True,
+    num_target_leaves: int | None = None,
 ) -> tuple[Array, Array, Array, Array]:
     """Adjoint of the direct CSR near field's accelerations, on the sorted layout.
 
@@ -493,6 +495,24 @@ def nearfield_leafpair_csr_sorted_direct_reverse_pallas(
     (see the module docstring for the algebra, the symmetry it relies on and why
     nothing is scattered). Every softening kernel, with its own ``(1/r) dg/dr`` and
     ``dg/d(eps^2)``.
+
+    TARGET LEAVES ONLY (``num_target_leaves``, ``include_self=False``): the reverse of
+    the forward called with the same two keywords, as the cross-domain near term
+    calls it (:func:`jaccpot.distributed.cross.cross_near_acceleration_direct`): only
+    the leading ``T`` leaves are targets, the rest of the table only sources (the
+    imported particles), and no leaf is its own neighbour. The algebra is the same;
+    what changes is where the symmetry lives. A target ``p``'s source-side terms read
+    the cotangents ``c_q`` of its source rows, so the caller must put there the
+    output cotangents of those particles' OWN accelerations, from the forward in which
+    they are the targets and ``p``'s leaf a source (on another device: the cross
+    seam, :func:`jaccpot.distributed.cross_vjp.cross_near_direct_cvjp`, exchanges
+    them). Rows past the target leaves get zero cotangents. Two consequences for
+    the caller: a target row's source-side terms are right only if the particle IS
+    a source at the other end of each of its pairs (the cross exchange ships every
+    live row of a paired leaf, unless it cut the leaf: its overflow flag); and
+    ``softening_sq_bar`` (the targets' sink-side sum) and ``G_bar`` (Euler over the
+    source-side sums, so NOT this call's targets' share) are partials: only their
+    sum over every call that holds the pair set is the scalars' cotangent.
 
     Parameters
     ----------
@@ -543,19 +563,29 @@ def nearfield_leafpair_csr_sorted_direct_reverse_pallas(
         Triton warps per program; ``None``: one per 32 target lanes, at least 1.
     num_stages : int
         Triton pipeline stages.
+    include_self : bool
+        Each target leaf's own particles are also its sources (the forward's
+        default; the diagonal excluded). ``False``: the CSR rows only, as the
+        forward with ``include_self=False`` (the self term is in another call's
+        output). Static.
+    num_target_leaves : int | None
+        ``T``: only leaves ``0 .. T - 1`` are targets (the grid), every leaf a
+        source; ``counts`` then holds ``T`` entries and ``offsets`` at least ``T``.
+        ``None``: every leaf, as before. Static.
 
     Returns
     -------
     tuple[Array, Array, Array, Array]
         ``(positions_bar (N, 3), masses_bar (N,), softening_sq_bar (), G_bar ())``
-        in the input dtype; zero on rows no leaf holds.
+        in the input dtype; zero on rows no target leaf holds.
 
     Raises
     ------
     RuntimeError
         If Pallas or its Triton backend could not be imported.
     ValueError
-        If ``source_tile`` is not a power of two, or ``cotangent`` is not ``(N, 3)``.
+        If ``source_tile`` is not a power of two, ``cotangent`` is not ``(N, 3)``,
+        or ``num_target_leaves`` is not in ``[0, L]``.
     """
     if pl is None or plgpu is None:
         raise RuntimeError("jax.experimental.pallas is not available")
@@ -565,10 +595,18 @@ def nearfield_leafpair_csr_sorted_direct_reverse_pallas(
     cot = jnp.asarray(cotangent, dtype)
     n = int(positions_sorted.shape[0])
     num_leaves = int(leaf_start.shape[0])
+    # the programs' leaves: every leaf, or the leading targets (the rest only source:
+    # the cross near term's imported rows). The lanes cover every row of the table;
+    # a source-only row is no program's target lane, so it gets zero cotangents.
+    num_targets = num_leaves if num_target_leaves is None else int(num_target_leaves)
+    if not 0 <= num_targets <= num_leaves:
+        raise ValueError(
+            f"num_target_leaves={num_target_leaves} is not in [0, {num_leaves}]"
+        )
     leaf_width = int(leaf_width)
     if tuple(cot.shape) != (n, 3):
         raise ValueError(f"cotangent must be ({n}, 3), got {tuple(cot.shape)}")
-    if num_leaves == 0 or leaf_width == 0 or n == 0:
+    if num_targets == 0 or leaf_width == 0 or n == 0:
         zero = jnp.zeros((), dtype)
         return jnp.zeros((n, 3), dtype), jnp.zeros((n,), dtype), zero, zero
     bs = REVERSE_SOURCE_TILE if source_tile is None else int(source_tile)
@@ -592,7 +630,7 @@ def nearfield_leafpair_csr_sorted_direct_reverse_pallas(
     cot_table = jnp.pad(cot, ((0, pad), (0, 1)))
     idx = jnp.asarray(counts).dtype
     counts_i = jnp.asarray(counts, idx)
-    row_start = jnp.asarray(offsets, idx)[:num_leaves]
+    row_start = jnp.asarray(offsets, idx)[:num_targets]
     neighbors = jnp.asarray(neighbors, idx)
     if int(neighbors.shape[0]) == 0:
         # the kernel prefetches entry 0 of every row, read or not
@@ -625,11 +663,11 @@ def nearfield_leafpair_csr_sorted_direct_reverse_pallas(
         name=f"near_rev_direct_t{bt}_s{bs}_w{leaf_width}_c{piece}",
     )
 
-    # 1. each row up to `piece` entries + the self term
+    # 1. each row up to `piece` entries + the self term (unless include_self=False)
     lanes = launch(
         row_start,
         jnp.minimum(counts_i, piece_i),
-        jnp.ones((num_leaves,), idx),
+        (jnp.ones if include_self else jnp.zeros)((num_targets,), idx),
         softening,
         g_arr,
         [jnp.zeros((n,), dtype) for _ in range(_REV_LANES)],
@@ -641,7 +679,7 @@ def nearfield_leafpair_csr_sorted_direct_reverse_pallas(
         return launch(
             row_start + lo,
             jnp.clip(counts_i - lo, 0, piece_i),
-            jnp.zeros((num_leaves,), idx),
+            jnp.zeros((num_targets,), idx),
             softening,
             g_arr,
             lanes_in,
@@ -707,44 +745,6 @@ class _DirectStatic(NamedTuple):
     source_flags: Optional[str]
     softening_kernel: Optional[str]
     tile_skip: Optional[bool]
-
-
-def _direct_forward(
-    positions_sorted,
-    masses_sorted,
-    leaf_start,
-    leaf_count,
-    neighbors,
-    offsets,
-    counts,
-    softening_sq,
-    G,
-    static,
-):
-    acc, fourth = nearfield_leafpair_csr_sorted_direct_pallas(
-        positions_sorted,
-        masses_sorted,
-        leaf_start,
-        leaf_count,
-        neighbors,
-        offsets,
-        counts,
-        leaf_width=static.leaf_width,
-        softening_sq=softening_sq,
-        G=G,
-        chunk=static.chunk,
-        num_warps=static.num_warps,
-        num_stages=static.num_stages,
-        target_subtile=static.target_subtile,
-        interpret=static.interpret,
-        with_force_scale=static.with_force_scale,
-        row_limit=static.row_limit,
-        source_tile=static.source_tile,
-        source_flags=static.source_flags,
-        softening_kernel=static.softening_kernel,
-        tile_skip=static.tile_skip,
-    )
-    return (acc, fourth) if static.with_force_scale else acc
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(9,))
@@ -1005,6 +1005,48 @@ def nearfield_leafpair_csr_sorted_direct_pallas_cvjp(
     if static.with_force_scale:
         return out
     return out, None
+
+
+# The custom_vjp's forward sits below the public wrapper so that the wrapper's
+# `_direct_cvjp(` call keeps its line: the reverse kernels' GPU program text embeds
+# that call site (the custom_vjp equation's source location), and the single-card
+# reverse program must not change by one byte when this file grows above it.
+def _direct_forward(
+    positions_sorted,
+    masses_sorted,
+    leaf_start,
+    leaf_count,
+    neighbors,
+    offsets,
+    counts,
+    softening_sq,
+    G,
+    static,
+):
+    acc, fourth = nearfield_leafpair_csr_sorted_direct_pallas(
+        positions_sorted,
+        masses_sorted,
+        leaf_start,
+        leaf_count,
+        neighbors,
+        offsets,
+        counts,
+        leaf_width=static.leaf_width,
+        softening_sq=softening_sq,
+        G=G,
+        chunk=static.chunk,
+        num_warps=static.num_warps,
+        num_stages=static.num_stages,
+        target_subtile=static.target_subtile,
+        interpret=static.interpret,
+        with_force_scale=static.with_force_scale,
+        row_limit=static.row_limit,
+        source_tile=static.source_tile,
+        source_flags=static.source_flags,
+        softening_kernel=static.softening_kernel,
+        tile_skip=static.tile_skip,
+    )
+    return (acc, fourth) if static.with_force_scale else acc
 
 
 # ------------------------------------------------------------------ tangent
