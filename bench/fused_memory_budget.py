@@ -65,7 +65,10 @@ sys.path.insert(
     ),
 )
 
-_DISC_IC = "/export/scratch/tbuck/odisseo_ic/disk_bulge_25m.npz"
+#: the 25M disc+bulge IC; DISC_IC on any other machine (as bench/s1b_mosaic_l2p.py)
+_DISC_IC = os.environ.get(
+    "DISC_IC", "/export/scratch/tbuck/odisseo_ic/disk_bulge_25m.npz"
+)
 _CAP_VARS = (
     "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP",
     "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP",
@@ -225,6 +228,13 @@ def _args() -> argparse.Namespace:
         type=float,
         default=None,
         help="eq (16)'s relative force-accuracy target (mandatory with dehnen_error)",
+    )
+    ap.add_argument(
+        "--mac-force-scale-floor",
+        type=float,
+        default=None,
+        help="with dehnen_error: floor eq (16a)'s min_b f_b at this fraction of the "
+        "certified bound (mac_force_scale_floor, #487); default off",
     )
     ap.add_argument(
         "--mac-force-scale-mode",
@@ -784,6 +794,11 @@ def _solver(leaf_cap: int, soft: float) -> FastMultipoleMethod:
                 adaptive_eps=float(ARGS.adaptive_eps),
                 adaptive_error_model="dehnen_paper",
                 mac_force_scale_mode=str(ARGS.mac_force_scale_mode),
+                **(
+                    {}
+                    if ARGS.mac_force_scale_floor is None
+                    else {"mac_force_scale_floor": float(ARGS.mac_force_scale_floor)}
+                ),
             )
             if ARGS.mac_type == "dehnen_error"
             else {}

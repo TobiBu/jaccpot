@@ -69,6 +69,7 @@ EXPECTED_FMM_INIT_KWARGS = {
     "mac_force_scale_mode",
     "mac_force_scale_prepass_theta",
     "mac_force_scale_fb_inflation",
+    "mac_force_scale_floor",
     "adaptive_error_model",
     "adaptive_eps",
     "dehnen_geometry_mode",

@@ -114,6 +114,22 @@ What it costs:
   geometric MAC (not broken down further). The production path is `strict_run_v2` /
   the runner, on the fused lane.
 
+**A long near row (#487), fixed in A1 (2026-11).** In the 1e8 bulge-free disc and after the 1.06e8 merger's first
+pericentre, one sink leaf's near row held up to 5.3M leaves (70 % of the tree). The CSR build's in-row rank took up
+to 124 s on that row in each list build, 20-90x the step. The sink was a one-particle leaf whose MAC radius was a
+float32 rounding residue (~1e-9). On a GPU, its walk-table entries `s_5`, `s_6` came out NaN, and a NaN fails eq
+(16a) against every node. Two changes, both default:
+- a non-finite `s_n` is set to 1, its upper bound (finite entries untouched): the row is 169 leaves again;
+- rows longer than 2048 are merge-sorted in `O(n log^2 n)`, the same arrays bit for bit, so no single row can stall
+  a build again whatever the MAC.
+
+At that state `dehnen_error` has rel-L2 2.19e-4 and p99 5.7e-4 against the geometric MAC's 2.76e-4 and 7.3e-4 at
+theta 0.7, from half its far pairs; after the merger's first pericentre 1.94e-4 against theta 0.7's 1.68e-4 (p99
+5.7e-4 against 5.9e-4), again from half the lists ([`production_2026-11.md`](production_2026-11.md), A1).
+`FastMultipoleMethod(preset="galaxy", mac_force_scale_floor=0.5)` floors each node's `min_b f_b` at half a lower
+bound that a correct f_b estimate always meets. It is opt-in: it never binds on a correct estimate, and it did not
+bind at #487.
+
 `theta` decides no pair under `dehnen_error`: the walk accepts by eq (16a) and its
 convergence clause `rho_A + rho_B < mac_theta_max r` (`mac_theta_max` 1.0), and the first
 step's f_b seed walks at theta 0.8 whatever the solver's (`mac_force_scale_prepass_theta`
@@ -121,7 +137,9 @@ sets it). Theta 0.3, 0.5 and 0.8 gave the same lists and the same states, bit fo
 (CPU, N = 2048, 2 steps); it is still part of the compile keys. A tighter target is
 `FastMultipoleMethod(preset="galaxy", adaptive_eps=1e-5)`.
 
-**The geometric MAC back** (the preset before 2026-10-21, the same engine:
+**The geometric MAC back** -- the documented fallback (user decision U3, 2026-11-03: `dehnen_error` stays the
+default and is fixed, the geometric MAC is the fallback). It is the preset before 2026-10-21, the same engine
+(see
 `tests/unit/test_preset_galaxy.py`):
 
 ```python
