@@ -201,25 +201,41 @@ def test_tangents_per_program_grid(tpp, k):
     padding) at every tangents-per-program equals the reference -- the first
     pieces' particle-order stores and the rest pieces' blocked partials -- and
     equals ``tpp = 1`` to round-off (G-tpp)."""
+    err, err_one = _tpp_grid(tpp, k)
+    assert err < _TOL[np.float64], err
+    assert err_one < 1e-14, err_one
+
+
+@pytest.mark.parametrize("k", [3, 8])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+def test_native_tangents_per_program_grid(tpp, k):
+    """G-tpp natively, float64 (skips without an Ampere card)."""
+    _native_or_skip(False)
+    err, err_one = _tpp_grid(tpp, k, interpret=False)
+    assert err < _TOL[np.float64], err
+    assert err_one < 1e-14, err_one
+
+
+def _tpp_grid(tpp, k, *, interpret=True):
     c = _case(7, W=6, dtype=np.float64)
     assert int(np.max(np.asarray(c.row_counts))) > 4  # 3+ pieces of 2
     args = _operands(c, np.float64, k, seed=k)
-    st = _static(c, "plummer", row_limit=2)
+    st = _static(c, "plummer", row_limit=2, interpret=interpret)
 
     def run(t):
         (out,) = _near_tangent_impl(*args, static=st, tangents_per_program=t)
         return np.asarray(out)
 
     got = run(tpp)
-    if k not in _TPP_ONE:
-        _TPP_ONE[k] = run(1)
+    key = (k, interpret)
+    if key not in _TPP_ONE:
+        _TPP_ONE[key] = run(1)
     (want,) = nearfield_leafpair_csr_sorted_direct_pallas_tangent_jnp(
         *args, static=st, live=_LIVE
     )
     assert got.shape == (k, c.n, 3)
-    assert _rel(got, want) < _TOL[np.float64], _rel(got, want)
-    assert _rel(got, _TPP_ONE[k]) < 1e-14
     assert not np.any(got[:, c.n_live :])
+    return _rel(got, want), _rel(got, _TPP_ONE[key])
 
 
 @pytest.mark.parametrize(

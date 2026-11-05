@@ -209,6 +209,22 @@ def test_tangents_per_program_grid(tpp, k):
     """Tangents on the grid: any ``K`` (a partial last group masked in-kernel, no
     padding) at every tangents-per-program equals the reference, on-axis lanes
     included, and equals ``tpp = 1`` to round-off (G-tpp)."""
+    err, err_one = _tpp_grid(tpp, k)
+    assert err < 1e-12, err
+    assert err_one < 1e-14, err_one
+
+
+@pytest.mark.parametrize("k", [3, 8])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+def test_native_tangents_per_program_grid(tpp, k):
+    """G-tpp natively, float64 (skips without an Ampere card)."""
+    _native_or_skip(False)
+    err, err_one = _tpp_grid(tpp, k, interpret=False)
+    assert err < 1e-12, err
+    assert err_one < 1e-14, err_one
+
+
+def _tpp_grid(tpp, k, *, interpret=True):
     c = _case(1, 3, np.float64)
     n_far, exact, band = _far_and_axis_pairs(c)
     assert n_far > 0 and exact > 0 and band > 0
@@ -216,17 +232,18 @@ def test_tangents_per_program_grid(tpp, k):
     args = (c.mult, c.cent, *_list(c, False), tm, tc)
 
     def run(t):
-        (out,) = _m2l_tangent_impl(*args, **_params(c, False), tangents_per_program=t)
+        params = dict(_params(c, False), interpret=interpret)
+        (out,) = _m2l_tangent_impl(*args, **params, tangents_per_program=t)
         return np.asarray(out)
 
     got = run(tpp)
-    if k not in _TPP_ONE:
-        _TPP_ONE[k] = run(1)
+    key = (k, interpret)
+    if key not in _TPP_ONE:
+        _TPP_ONE[key] = run(1)
     (want,) = m2l_real_csr_lanes_pallas_tangent_jnp(*args, **_params(c, False))
     assert got.shape == (k, c.nt, c.C)
-    assert _rel(got, want) < 1e-12, _rel(got, want)
-    assert _rel(got, _TPP_ONE[k]) < 1e-14
     assert not np.any(got[:, 9])
+    return _rel(got, want), _rel(got, _TPP_ONE[key])
 
 
 @pytest.mark.parametrize("live", [(True, False), (False, True)])

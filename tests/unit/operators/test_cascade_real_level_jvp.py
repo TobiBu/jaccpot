@@ -357,8 +357,24 @@ def test_tangents_per_program_grid(plummer_tree, which, tpp, k):
     """Tangents on the grid: any ``K`` (a partial last group masked in-kernel, no
     padding) at every tangents-per-program equals the level loop's jvp, and equals
     ``tpp = 1`` to round-off (G-tpp)."""
+    err, err_one = _tpp_grid(plummer_tree, which, tpp, k)
+    assert err < 1e-11, err
+    assert err_one < 1e-14, err_one
+
+
+@pytest.mark.parametrize("k", [3, 8])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+@pytest.mark.parametrize("which", ["m2m", "l2l"])
+def test_native_tangents_per_program_grid(plummer_tree, which, tpp, k):
+    """G-tpp natively, float64 (skips without an Ampere card)."""
+    _native_or_skip(False)
+    err, err_one = _tpp_grid(plummer_tree, which, tpp, k, interpret=False)
+    assert err < 1e-11, err
+    assert err_one < 1e-14, err_one
+
+
+def _tpp_grid(tree, which, tpp, k, *, interpret=True):
     order = 2
-    tree = plummer_tree
     coef, cent, t_coef, t_cent = _inputs(tree, which, order, jnp.float64, k, 40 + k)
     topo = tree.m2m_topo() if which == "m2m" else tree.l2l_topo()
     static = tree.m2m_static(order) if which == "m2m" else tree.l2l_static(order)
@@ -372,7 +388,7 @@ def test_tangents_per_program_grid(plummer_tree, which, tpp, k):
             t_coef,
             t_cent,
             **static,
-            interpret=True,
+            interpret=interpret,
             backend="triton",
             num_warps=4,
             live=(True, True),
@@ -381,13 +397,12 @@ def test_tangents_per_program_grid(plummer_tree, which, tpp, k):
         return np.asarray(out)
 
     got = run(tpp)
-    key = (which, k)
+    key = (which, k, interpret)
     if key not in _TPP_ONE:
         _TPP_ONE[key] = run(1)
     want = _call(tree, which, order, coef, cent, t_coef, t_cent, ref=True)
     assert got.shape == (k, tree.tot, (order + 1) ** 2)
-    assert _rel_max(got, want) < 1e-11, _rel_max(got, want)
-    assert _rel_max(got, _TPP_ONE[key]) < 1e-14
+    return _rel_max(got, want), _rel_max(got, _TPP_ONE[key])
 
 
 @pytest.mark.parametrize("which", ["m2m", "l2l"])

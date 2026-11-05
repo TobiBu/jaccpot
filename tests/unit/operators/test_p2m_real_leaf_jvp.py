@@ -199,14 +199,9 @@ def test_unbucketed_k_pads_and_chunks(tree):
 _TPP_ONE: dict = {}
 
 
-@pytest.mark.parametrize("k", [1, 3, 8, 11])
-@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
-def test_tangents_per_program_grid(tree, tpp, k):
-    """Tangents on the grid: any ``K`` (a partial last group masked in-kernel, no
-    padding) at every tangents-per-program equals the twin's jvp, and equals
-    ``tpp = 1`` to round-off (G-tpp)."""
+def _tpp_grid(tree, tpp, k, *, interpret=True, dtype=jnp.float64):
     order = 3
-    args = tree.args(jnp.float64)
+    args = tree.args(dtype)
     tangents = _tangents(args, k, 20 + k)
 
     def run(t):
@@ -215,7 +210,7 @@ def test_tangents_per_program_grid(tree, tpp, k):
             *tangents,
             **tree.static(order),
             leaf_width=tree.leaf,
-            interpret=True,
+            interpret=interpret,
             backend="triton",
             num_warps=None,
             live=(True, True, True),
@@ -224,12 +219,34 @@ def test_tangents_per_program_grid(tree, tpp, k):
         return np.asarray(out)
 
     got = run(tpp)
-    if k not in _TPP_ONE:
-        _TPP_ONE[k] = run(1)
+    key = (k, interpret, dtype)
+    if key not in _TPP_ONE:
+        _TPP_ONE[key] = run(1)
     (want,) = _ref(tree, args, tangents, order)
     assert got.shape == (k, tree.tot, (order + 1) ** 2)
-    assert _rel_max(got, want) < 1e-12, _rel_max(got, want)
-    assert _rel_max(got, _TPP_ONE[k]) < 1e-14
+    return _rel_max(got, want), _rel_max(got, _TPP_ONE[key])
+
+
+@pytest.mark.parametrize("k", [1, 3, 8, 11])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+def test_tangents_per_program_grid(tree, tpp, k):
+    """Tangents on the grid: any ``K`` (a partial last group masked in-kernel, no
+    padding) at every tangents-per-program equals the twin's jvp, and equals
+    ``tpp = 1`` to round-off (G-tpp)."""
+    err, err_one = _tpp_grid(tree, tpp, k)
+    assert err < 1e-12, err
+    assert err_one < 1e-14, err_one
+
+
+@pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
+@pytest.mark.parametrize("k", [3, 8])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+def test_native_tangents_per_program_grid(tree, tpp, k, dtype):
+    """G-tpp natively (skips without an Ampere card)."""
+    _native_or_skip(False)
+    err, err_one = _tpp_grid(tree, tpp, k, interpret=False, dtype=dtype)
+    assert err < _NATIVE_TOL[dtype], err
+    assert err_one < (1e-14 if dtype == jnp.float64 else 1e-6), err_one
 
 
 def test_twin_tangent_equals_the_jvp_of_the_production_reference(tree):
