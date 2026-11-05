@@ -83,6 +83,8 @@ _SEGMENT_CRITERION = "tests/distributed/test_mesh_segment_dehnen_error.py"
 _SEGMENT_MIGRATION = "tests/distributed/test_mesh_segment_migration_fused.py"
 # the multi-GPU mode as N processes x 1 device against 1 process x N devices (M2)
 _MULTIPROCESS = "tests/distributed/test_multiprocess_runtime.py"
+# its GPU half (M2G): manual, skipped without JACCPOT_RUN_MANUAL_TESTS=1 and two cards
+_MULTIPROCESS_GPU = "tests/distributed/test_multiprocess_gpu.py"
 # the mesh potential and the production runner's multi-GPU mode on the fused force
 # (S11 session 2, tracks E and D): ~11 min of compilation between them on CI
 _SEGMENT_RUNNER_FILES = (
@@ -288,7 +290,12 @@ SHARDS: dict[str, list[str]] = {
     "distributed-segment-runner": [*_SEGMENT_RUNNER_FILES, "-m", "distributed_segment"],
     # the multi-GPU mode as N localhost processes (M2): child processes against
     # one process with N forced devices; its own job (no forced devices needed)
-    "distributed-multiprocess": [_MULTIPROCESS, "-m", "distributed_multiprocess"],
+    "distributed-multiprocess": [
+        _MULTIPROCESS,
+        _MULTIPROCESS_GPU,
+        "-m",
+        "distributed_multiprocess",
+    ],
 }
 
 # The two jobs that do not run on every pull request. Each costs minutes of

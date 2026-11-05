@@ -136,3 +136,75 @@ def test_fused_force_runner_is_the_single_process_run(env, n, tmp_path):
         grown = [e["plan"]["leaf_capacity"] for e in sp_json["edges"][1:]]
         assert grown[0] > 44, grown  # the tree re-plan grew the leaf capacity
     _assert_same(sp, mp, sp_json, mp_json)
+
+
+def test_writers_write_on_process_zero(tmp_path):
+    """``SnapshotWriter`` / ``DiagnosticsLog`` write their files on process 0 only
+    (the same files as one process writes), keep their rows on every process, and
+    with ``all_processes=True`` write on each."""
+    got = {}
+    for mode in ("sp", "mp"):
+        out = tmp_path / mode
+        harness.run_side(
+            mode,
+            SCENARIOS,
+            "writers",
+            2,
+            str(out),
+            timeout=900.0,
+            env={"M2_WRITER_DIR": str(out)},
+        )
+        got[mode] = harness.load_side(str(out), mode)
+    (sp, sp_json), (mp, mp_json) = got["sp"], got["mp"]
+    assert not harness.differing(sp, mp)
+    assert sp_json["snapshot_files"] == mp_json["snapshot_files"]
+    assert len(sp_json["snapshot_files"]) == 3  # segments 0, 1, 2
+    assert sp_json["log_rows"] == mp_json["log_rows"]
+    assert len(mp_json["log_rows"]) == 3
+    p0, p1 = mp_json["kept"]
+    assert p0["paths"] and not p1["paths"]  # only process 0 wrote
+    assert p0["rows"] == p1["rows"] == 3  # every process keeps the rows
+    assert p0["paths_all"] and p1["paths_all"]  # all_processes: each wrote
+    assert mp_json["own_dirs"] == ["p0", "p1"]
+    assert sp_json["own_dirs"] == ["p0"]
+
+
+def test_initialize_from_a_slurm_step(tmp_path):
+    """``initialize()`` with no arguments under a SLURM step's variables (jax's
+    SLURM detection): every process joins and a psum over the mesh works."""
+    out = str(tmp_path / "slurm")
+    harness.run_side("mp", SCENARIOS, "launch", 2, out, timeout=600.0, launcher="slurm")
+    arrays, values = harness.load_side(out, "mp")
+    assert [i["process"] for i in values["info"]] == [0, 1]
+    assert all(i["count"] == 2 for i in values["info"])
+    assert arrays["psum"].tolist() == [1.0]
+
+
+@pytest.mark.parametrize(
+    "visible,local_ids,want",
+    [("3", None, [0]), ("2,3", None, None), (None, None, None), ("3", "0", None)],
+)
+def test_slurm_bound_device_ids(monkeypatch, visible, local_ids, want):
+    """A SLURM task bound to one card gets ``local_device_ids=[0]`` (jax's own
+    ``[SLURM_LOCALID]`` names a missing device from local rank 1 on)."""
+    from jaccpot.distributed import multiprocess as mp
+
+    for name, value in (
+        ("SLURM_JOB_ID", "1"),
+        ("SLURM_STEP_NODELIST", "n1"),
+        ("SLURM_NTASKS", "4"),
+        ("SLURM_PROCID", "1"),
+        ("SLURM_LOCALID", "1"),
+    ):
+        monkeypatch.setenv(name, value)
+    for name, value in (
+        ("CUDA_VISIBLE_DEVICES", visible),
+        ("JAX_LOCAL_DEVICE_IDS", local_ids),
+    ):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    assert mp.slurm_bound_device_ids() == want
+    monkeypatch.delenv("SLURM_LOCALID")
+    assert mp.slurm_bound_device_ids() is None  # not a SLURM step

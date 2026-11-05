@@ -1114,6 +1114,13 @@ class SnapshotWriter:
         Also the initial state (segment 0).
     prefix : str
         File name prefix.
+    all_processes : bool
+        Under several processes (``jax.distributed``), write the file on every
+        process (give each its own ``directory``); ``False`` (the default): only
+        process 0 writes, the others take part in the state's gather (a
+        collective: every process must call the writer) and keep no path. One
+        process: no effect. In memory (``directory=None``) every process keeps
+        its snapshots.
 
     Raises
     ------
@@ -1128,6 +1135,7 @@ class SnapshotWriter:
         every: int = 1,
         initial: bool = True,
         prefix: str = "snapshot",
+        all_processes: bool = False,
     ) -> None:
         if int(every) < 1:
             raise ValueError("SnapshotWriter.every must be >= 1")
@@ -1135,6 +1143,7 @@ class SnapshotWriter:
         self.every = int(every)
         self.initial = bool(initial)
         self.prefix = str(prefix)
+        self.all_processes = bool(all_processes)
         self.snapshots: list = []
         self.paths: list = []
         if directory is not None:
@@ -1152,11 +1161,13 @@ class SnapshotWriter:
             return
         if edge.segment % self.every:
             return
-        state = edge.state_host()
+        state = edge.state_host()  # every process: a gather under several
         if self.directory is None:
             self.snapshots.append(
                 {"step": edge.step, "time": edge.time, "state": state}
             )
+            return
+        if not _writes_here(self.all_processes):
             return
         path = os.path.join(self.directory, f"{self.prefix}_{edge.step:08d}.npz")
         _atomic_savez(
@@ -1168,6 +1179,26 @@ class SnapshotWriter:
         self.paths.append(path)
 
 
+def _writes_here(all_processes: bool) -> bool:
+    """Whether this process writes a callback's file (process 0, or every one).
+
+    Parameters
+    ----------
+    all_processes : bool
+        The callback's opt-out: every process writes.
+
+    Returns
+    -------
+    bool
+        ``True`` in one process.
+    """
+    if all_processes:
+        return True
+    import jax
+
+    return int(jax.process_index()) == 0
+
+
 class DiagnosticsLog:
     """A callback that logs each edge's diagnostics, one JSON line per edge.
 
@@ -1176,10 +1207,18 @@ class DiagnosticsLog:
     path : Optional[str]
         A ``.jsonl`` file appended to (flushed per line), or ``None`` to keep the
         rows in :attr:`rows` only (they are kept either way).
+    all_processes : bool
+        Under several processes (``jax.distributed``), append to ``path`` on every
+        process (give each its own); ``False`` (the default): only process 0
+        writes the file (every process's rows are the same: the diagnostics are
+        mesh-wide), every process keeps :attr:`rows`. One process: no effect.
     """
 
-    def __init__(self, path: Optional[str] = None) -> None:
+    def __init__(
+        self, path: Optional[str] = None, *, all_processes: bool = False
+    ) -> None:
         self.path = path
+        self.all_processes = bool(all_processes)
         self.rows: list = []
 
     def __call__(self, edge: SegmentEdge) -> None:
@@ -1203,7 +1242,7 @@ class DiagnosticsLog:
             "near_capacity": caps.get("near_edge_capacity"),
         }
         self.rows.append(row)
-        if self.path is not None:
+        if self.path is not None and _writes_here(self.all_processes):
             with open(self.path, "a") as fh:
                 fh.write(json.dumps(row) + "\n")
                 fh.flush()
