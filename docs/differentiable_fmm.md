@@ -249,7 +249,11 @@ cols = lin.apply({"positions": D}, directions_per_pass=2)   # D: [n_dirs, N, 3]
   | 2e6 | 494 (494) | 990 (1690) | 71 (171) | 392 s (417 s) |
   | 8e6 | 410 (410) | 877 (1397) | 67 (141) | 387 s (414 s) |
 
-  `K = 1` is unchanged (one group). The run-time price (`K / g` launches of each
+  `K = 1` is unchanged (one group). At 2e6, `K = 8`, by group size: `g = 1` 854
+  B/p (compile 179 s: the tangent kernels at `K = 1` only), `g = 2` 990 (392 s),
+  `g = 4` 1265 (398 s), `g = 8` = ungrouped 1690 (417 s): each direction a group
+  holds costs ~137 B/p, each direction outside it ~51 (the boundary tangents).
+  The run-time price (`K / g` launches of each
   tangent kernel instead of one) is measured on HoreKa
   (`t_2p5e7_jacfwd_k8_group{1,2,4}` in `bench/slurm/forward_mode_timing.sbatch`);
   whether it becomes the default is decided there.
