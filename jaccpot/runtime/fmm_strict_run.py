@@ -341,9 +341,15 @@ class StrictRunMixin(_EngineBase):
         Optional[str]
             ``"full"`` (walk and tree), ``"walk"`` (walk only), or ``None``.
         """
+        from yggdrax import MAX_TREE_LEVELS
+
         from jaccpot.runtime.fused_topology import NEEDS_FIELDS
 
         if not env_flag("JACCPOT_STRICT_SEGMENT_RETRY", True):
+            return None
+        if int(needs[NEEDS_FIELDS.index("depth_needed")]) > int(MAX_TREE_LEVELS):
+            # past the radix tree's own level tables: no bound a re-plan grows
+            # covers it (_raise_scan_capacity_saturated says what does)
             return None
         if retries == 0:
             return "full"
@@ -423,7 +429,11 @@ class StrictRunMixin(_EngineBase):
         return "full" if int(needs[index("tree_overflow")]) else "walk"
 
     def _raise_scan_capacity_saturated(
-        self, needs: Optional[np.ndarray], *, retries: int = 0
+        self,
+        needs: Optional[np.ndarray],
+        *,
+        retries: int = 0,
+        positions: Optional[Any] = None,
     ) -> None:
         """Raise the fused scan's capacity error (after any retry was spent).
 
@@ -437,6 +447,10 @@ class StrictRunMixin(_EngineBase):
         retries : int
             Retries the segment ran before this failure (each a re-plan and a
             re-run from its start); the bounds named are then the grown ones.
+        positions : Optional[Any]
+            ``[N, 3]`` positions at the segment's start: a tree deeper than
+            ``MAX_TREE_LEVELS`` is then explained by the Morton box, the level-21
+            cell and the outliers (``yggdrax.domain_report``).
 
         Raises
         ------
@@ -493,6 +507,7 @@ class StrictRunMixin(_EngineBase):
         )
         if not named.get("tree_overflow"):
             raise RuntimeError(saturated + ran + walk)
+        self._raise_if_too_deep(named, positions, walk)
         # the cell-leaf tree first -- what overflowed, against which bound -- then
         # the walk's saturation when its lists saturated in the same segment
         walk_saturated = any(
@@ -554,6 +569,58 @@ class StrictRunMixin(_EngineBase):
             + (" In the same segment, " + saturated if walk_saturated else "")
             + ran
             + walk
+        )
+
+    def _raise_if_too_deep(
+        self, named: dict, positions: Optional[Any], walk: str
+    ) -> None:
+        """Raise when a step's tree was deeper than the radix tree's level tables.
+
+        ``MAX_TREE_LEVELS`` (64) is yggdrax's own bound, not a capacity: no
+        re-plan or ``TreeConfig`` setting covers a deeper tree. It comes from a
+        Morton box too large for the dense centre (many leaves in one level-21
+        cell), i.e. a few far outliers -- the 1e8 Sgr IC's sampler tails.
+
+        Parameters
+        ----------
+        named : dict
+            The segment's needs by name.
+        positions : Optional[Any]
+            ``[N, 3]`` positions at the segment's start, or ``None``.
+        walk : str
+            The needs sentence of the message.
+
+        Raises
+        ------
+        RuntimeError
+            If ``depth_needed`` exceeds ``MAX_TREE_LEVELS``.
+        """
+        from yggdrax import MAX_TREE_LEVELS, domain_report, format_domain_report
+
+        depth = int(named.get("depth_needed", 0))
+        if depth <= int(MAX_TREE_LEVELS):
+            return
+        detail = ""
+        if positions is not None:
+            try:
+                detail = (
+                    " At the segment's start: "
+                    + format_domain_report(domain_report(positions))
+                    + "."
+                )
+            except Exception:  # noqa: BLE001 -- the message must not mask the error
+                detail = ""
+        raise RuntimeError(
+            f"the cell-leaf tree overflowed inside the compiled velocity-Verlet "
+            f"scan: a step's rebuild needed a tree {depth} levels deep, past "
+            f"yggdrax's MAX_TREE_LEVELS ({int(MAX_TREE_LEVELS)}), which no re-plan "
+            "or TreeConfig setting raises: the forces from that step on would be "
+            "wrong. Many leaves share one level-21 Morton cell because the box is "
+            f"too large for the dense centre (far outliers or escapers).{detail} "
+            "Clip or remove the outliers, or move them off the tree (the escaper "
+            "prototype, jaccpot.escapers.EscaperPolicy); ProductionRunner's IC guard "
+            "(SegmentConfig(domain_guard=...)) reports this before the first "
+            "force." + walk
         )
 
     def refresh_prepared_state(
@@ -937,6 +1004,7 @@ class StrictRunMixin(_EngineBase):
         force_params: Optional[ForceParams] = None,
         external_params: Any = None,
         carry_total_acceleration: bool = False,
+        scheme: Any = None,
     ) -> tuple[Array, Optional[Any], Optional[Array]]:
         """Run endpoint-correct velocity Verlet with strict prepared-state refresh.
 
@@ -1088,6 +1156,14 @@ class StrictRunMixin(_EngineBase):
             steps against 6). Chained calls with it are one call of all the steps,
             bit for bit, and compile one scan program. The production runner
             (:class:`jaccpot.production.ProductionRunner`) passes it.
+        scheme : Any
+            ``carry="particles"`` only. ``None`` (the default): the built-in
+            velocity-Verlet expressions. A :class:`jaccpot.scheme.SplitStepScheme`
+            (``nornax.schemes.LeapfrogKDK``): its ``open_step`` replaces the drift
+            and its ``close_step`` the kick around the step's one force
+            evaluation; everything else (refresh, verdict, retry, handle) is
+            unchanged. Its ``key()`` joins the compile keys. A scheme that is not
+            ``rowwise`` keeps the input order (as the force-scale carry does).
 
         Returns
         -------
@@ -1110,8 +1186,8 @@ class StrictRunMixin(_EngineBase):
             a :class:`StrictParticleCarry` comes without it; if
             ``donate_state`` is asked without ``carry="particles"``; if
             ``force_params`` are refused (``mac_type='dehnen_error'``) or beyond
-            the walk's softening; or if ``external_params`` come without an
-            external field.
+            the walk's softening; if ``external_params`` come without an
+            external field; or if a ``scheme`` comes without ``carry="particles"``.
         """
         from jaccpot.runtime.strict_carry import (
             StrictParticleCarry,
@@ -1138,6 +1214,14 @@ class StrictRunMixin(_EngineBase):
                 "donate_state needs carry='particles' (the state carry donates its "
                 "prepared state instead: donate_prepared_state)"
             )
+        if scheme is not None:
+            from jaccpot.scheme import check_scheme
+
+            check_scheme(scheme)
+            if carry_mode != "particles":
+                raise ValueError(
+                    "scheme needs carry='particles' (the production runner's carry)"
+                )
         if carry_total_acceleration and carry_mode != "particles":
             raise ValueError(
                 "carry_total_acceleration needs carry='particles' (its handle "
@@ -1546,12 +1630,15 @@ class StrictRunMixin(_EngineBase):
             # step's verdict is the caller's, from the returned topology, after
             # the kick (where the scan has always folded it)
             dt_now = _dt(params)
-            position_new = (
-                state_now[:, 0]
-                + state_now[:, 1] * dt_now
-                + 0.5 * acceleration_now * dt_now**2
-            )
-            state_position = state_now.at[:, 0].set(position_new)
+            if scheme is None:
+                position_new = (
+                    state_now[:, 0]
+                    + state_now[:, 1] * dt_now
+                    + 0.5 * acceleration_now * dt_now**2
+                )
+                state_position = state_now.at[:, 0].set(position_new)
+            else:
+                state_position = scheme.open_step(state_now, acceleration_now, dt_now)
             topology_new, acceleration_self_new, scale_new = (
                 _refresh_and_evaluate_endpoint(
                     prepared_now, state_position, masses_in, scale_now, params
@@ -1567,12 +1654,17 @@ class StrictRunMixin(_EngineBase):
             # kick the drifted state: its positions are the drift's own (the full
             # update recomputed them from the old positions, which then had to
             # outlive the in-place drift for the whole step)
-            state_new = _velocity_verlet_kick_drifted(
-                state_position,
-                acceleration_now,
-                acceleration_new,
-                dt_now,
-            )
+            if scheme is None:
+                state_new = _velocity_verlet_kick_drifted(
+                    state_position,
+                    acceleration_now,
+                    acceleration_new,
+                    dt_now,
+                )
+            else:
+                state_new = scheme.close_step(
+                    state_position, acceleration_now, acceleration_new, dt_now
+                )
             if rematerialize_between_refresh:
                 state_new = jnp.asarray(state_new, dtype=state_now.dtype)
             if emit and step_callback is not None:
@@ -1606,6 +1698,8 @@ class StrictRunMixin(_EngineBase):
             and step_callback is None
             # the force-scale carry rides the input order only
             and not scale_carry
+            # a scheme that reads other rows sees them in input order only
+            and (scheme is None or bool(scheme.rowwise))
         )
 
         def _advance_tree_order(
@@ -1619,12 +1713,15 @@ class StrictRunMixin(_EngineBase):
             # `_advance` with the rows in the carry's order; returns the state, the
             # accelerations, masses and input indices in the NEW tree order
             dt_now = _dt(params)
-            position_new = (
-                state_now[:, 0]
-                + state_now[:, 1] * dt_now
-                + 0.5 * acceleration_now * dt_now**2
-            )
-            state_position = state_now.at[:, 0].set(position_new)
+            if scheme is None:
+                position_new = (
+                    state_now[:, 0]
+                    + state_now[:, 1] * dt_now
+                    + 0.5 * acceleration_now * dt_now**2
+                )
+                state_position = state_now.at[:, 0].set(position_new)
+            else:
+                state_position = scheme.open_step(state_now, acceleration_now, dt_now)
             topology_new = prov._rebuild_like(
                 prepared_now, state_position[:, 0, :], masses_now
             )
@@ -1667,12 +1764,17 @@ class StrictRunMixin(_EngineBase):
                 )
             else:
                 acceleration_new = acceleration_self_new
-            state_new = _velocity_verlet_kick_drifted(
-                state_sorted,
-                acceleration_prev,
-                acceleration_new,
-                dt_now,
-            )
+            if scheme is None:
+                state_new = _velocity_verlet_kick_drifted(
+                    state_sorted,
+                    acceleration_prev,
+                    acceleration_new,
+                    dt_now,
+                )
+            else:
+                state_new = scheme.close_step(
+                    state_sorted, acceleration_prev, acceleration_new, dt_now
+                )
             if rematerialize_between_refresh:
                 state_new = jnp.asarray(state_new, dtype=state_now.dtype)
             return (
@@ -1742,6 +1844,8 @@ class StrictRunMixin(_EngineBase):
                     bool(return_history),
                     id(step_callback) if step_callback is not None else 0,
                     int(step_callback_stride),
+                    # a scheme's arithmetic (the built-in's keys stay as they were)
+                    *(() if scheme is None else (("scheme", scheme.key()),)),
                 ),
                 return_history=bool(return_history),
                 step_callback=step_callback,
@@ -2598,7 +2702,19 @@ class StrictRunMixin(_EngineBase):
                 else None
             )
             if mode is None:
-                self._raise_scan_capacity_saturated(needs, retries=retries)
+                self._raise_scan_capacity_saturated(
+                    needs,
+                    retries=retries,
+                    positions=(
+                        start_host[:, 0]
+                        if start_host is not None
+                        else (
+                            None
+                            if donate_state_now and ran_scan
+                            else state_now[:, 0, :]
+                        )
+                    ),
+                )
             failures.append((self._strict_particle_failed_step, needs))
             if retries == 0:
                 tree_first = bool(needs[NEEDS_FIELDS.index("tree_overflow")])

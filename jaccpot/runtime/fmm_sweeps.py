@@ -242,6 +242,7 @@ class SweepsMixin(_EngineBase):
             # tree's overflow flag, so a deeper tree trips the capacity guard
             # rather than truncating the M2M/L2L sweeps.
             probe = getattr(tree, "parent", None)
+            depth = None
             if probe is not None and not isinstance(probe, Tracer):
                 try:
                     levels = get_node_levels(tree)
@@ -252,6 +253,13 @@ class SweepsMixin(_EngineBase):
                         self._cells_upward_num_levels = max(bound, prev or 0)
                 except Exception:
                     pass
+            if depth is not None and depth > 64:
+                # past yggdrax's level tables (MAX_TREE_LEVELS): the eager sweeps
+                # would skip the deeper nodes silently (a jitted eager build cannot
+                # raise itself); the tree's own box names the cause
+                from yggdrax import check_tree_depth
+
+                check_tree_depth(tree)
             return getattr(self, "_cells_upward_num_levels", None)
         probe = getattr(tree, "parent", None)
         if probe is None or isinstance(probe, Tracer):

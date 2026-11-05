@@ -13,6 +13,7 @@ Not a test module (no ``test_`` prefix): the children import it after
 
 from __future__ import annotations
 
+import dataclasses
 import os
 
 import jax
@@ -229,6 +230,8 @@ def _cpu_fused_lane(criterion: bool) -> None:
     """The CPU end-to-end switches of ``test_mesh_segment_runner.py`` (for good)."""
     import yggdrax.distributed.comm as ygg_comm
 
+    if jax.default_backend() == "gpu":
+        return  # a real GPU: the real lane, the library's walk caps
     jax.default_backend = lambda: "gpu"
     resolve = ygg_comm.resolve_ragged_method
     ygg_comm.resolve_ragged_method = lambda method="auto": (
@@ -244,7 +247,8 @@ def _cpu_fused_lane(criterion: bool) -> None:
 
 
 def fused_runner(n: int) -> dict:
-    """``ProductionRunner(mesh=...)`` on ``FusedMeshForce`` (the CPU fused lane).
+    """``ProductionRunner(mesh=...)`` on ``FusedMeshForce`` (the CPU fused lane;
+    on a GPU backend the real lane with the library's walk caps).
 
     ``M2_MAC`` (``dehnen`` / ``dehnen_error``), ``M2_MIGRATE`` (0/1),
     ``M2_LEAF_CAPACITY`` (64) and ``M2_IC`` (``cube``; ``collapse``: the A3
@@ -373,3 +377,398 @@ def fused_runner(n: int) -> dict:
     if "force_scale" in got:
         out["force_scale"] = got["force_scale"]
     return out
+
+
+# ----------------------------------------------------------------------
+# The collectives the mesh runner uses (the GPU spike: NCCL across processes).
+# ----------------------------------------------------------------------
+
+
+def _ragged_sizes(n: int) -> np.ndarray:
+    """``[n, n]`` rows device ``s`` sends device ``i``: above the ~512-row
+    threshold of the NCCL-fallback defect (#398), all distinct."""
+    s, i = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    return (600 + 37 * s + 101 * i).astype(np.int32)
+
+
+def collectives(n: int) -> dict:
+    """Every collective of the mesh runner, inside ``jit(shard_map)``, 3 calls each.
+
+    ``psum`` (float32 / float64, elementwise over 4096 x 7 and of scalars; int32),
+    ``pmax``, ``pmin``, ``all_gather``, ``all_to_all``, ``ppermute`` and the ragged
+    exchange (``M2_RAGGED``: ``native`` -- ``jax.lax.ragged_all_to_all`` --,
+    ``exchange`` -- yggdrax's ``ragged_all_to_all_exchange`` (``auto``), with its
+    flag guard -- or ``none``), each called three times with new data (the NCCL
+    fallback's defect delivers no cross-device rows on the first call and hangs on
+    the second). Returns every result and whether the exact ones match a host
+    reference (``*_ok``).
+    """
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
+
+    ragged = os.environ.get("M2_RAGGED", "native")
+    mesh = mp.global_mesh(AXIS)
+    rows, feat = 4096, 7
+    sharding = NamedSharding(mesh, P(AXIS))
+    sizes = _ragged_sizes(n)
+    c_in = int(sizes.sum(axis=1).max()) + 64
+    c_out = int(sizes.sum(axis=0).max()) + 64
+    width = 56
+
+    def body(x32, x64, ints, payload):
+        me = jax.lax.axis_index(AXIS)
+        out = {
+            "psum_f32": jax.lax.psum(x32, AXIS),
+            "psum_f64": jax.lax.psum(x64, AXIS),
+            "psum_f32_scalar": jax.lax.psum(jnp.sum(x32), AXIS)[None],
+            "psum_f64_scalar": jax.lax.psum(jnp.sum(x64), AXIS)[None],
+            "psum_i32": jax.lax.psum(ints, AXIS),
+            "pmax": jax.lax.pmax(x32, AXIS),
+            "pmin": jax.lax.pmin(ints, AXIS),
+            "all_gather": jax.lax.all_gather(x32[:8], AXIS, tiled=True),
+            "all_to_all": jax.lax.all_to_all(
+                x32.reshape(n, rows // n, feat), AXIS, 0, 0, tiled=True
+            ).reshape(rows, feat),
+            "ppermute": jax.lax.ppermute(
+                x64, AXIS, perm=[(d, (d + 1) % n) for d in range(n)]
+            ),
+        }
+        out = {k: v[None] for k, v in out.items()}
+        if ragged != "none":
+            my = jnp.asarray(sizes)[me]
+            if ragged == "exchange":
+                from yggdrax.distributed.comm import ragged_all_to_all_exchange
+
+                got, _, _ = ragged_all_to_all_exchange(
+                    payload, my, output_capacity=c_out, axis_name=AXIS, fill_value=-1.0
+                )
+            else:
+                full = jnp.asarray(sizes)
+                in_off = jnp.cumsum(full, axis=1) - full
+                out_off = jnp.cumsum(full, axis=0) - full
+                got = jax.lax.ragged_all_to_all(
+                    payload,
+                    jnp.full((c_out, width), -1.0, payload.dtype),
+                    in_off[me],
+                    full[me],
+                    out_off[me],
+                    full[:, me],
+                    axis_name=AXIS,
+                )
+            out["ragged"] = got[None]
+        return out
+
+    program = jax.jit(
+        jax.shard_map(
+            body,
+            mesh=mesh,
+            in_specs=(P(AXIS),) * 4,
+            out_specs=P(AXIS),
+            check_vma=False,
+        )
+    )
+    result: dict = {"ragged_mode": ragged, "backend": jax.default_backend()}
+    for call in range(3):
+        rng = np.random.default_rng(100 + call)
+        x32 = rng.standard_normal((n * rows, feat)).astype(np.float32) * np.float32(
+            10.0
+        ) ** rng.integers(-6, 6, (n * rows, 1)).astype(np.float32)
+        x64 = rng.standard_normal((n * rows, feat)) * 10.0 ** rng.integers(
+            -12, 12, (n * rows, 1)
+        )
+        ints = rng.integers(-1000, 1000, (n * rows, feat)).astype(np.int32)
+        # sender s's rows for i: value s * 1e6 + i * 1e4 + row (exact in f32)
+        payload = np.full((n, c_in, width), -2.0, np.float32)
+        for s in range(n):
+            lo = 0
+            for i in range(n):
+                k = int(sizes[s, i])
+                payload[s, lo : lo + k] = (
+                    s * 1e6 + i * 1e4 + np.arange(k, dtype=np.float32)
+                )[:, None]
+                lo += k
+        args = [
+            jax.device_put(a, sharding)
+            for a in (x32, x64, ints, payload.reshape(n * c_in, width))
+        ]
+        got = {k: mp.host_value(v) for k, v in program(*args).items()}
+        for k, v in got.items():
+            result[f"call{call}_{k}"] = v
+        # the host references of the exact ones
+        blocks = lambda a: a.reshape(n, rows, feat)  # noqa: E731
+        ok = {
+            "psum_i32": np.array_equal(
+                got["psum_i32"][0], blocks(ints).sum(0, dtype=np.int32)
+            ),
+            "pmax": np.array_equal(got["pmax"][0], blocks(x32).max(0)),
+            "pmin": np.array_equal(got["pmin"][0], blocks(ints).min(0)),
+            "all_gather": all(
+                np.array_equal(
+                    got["all_gather"][d], blocks(x32)[:, :8].reshape(-1, feat)
+                )
+                for d in range(n)
+            ),
+            "all_to_all": all(
+                np.array_equal(
+                    got["all_to_all"][d].reshape(n, rows // n, feat),
+                    blocks(x32)[:, d * (rows // n) : (d + 1) * (rows // n)],
+                )
+                for d in range(n)
+            ),
+            "ppermute": all(
+                np.array_equal(got["ppermute"][(d + 1) % n], blocks(x64)[d])
+                for d in range(n)
+            ),
+        }
+        # an elementwise float psum: in mesh order (a0 + a1) + ..., or not?
+        fold32, fold64 = blocks(x32)[0].copy(), blocks(x64)[0].copy()
+        for d in range(1, n):
+            fold32, fold64 = fold32 + blocks(x32)[d], fold64 + blocks(x64)[d]
+        result[f"call{call}_psum_f32_mesh_order_differs"] = int(
+            np.sum(got["psum_f32"][0] != fold32)
+        )
+        result[f"call{call}_psum_f64_mesh_order_differs"] = int(
+            np.sum(got["psum_f64"][0] != fold64)
+        )
+        if ragged != "none":
+            want = np.full((n, c_out, width), -1.0, np.float32)
+            for i in range(n):
+                lo = 0
+                for s in range(n):
+                    k = int(sizes[s, i])
+                    want[i, lo : lo + k] = (
+                        s * 1e6 + i * 1e4 + np.arange(k, dtype=np.float32)
+                    )[:, None]
+                    lo += k
+            ok["ragged"] = np.array_equal(got["ragged"], want)
+            result[f"call{call}_ragged_rows_wrong"] = int(
+                np.any(got["ragged"] != want, axis=-1).sum()
+            )
+        result[f"call{call}_ok"] = {k: bool(v) for k, v in ok.items()}
+    result["process_count"] = jax.process_count()
+    result["devices"] = [str(d) for d in np.asarray(mesh.devices).reshape(-1)]
+    return result
+
+
+# ----------------------------------------------------------------------
+# The fused force at a size that exercises the cross field (GPU).
+# ----------------------------------------------------------------------
+
+
+def _plummer(num: int, seed: int) -> tuple:
+    """A G = M = a = 1 Plummer sphere (radii clipped at 20), float32, mass 1/N."""
+    rng = np.random.default_rng(seed)
+    u = rng.uniform(1e-6, 1.0 - 1e-6, num)
+    r = np.minimum(1.0 / np.sqrt(u ** (-2.0 / 3.0) - 1.0), 20.0)
+    mu, phi = rng.uniform(-1.0, 1.0, num), rng.uniform(0.0, 2.0 * np.pi, num)
+    st = np.sqrt(1.0 - mu * mu)
+    direction = np.stack([st * np.cos(phi), st * np.sin(phi), mu], 1)
+    pos = r[:, None] * direction
+    q = np.empty(num)
+    todo = np.arange(num)
+    while todo.size:
+        x = rng.uniform(0.0, 1.0, todo.size)
+        y = rng.uniform(0.0, 0.1, todo.size)
+        ok = y < x * x * (1.0 - x * x) ** 3.5
+        q[todo[ok]] = x[ok]
+        todo = todo[~ok]
+    speed = q * np.sqrt(2.0) * (1.0 + r * r) ** -0.25
+    mu, phi = rng.uniform(-1.0, 1.0, num), rng.uniform(0.0, 2.0 * np.pi, num)
+    st = np.sqrt(1.0 - mu * mu)
+    vel = speed[:, None] * np.stack([st * np.cos(phi), st * np.sin(phi), mu], 1)
+    state = np.stack([pos, vel], axis=1).astype(np.float32)
+    return state, np.full(num, 1.0 / num, np.float32)
+
+
+def fused_runner_large(n: int) -> dict:
+    """The production preset's fused mesh force on a Plummer sphere (GPU-sized).
+
+    ``preset="galaxy"`` (leaf 64, p6, ``dehnen_error`` at 1e-4) or, with
+    ``M2_MAC=dehnen``, the same with the ``dehnen`` MAC; ``M2_N_PER_DEVICE``
+    particles per device (default 2e5), ``M2_SEGMENTS`` (3) segments of
+    ``M2_STEPS`` (2) steps at ``M2_DT`` (5e-3; ``M2_SPEEDUP`` (4) times the
+    equilibrium speeds so rows change device), a repartition before every
+    segment after the first, the energy at every edge, migration unless
+    ``M2_MIGRATE=0``. ``M2_SMALL_CROSS=1`` (default) starts from cross
+    capacities far too small (the first segment's cross flag fires: a cross
+    re-plan and a retry); ``0`` the library's sizing.
+    """
+    from jaccpot import FastMultipoleMethod
+    from jaccpot.distributed.cross import CrossCapacities
+    from jaccpot.production import (
+        GALAXY_SETTINGS,
+        GalaxySettings,
+        MeshRunConfig,
+        ProductionRunner,
+        SegmentConfig,
+    )
+
+    mac = os.environ.get("M2_MAC", "dehnen_error")
+    migrate = os.environ.get("M2_MIGRATE", "1") == "1"
+    per_device = int(float(os.environ.get("M2_N_PER_DEVICE", "2e5")))
+    segments = int(os.environ.get("M2_SEGMENTS", "3"))
+    steps = int(os.environ.get("M2_STEPS", "2"))
+    dt = float(os.environ.get("M2_DT", "5e-3"))
+    speedup = float(os.environ.get("M2_SPEEDUP", "4"))
+    small_cross = os.environ.get("M2_SMALL_CROSS", "1") == "1"
+    num = per_device * n
+    _cpu_fused_lane(mac == "dehnen_error")  # a no-op on a GPU
+    if mac == "dehnen_error":
+        solver = FastMultipoleMethod(preset="galaxy", G=1.0, softening=1e-3)
+        settings = GALAXY_SETTINGS
+    else:
+        base = FastMultipoleMethod(preset="galaxy").advanced
+        solver = FastMultipoleMethod(
+            preset="galaxy",
+            G=1.0,
+            softening=1e-3,
+            advanced=dataclasses.replace(base, mac_type="dehnen"),
+        )
+        settings = GalaxySettings(mac_type="dehnen", adaptive_eps=None)
+    cross: object = "auto"
+    if small_cross:
+        cross = CrossCapacities(max_cells=64, leaf_width=64)._with(
+            recv_node_cap=64, send_particle_cap=512
+        )
+    state, mass = _plummer(num, seed=11)
+    state[:, 1] *= np.float32(speedup)
+    mesh = mp.global_mesh(AXIS)
+    runner = ProductionRunner(
+        solver,
+        settings=settings,
+        segment=SegmentConfig(steps=steps, diagnostics_every_energy=1),
+        mesh=MeshRunConfig(mesh, cross_caps=cross, migrate=migrate),
+    )
+    s, m = _input(state, mass, mesh)
+    res = runner.run(s, m, dt=dt, num_steps=steps * segments)
+    got = res.handle.gather()
+    out = {
+        "state": res.state,
+        "acceleration": got["acceleration"],
+        "owner": got["owner"],
+        "edges": _edges(res),
+        "reports": _reports(res.handle),
+        "num_particles": num,
+        "peak_bytes": [
+            int((d.memory_stats() or {}).get("peak_bytes_in_use", 0))
+            for d in jax.local_devices()
+        ],
+    }
+    if "force_scale" in got:
+        out["force_scale"] = got["force_scale"]
+    return out
+
+
+# ----------------------------------------------------------------------
+# The built-in writers, and how the run was launched.
+# ----------------------------------------------------------------------
+
+
+def writers(n: int) -> dict:
+    """``SnapshotWriter`` / ``DiagnosticsLog`` on the direct-force runner.
+
+    ``M2_WRITER_DIR`` is the side's directory: the default writers write there
+    (process 0 only under several processes), the ``all_processes=True`` ones
+    into ``.../p<process>/``. Returns the files' contents and, per process, what
+    the writers kept and wrote.
+    """
+    import glob
+    import json
+
+    from jaccpot import FastMultipoleMethod
+    from jaccpot.distributed.segment import DirectMeshForce
+    from jaccpot.production import (
+        DiagnosticsLog,
+        MeshRunConfig,
+        ProductionRunner,
+        SegmentConfig,
+        SnapshotWriter,
+    )
+
+    base = os.environ["M2_WRITER_DIR"]
+    me = jax.process_index()
+    mesh = mp.global_mesh(AXIS)
+    num, g, soft = 128, 1e-3, 0.05
+    rng = np.random.default_rng(1)
+    state = np.stack(
+        [rng.uniform(0.0, 1.0, (num, 3)), 0.3 * rng.normal(size=(num, 3))], axis=1
+    )
+    masses = np.full(num, 1.0 / num)
+    shared_dir = os.path.join(base, "snapshots")
+    log_path = os.path.join(base, "diagnostics.jsonl")
+    own_dir = os.path.join(base, f"p{me}")
+    snap = SnapshotWriter(shared_dir)
+    log = DiagnosticsLog(log_path)
+    snap_all = SnapshotWriter(own_dir, all_processes=True)
+    log_all = DiagnosticsLog(os.path.join(own_dir, "d.jsonl"), all_processes=True)
+    runner = ProductionRunner(
+        FastMultipoleMethod(preset="large_n_gpu", G=g, softening=soft),
+        segment=SegmentConfig(steps=2, diagnostics_every_energy=1),
+        callbacks=(snap, log, snap_all, log_all),
+        mesh=MeshRunConfig(
+            mesh,
+            cap=int(np.ceil(1.6 * num / n)),
+            num_samples=64,
+            force=DirectMeshForce(G=g, softening=soft, axis_name=AXIS),
+        ),
+    )
+    s, m = _input(state, masses, mesh)
+    runner.run(s, m, dt=0.01, num_steps=4)
+    kept = mp.allgather_object(
+        {
+            "paths": [os.path.relpath(p, base) for p in snap.paths],
+            "rows": len(log.rows),
+            "paths_all": [os.path.relpath(p, base) for p in snap_all.paths],
+            "rows_all": len(log_all.rows),
+        }
+    )
+    out: dict = {"kept": kept}
+    files = sorted(glob.glob(os.path.join(shared_dir, "*.npz")))
+    out["snapshot_files"] = [os.path.basename(p) for p in files]
+    for p in files:
+        with np.load(p) as data:
+            out[f"snapshot_{os.path.basename(p)}"] = np.asarray(data["state"])
+    with open(log_path) as fh:
+        rows = [json.loads(line) for line in fh]
+    for row in rows:
+        row.pop("wall_s", None)
+    out["log_rows"] = rows
+    out["own_dirs"] = sorted(
+        os.path.basename(p) for p in glob.glob(os.path.join(base, "p*"))
+    )
+    out["own_files"] = sorted(
+        os.path.relpath(p, base) for p in glob.glob(os.path.join(base, "p*", "*"))
+    )
+    return out
+
+
+def launch(n: int) -> dict:
+    """How this process joined: its devices and what ``initialize`` passed.
+
+    Under the harness's SLURM launcher ``initialize()`` had no arguments (jax's
+    SLURM detection; on a one-card task ``slurm_bound_device_ids``). A psum
+    over the global mesh checks the processes are joined.
+    """
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
+
+    mesh = mp.global_mesh(AXIS)
+    info = mp.allgather_object(
+        {
+            "process": jax.process_index(),
+            "count": jax.process_count(),
+            "local": [d.id for d in jax.local_devices()],
+            "bound": mp.slurm_bound_device_ids(),
+        }
+    )
+    x = jax.device_put(np.arange(n, dtype=np.float32), NamedSharding(mesh, P(AXIS)))
+    total = jax.jit(
+        jax.shard_map(
+            lambda a: jax.lax.psum(a, AXIS),
+            mesh=mesh,
+            in_specs=P(AXIS),
+            out_specs=P(),
+            check_vma=False,
+        )
+    )(x)
+    return {"info": info, "psum": mp.host_value(total)}

@@ -216,6 +216,7 @@ N = 512: 1 of 3072 state components, 1.9e-6, after 3 x 2 steps against 6).
 | `diagnostics` | all | of `"momentum"`, `"angular_momentum"`, `"com"`, `"kinetic"`, `"energy"` |
 | `diagnostics_every_energy` | 10 | edges between energy diagnostics |
 | `restart_every`, `restart_path` | 0, `None` | a restart file every n segments; `{step}` / `{segment}` are formatted into the path, otherwise each restart replaces the last |
+| `domain_guard` | `"warn"` | the IC guard before a run's first segment (`jaccpot.domain.domain_guard`, A2): warns when a few far particles set the Morton box (more than 20x the diameter holding 99.9 % of the particles), with the box, the level-21 cell, the farthest particle and a tree-depth bound; `"error"` refuses the run; `"off"` measures nothing. It reads the state only: no program changes. |
 
 **Segment lengths.** `num_steps` is part of a scan's compile key: every distinct segment
 length compiles its own scan (a ragged 14-step last segment recompiled for 52.8 s at 25M
@@ -322,7 +323,8 @@ fetched to the host), against step 0's baselines (`RunResult.baselines`):
 | `com`, `com_drift` | `sum m x / M`; `|COM - COM0 - P0/M (t - t0)|` (against its free motion) |
 | `kinetic`, `kinetic_change` | `K = 1/2 sum m v^2`; `(K - K0) / K0` |
 | `potential_self`, `potential_external`, `potential` | `W_self = 1/2 sum m phi` (the fused lane's O(N) potential at the edge's positions), `W_ext = sum m Phi_ext` (`external_potential_fn`; 0 without), `W = W_self + W_ext` |
-| `energy`, `energy_drift`, `energy_ok` | `E = K + W`; `(E - E0) / |E0|`; whether the potential's rebuild fitted its capacities (otherwise the energy fields are `None`) |
+| `energy`, `energy_drift`, `energy_ok` | `E = K + W`; `(E - E0) / |E0|`; whether the potential's rebuild fitted its capacities (otherwise the energy fields are `None`, and the row WARNS) |
+| `energy_replans` | the energy-only re-plans the potential needed at this edge (#488; 0 normally) |
 
 An external field changes P and L physically; the drifts then measure that.
 
@@ -338,6 +340,24 @@ external_params]) -> [N]` is the field's potential per unit mass, with the field
 contract and parameters. The energy program's trace leaves the engine's trace-time state
 as it was (`_trace_state_kept`), so the trajectory with it is the one without (R4,
 bitwise).
+
+**It is never silently blind (#488, A2).** The energy program's key holds the level
+registry (the level loops' batch widths, read when a program traces and in no provider
+key): before, a width-only tree re-plan left the energy program on the old width, and
+the 4.7e7 merger lost every energy row from t 6.15 to the end while the force ran with
+`retries 0`. A rebuild that still does not fit is re-planned for the energy alone --
+the rebuild's needs, `FusedForceProvider.replanned` at the edge's positions, at most
+twice, all inside `_trace_state_kept`, so the force's plan and programs are untouched --
+and the grown program is kept for the plan. Only when that fails (the segment retry off,
+a named cap) is the row blind, and then it warns (`RuntimeWarning` with the time, the
+overflow bits and the re-plans tried); a blind `E0` warns too.
+
+**Wide boxes (A2).** A tree deeper than yggdrax's `MAX_TREE_LEVELS` (64) raises --
+`yggdrax.TreeDepthError` at the eager prepare, a `RuntimeError` from the scan (never
+re-planned: no bound covers it) -- with the Morton box, the level-21 cell and the
+farthest particle. The IC guard above warns first. Far particles can leave the tree on
+the escaper path (`jaccpot.escapers`, a prototype: see `docs/production_2026-11.md`,
+A2).
 
 ## Restart files
 
@@ -363,6 +383,50 @@ that run (`tests/integration/strict/test_production_runner.py`: 2 segments, a re
 external field with traced parameters, traced force parameters). Not equal, the runner
 warns, records the mismatches in `RunResult.restored`, and continues: correct, not
 bitwise.
+
+## Integration schemes (multi-node plan I1)
+
+nornax owns the integration schemes, jaccpot the force and the run (decision U1).
+`ProductionRunner(scheme=...)` takes a scheme through the structural protocol
+`jaccpot.scheme.SplitStepScheme`; jaccpot does not import nornax.
+
+```python
+from nornax import LeapfrogKDK                 # nornax.schemes.LeapfrogKDK
+runner = ProductionRunner(solver, settings=GALAXY_SETTINGS, scheme=LeapfrogKDK())
+```
+
+A step of the segment scan is cut at its one force evaluation:
+
+```
+state_open = scheme.open_step(state, acceleration, dt)          # nornax
+acceleration_new = self-gravity + external field at state_open[:, 0]   # jaccpot
+state_new = scheme.close_step(state_open, acceleration, acceleration_new, dt)  # nornax
+```
+
+`state` is the packed `[N, 2, 3]` carry, `acceleration` the total acceleration at its
+positions. The tree refresh, the capacity verdict, the walk/tree re-plan and segment
+retry, donation, restarts and diagnostics all stay the runner's; a scheme changes only
+the two expressions around the force. The carry's acceleration is the field at the
+carried positions (first same as last), so the protocol hosts every scheme with one
+force evaluation per step at its end: the KDK leapfrog, and later the P3T-style hybrid
+Hermite (U6), whose `open_step` integrates the direct-sum subsystems. Block steps and
+multi-stage schemes are not split steps.
+
+- `scheme=None` (the default) is the built-in velocity-Verlet KDK: the same programs
+  as before (identity vs the wave-2 base, 36/36).
+- `LeapfrogKDK()` writes the built-in's expressions operand for operand (nornax's
+  `drift_positions` / `kick_velocities`, which its own rollouts call), so it is the
+  built-in, bit for bit (`tests/integration/strict/test_runner_scheme.py`: literal and
+  traced parameters, an external field, the tree-order carry; nornax's
+  `tests/integration/test_jaccpot_provider_rollout.py` with the real one).
+- The scheme's `key()` joins the scan's compile key: its programs are its own.
+- `rowwise`: the tree-order carry (`JACCPOT_STRICT_CARRY_ORDER=tree`) hands the
+  scheme permuted rows; a scheme that is not rowwise keeps the input order.
+- A restart file records the scheme (`meta["scheme"]`, only when there is one);
+  continuing it under another scheme warns `"scheme"` in the mismatches.
+- Refused: the multi-GPU mode (`mesh=`; its seam is I2), the gradient mode (it
+  differentiates the built-in; nornax's `leapfrog_kdk_rollout` over
+  `FusedProviderForce` is the differentiable route), and `strict_run_v2(carry="state")`.
 
 ## Gradient mode (S9 session 2)
 

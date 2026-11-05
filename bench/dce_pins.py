@@ -59,6 +59,11 @@ R1x    S1x's particle arm through the runner, chained (1, 4, 4, 4 steps) and in 
 R1r    R1p with a restart file written at step 5, then the sequence continued from
        it in a FRESH process (``--runner-resume``, no eval prepare): passes when that
        state is the straight run's, bitwise, and the restore's digests matched
+R1pN   R1p with nornax's KDK as the runner's scheme (``--runner-scheme nornax_kdk``,
+       multi-node plan I1): compared with the reference's R1p, so it passes when
+       nornax's scheme is the built-in KDK, bit for bit
+R1xN   R1x with nornax's KDK: compared with the reference's R1x arrays (both arms),
+       its own chained-vs-once verdict in its meta
 DET1   S1 recorded WITHOUT ``--xla_gpu_deterministic_ops`` (the production flags:
        the caller's, plus XLA's fusion autotuner off)
 DET2   S4b's large-N gradient, recorded the same way
@@ -113,6 +118,9 @@ The runner pins (S3: R1p, R1x, R1r) are not in the default set either:
 ``record --pins R1p,R1x,R1r`` and ``compare <ref> <new> --pins R1p,R1x,R1r
 --envelope <ref>-b``. R1p is compared with the reference's S1p when the reference has
 no R1p of its own (``_REFERENCE_PIN``); R1x and R1r check their own two arms.
+The scheme pins (I1: R1pN, R1xN) are recorded under their own tag and compared
+with a tag holding R1p and R1x: ``compare <ref> <scheme-tag> --pins R1pN,R1xN
+--envelope <ref>-b`` (nornax on the path).
 
 The DET pins answer one question: is the production path bitwise reproducible?
 Record them twice under the same code (``record --tag X --pins DET1,DET2`` and
@@ -168,13 +176,14 @@ PINS_S1_VARIANTS = ("S1p", "S1t", "S1e", "S1x", "S1g")
 PINS_TWO_CARD = ("M1", "M2", "M3")
 PINS_LARGE = ("L1", "L2", "L3")
 PINS_DET = ("DET1", "DET2", "DET3")
-#: the production runner's pins (S3); not in the default set
-PINS_RUNNER = ("R1p", "R1x", "R1r")
+#: the production runner's pins (S3); not in the default set. R1pN / R1xN: the same
+#: with nornax's KDK as the runner's scheme (I1)
+PINS_RUNNER = ("R1p", "R1x", "R1r", "R1pN", "R1xN")
 #: pass or fail on their own record, whatever the reference
 PINS_SELF = ("G1", "R1x", "R1r")
 #: a pin compared with ANOTHER pin's arrays in the reference tag when the reference
 #: has none of its own: the runner's R1p computes S1p's numbers
-_REFERENCE_PIN = {"R1p": "S1p"}
+_REFERENCE_PIN = {"R1p": "S1p", "R1pN": "R1p", "R1xN": "R1x"}
 #: recorded without --xla_gpu_deterministic_ops: they time the lane, or test whether
 #: the production flags alone reproduce it
 _PRODUCTION_FLAGS = frozenset(PINS_LARGE + PINS_DET)
@@ -326,14 +335,21 @@ def case_s1g(out: Path) -> dict:
 
 
 _RUNNER = ["--runner"]
+#: nornax's KDK as the runner's scheme (I1)
+_NORNAX_KDK = ["--runner-scheme", "nornax_kdk"]
 
 
-def case_r1p(out: Path) -> dict:
+def case_r1p(out: Path, scheme: tuple = ()) -> dict:
     """S1p's calls through the ProductionRunner (S3 R1p)."""
-    return _fused_bench(out, 200_000, _PARTICLE_CARRY + _RUNNER)
+    return _fused_bench(out, 200_000, _PARTICLE_CARRY + _RUNNER + list(scheme))
 
 
-def case_r1x(out: Path) -> dict:
+def case_r1pn(out: Path) -> dict:
+    """R1p with nornax's KDK as the runner's scheme (I1)."""
+    return case_r1p(out, tuple(_NORNAX_KDK))
+
+
+def case_r1x(out: Path, scheme: tuple = ()) -> dict:
     """S1x's particle arm through the runner: chained calls against one segment."""
     import numpy as np
 
@@ -343,7 +359,11 @@ def case_r1x(out: Path) -> dict:
         row = _fused_bench(
             part,
             200_000,
-            ["--softening", _DISC_SOFTENING] + _PARTICLE_CARRY + _RUNNER + more,
+            ["--softening", _DISC_SOFTENING]
+            + _PARTICLE_CARRY
+            + _RUNNER
+            + more
+            + list(scheme),
             ic="disc",
         )
         with np.load(part) as data:
@@ -358,6 +378,11 @@ def case_r1x(out: Path) -> dict:
         "n_diff": int(np.count_nonzero(differ)),
         "max_abs": float(np.max(np.abs(arrays["state"] - arrays["state_once"]))),
     }
+
+
+def case_r1xn(out: Path) -> dict:
+    """R1x with nornax's KDK as the runner's scheme (I1)."""
+    return case_r1x(out, tuple(_NORNAX_KDK))
 
 
 def case_r1r(out: Path) -> dict:
@@ -1001,8 +1026,10 @@ CASES = {
     "DET2": case_det2,
     "DET3": case_det3,
     "R1p": case_r1p,
+    "R1pN": case_r1pn,
     "R1r": case_r1r,
     "R1x": case_r1x,
+    "R1xN": case_r1xn,
     "G1": case_g1,
     "L1": case_l1,
     "L2": case_l2,
@@ -1270,7 +1297,7 @@ def main(argv: list[str]) -> int:
         help=(
             "M1,M2,M3 for the two-card set; L1,L2,L3 timing; DET1,DET2,DET3 "
             "determinism; G1 differentiable == production; R1p,R1x,R1r the "
-            "production runner"
+            "production runner; R1pN,R1xN the runner with nornax's KDK"
         ),
     )
     cmp_.add_argument("--root", default=ROOT_DEFAULT)

@@ -42,7 +42,9 @@ over every process's devices (``multiprocess.global_mesh``). Each process may
 pass only its id range (``ProcessLocalParticles``); host reads of sharded arrays
 are gathered over the processes, float reductions folded in mesh order, so the
 run is bitwise the single process's on the same devices. Callbacks run on every
-process. Restart files are refused (one ``.npz`` through one host; sharded
+process (an edge's gathers are collectives: every process must make them);
+``SnapshotWriter`` and ``DiagnosticsLog`` write their files on process 0 only
+(``all_processes=True`` to write on each). Restart files are refused (one ``.npz`` through one host; sharded
 checkpoints are track M3); ``restart_from=<RunResult>`` continues in memory.
 
 **Restart files** hold the state, masses, total acceleration and (under the
