@@ -407,9 +407,18 @@ rebuild already did.
 ### The IC guard
 
 `jaccpot.domain.domain_check` gives the Morton box, the level-21 cell, the farthest particle, the 99.9th-percentile
-radius about the median centre, the box's dominance over the bulk and a depth bound. The particles in the central
-level-21 cell give `64 + ceil(log2 leaves)`: an upper bound, since a tree of unique cell codes has at most 64
-levels.
+radius about the median centre, the box's dominance over the bulk and a depth bound. The depth bound is
+`64 + ceil(log2 leaves)`, where `leaves` is the densest level-21 cell divided by the leaf size: a tree of unique cell
+codes has at most 64 levels, and the leaves of one wide cell add a balanced subtree below it. The densest cell is
+estimated on the subsample, scaled by its stride, from three hits up. The densest cell need not be at the centre.
+
+| IC (1e8 Sgr, seed 5) | box | level-21 cell | box / bulk diameter | densest level-21 cell | depth bound | observed depth |
+|---|---|---|---|---|---|---|
+| unclipped (this session, `--r-clip 1e12`) | 45.7 Mpc | 21.8 pc | 25 | ~665 (17 at the median centre) | 68 | 68 (`smoke_1e8_deep`) |
+| production clip (800 / 100 kpc) | 1.60 Mpc | 0.76 pc | 1.11 | 1 | 64 | fits |
+
+On the unclipped IC the guard warns, naming particle #27382923 at 29.7 Mpc and the 467 particles beyond 10x the
+99.9 % radius (916 kpc).
 
 Cost: device reductions in one jitted program plus a strided subsample of 2^20 rows. It allocates no
 [N]-sized temporaries.

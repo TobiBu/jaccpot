@@ -131,8 +131,11 @@ def domain_check(
         ``farthest`` (index, position), ``quantile``, ``r_quantile``,
         ``dominance`` (``box_extent / (2 r_quantile)``), ``n_beyond`` (particles
         beyond ``10 r_quantile``), ``central_count`` (particles within half a
-        level-21 cell of the centre, per axis), ``leaves_sharing`` (``ceil(
-        central_count / leaf_size)``), ``depth_bound`` (``64 + ceil(log2
+        level-21 cell of the centre, per axis), ``densest_cell_estimate`` (the
+        most particles in one level-21 cell of the subsample, times its stride
+        when that is at least 3),
+        ``leaves_sharing`` (``ceil(max(central_count, densest_cell_estimate) /
+        leaf_size)``), ``depth_bound`` (``64 + ceil(log2
         leaves_sharing)``, an upper bound when the centre is dense down to the
         cell scale) and ``depth_overflow_possible`` (``depth_bound > 64``).
 
@@ -170,7 +173,21 @@ def domain_check(
     far, n_beyond, central = int(far), int(n_beyond), int(central)
     r_max = float(np.sqrt(float(r2_max)))
     far_pos = np.asarray(jax.device_get(pos[far]), np.float64).tolist()
-    sharing = max(1, math.ceil(central / max(1, int(leaf_size))))
+    # the densest level-21 cell anywhere, from the subsample (a stride-s sample
+    # sees ~1/s of a cell's particles): the dense core that deepens the tree need
+    # not sit at the median centre (the 1e8 Sgr IC: 17 particles in the central
+    # cell, a tree 68 levels deep)
+    cells = np.clip(
+        np.floor((sub - lower) / max(extent, 1e-300) * float(1 << _MORTON_LEVELS)),
+        0,
+        (1 << _MORTON_LEVELS) - 1,
+    ).astype(np.int64)
+    keys = (cells[:, 0] << 42) | (cells[:, 1] << 21) | cells[:, 2]
+    _, multiplicity = np.unique(keys, return_counts=True)
+    hits = int(multiplicity.max())
+    # one or two hits of a strided sample say little: scale only from three
+    densest = hits * stride if hits >= 3 else hits
+    sharing = max(1, math.ceil(max(central, densest) / max(1, int(leaf_size))))
     depth_bound = _MAX_TREE_LEVELS + math.ceil(math.log2(sharing))
     return {
         "n": n,
@@ -186,6 +203,7 @@ def domain_check(
         "dominance": extent / (2.0 * r_q) if r_q > 0 else math.inf,
         "n_beyond": n_beyond,
         "central_count": central,
+        "densest_cell_estimate": densest,
         "leaves_sharing": sharing,
         "depth_bound": depth_bound,
         "depth_overflow_possible": depth_bound > _MAX_TREE_LEVELS,
@@ -214,10 +232,10 @@ def format_domain_check(report: dict) -> str:
         f"{report['r_max']:.6g} from the median centre; {q:g} % of the particles "
         f"lie within {report['r_quantile']:.6g}, so the box is "
         f"{report['dominance']:.3g}x their diameter, and {report['n_beyond']} of "
-        f"{report['n']} lie beyond 10x that radius; {report['central_count']} "
-        f"particles share the central level-21 cell ({report['leaves_sharing']} "
-        f"leaves): tree depth up to {report['depth_bound']} levels (the bound is "
-        f"{_MAX_TREE_LEVELS})"
+        f"{report['n']} lie beyond 10x that radius; the densest level-21 cell holds "
+        f"~{max(report['central_count'], report['densest_cell_estimate'])} "
+        f"particles ({report['leaves_sharing']} leaves): tree depth up to "
+        f"{report['depth_bound']} levels (the bound is {_MAX_TREE_LEVELS})"
     )
 
 
