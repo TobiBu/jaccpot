@@ -431,3 +431,44 @@ Cost: device reductions in one jitted program plus a strided subsample of 2^20 r
 
 It reads the state only. A `TreeDepthError` from the first prepare is re-raised with the guard's report. The depth
 itself is always checked by the prepare: the guard's bound is advisory.
+
+### The escaper policy (prototype, opt-in): `jaccpot.escapers`
+
+**Option (a): escapers leave the tree.** Option (b), clamping the Morton box and treating outliers against the root,
+was rejected. A clamped outlier still lands in a boundary leaf whose particle-range geometry spans the outlier's true
+distance: the near list floods and the corner leaves mix with real particles.
+
+- **Static shapes.** The N rows stay, in an internal order with the `n_b` tree rows first and the escapers last.
+  - The tree is built with `FusedForceProvider.rebuild(num_valid=n_b)`, the multi-GPU lane's capacity-padded cut
+    (rows past `n_b` are in no leaf), with `n_b` traced.
+  - Escaper rows are mapped onto row 0 with mass 0, so the inferred box is the bound rows'.
+  - A changed split is a row permutation between segments, and the provider is kept. Nothing compiles: one scan and
+    one edge program over the whole test.
+- **Hamiltonian** `H = K + W_tree + W_c`, with `W_c = -G M_b sum_e m_e / |x_e - X_b|`:
+  - an escaper feels `-G M_b (x_e - X_b)/|..|^3`;
+  - every tree row feels the FMM force plus the same uniform `G sum_e m_e (x_e - X_b)/|..|^3`;
+  - the pair forces are equal and opposite, so momentum holds up to the FMM's own error;
+  - it is evaluated every step, so the leapfrog conserves `E` as it does without the split.
+  - Neglected: the escapers' tidal field across the system (relative `(r_b / r_e)^2`) and their mutual gravity
+    (O(K^2); far tails are tracers).
+- **The ledger.** A transfer changes the representation of the same phase-space state, and the edge records that
+  jump. `E - sum(jumps)` is the conserved quantity. Rows also carry the escapers' kinetic energy and `W_c` (what they
+  carried away). An escaper returns inside `r_return` (default `r_escape / 2`).
+
+CPU gate: a Plummer sphere (N = 1024) plus 8 fliers at 3x escape speed, `r_escape` 5, dt 1e-3, 200 steps, CSR
+interpret, leaf 16, p 4, theta 0.6. A control is the same run with no split.
+
+| run | max \|ΔE/E0\| | max \|ΔP\| / Σ m\|v\| |
+|---|---|---|
+| with the split (`E - Σ jumps`) | 1.19e-5 | 3.3e-8 |
+| control | 8.7e-6 | 2.3e-8 |
+
+Both sit at the FMM/fp32 noise floor, which is the same at dt 5e-3.
+
+Scope of the prototype:
+
+- `EscaperRunner` is its own segment loop: a jitted KDK scan per segment, with `replanned` on an overflow.
+- One card, the geometric MAC, no external field. `ProductionRunner`'s restarts, callbacks and mesh mode are not
+  wired in.
+- Production wiring (the `n_b` cut and the coupling inside `strict_run_v2`'s scan, as a gated program variant) is
+  the follow-up.
