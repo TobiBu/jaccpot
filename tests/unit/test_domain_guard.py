@@ -15,11 +15,17 @@ import warnings
 
 import numpy as np
 import pytest
+from jaxtyping import TypeCheckError
 
 from jaccpot.domain import DomainWarning, domain_check, domain_guard
 from jaccpot.production import SegmentConfig
 from jaccpot.runtime.fmm_strict_run import StrictRunMixin
 from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+#: an unknown mode: the guard's own ValueError, or -- under
+#: JACCPOT_RUNTIME_TYPECHECK=1, as CI's unit shard runs -- the type checker's
+#: refusal of the Literal first
+_BAD_MODE = (ValueError, TypeCheckError)
 
 
 def _bulk_and_tails(n=20_000, tails=3, seed=0):
@@ -58,14 +64,14 @@ def test_the_guard_warns_refuses_or_stays_quiet():
         warnings.simplefilter("error")
         report = domain_guard(_bulk_and_tails(tails=0), mode="error", sample=4096)
     assert report is not None and report["dominance"] < 20.0
-    with pytest.raises(ValueError, match="warn, error or off"):
+    with pytest.raises(_BAD_MODE):
         domain_guard(state, mode="loud")
 
 
 def test_segment_config_takes_the_guard_mode():
     assert SegmentConfig().domain_guard == "warn"
     assert SegmentConfig(domain_guard="off").domain_guard == "off"
-    with pytest.raises(ValueError, match="domain_guard"):
+    with pytest.raises(_BAD_MODE):
         SegmentConfig(domain_guard="sometimes")
 
 
