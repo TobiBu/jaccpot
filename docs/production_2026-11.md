@@ -726,7 +726,14 @@ tails unclipped through the normal runner path (`jaccpot/escapers.py`, `jaccpot/
    escaper arm in the start program, the clipped baseline in the scan): A1's BFC placement sensitivity at 1e8,
    not the split.
 5. **CI.** New shard `integration-strict-esc` (`test_shards.py`, `ci.yml`, 25 min cap); `test_escapers.py` left
-   `integration-strict-a2`, whose run with it took 27.9 min at `-n 2` on a loaded host (now 4.7 min alone).
+   `integration-strict-a2`, whose run with it took 27.9 min at `-n 2` on a loaded host (now 4.7 min alone). Local
+   runs with CI's arguments (loaded host): `integration-strict-esc` 11 passed (13.0 min; with
+   `JACCPOT_RUNTIME_TYPECHECK=1` 12.0 min -- it found that a handle's `self_acceleration` must be `Optional`),
+   `integration-strict-a2` 3, `integration-strict` 44, `integration-strict-runner` 44 (36 min),
+   `integration-strict-scheme` 9, `distributed-segment-runner` 5 (2 forced devices), `unit` (typecheck 1) 1328 +
+   the 2 pre-existing `test_domain_guard` failures fixed here (the type checker refuses an unknown `Literal` mode
+   before the guard's `ValueError`), `integration-strict-lane` and `integration-strict-grad-runner`: see the
+   report. Identity: `provider_hlo_identity compare w2-integ-cpu esc-tip-cpu` **PASS 36/36**.
 6. **HoreKa** (prepared, not run): `bench/slurm/escaper_timing.sbatch` + `bench/escaper_timing.py`: step time,
    per-edge cost and peak memory at 1e8, escapers on / off (clipped) / on-but-nobody-escapes, both MACs, and the
    energy every 10th edge.
