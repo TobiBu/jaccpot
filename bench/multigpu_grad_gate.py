@@ -2,7 +2,7 @@
 
 usage: python bench/multigpu_grad_gate.py --n N | --per-card NPC [--ndev K]
        [--mode mesh|solo] [--ic plummer|disc|cube] [--seed S] [--galaxy]
-       [--order P] [--leaf L] [--leaf-capacity auto|INT] [--theta T]
+       [--order P] [--leaf L] [--leaf-capacity mesh|auto|INT] [--theta T]
        [--softening EPS] [--kernel K] [--dtype float32|float64] [--params]
        [--cross auto|default] [--reps R] [--grad-only] [--no-forward] [--no-time]
        [--check] [--cpu-smoke] --out OUT.json
@@ -11,8 +11,7 @@ One process, one row (XLA reads its flags once; the device peak is a per-process
 high-water mark), on the FIRST ``K`` devices. ``--mode mesh`` (the default): the
 particles placed on a ``K``-device mesh as Morton domains (``rollout.decompose``,
 ``cap = N / K * --cap-factor``; ``K = 1``: a one-device mesh, ``cap = N``), the
-template-route force (``FusedMeshForce``: caps-only prepares, the library's cross
-sizing ``cross_caps="auto"`` from a measured start force) and its gradient
+template-route force (``FusedMeshForce``: caps-only prepares) and its gradient
 (``jaccpot.distributed.grad.make_mesh_grad_fn``, the loss ``sum(w . acc)`` built
 OUTSIDE the ``shard_map``). ``--mode solo``: the single card's provider path
 (``FusedForceProvider.prepare(differentiable=True)``: ``step`` against
@@ -25,6 +24,15 @@ G1 pin's geometric point (``large_n_gpu``, ``mac_type="dehnen"``, ``--order``
 default 5, ``--theta`` 0.8). Under ``dehnen_error`` the force accepts only the
 engine's own ``G`` / ``eps2``, so ``--params`` (``G`` and ``eps2`` as traced
 ``ForceParams``, differentiated too) is refused with ``--galaxy``.
+
+Capacities, sized as ``bench/multigpu_segment_gate.py`` sizes them for every N:
+``TreeConfig.leaf_capacity`` counts LEAVES per tree, ``--leaf-capacity mesh`` (the
+default) is ``auto_leaf_capacity(max over devices of the live cell leaves in the
+global box, 1.15)`` (the solo row and the ``--check`` single card: over all N in
+their own box); the cross capacities are the segment gate's formulas from the mean
+live leaves per device (``--cross formula``, x ``--cross-scale``), ``max_cells`` the
+leaf capacity. ``--cross auto`` (the library's sizing from measured start forces,
+with ``--leaf-capacity auto``) and ``--cross default`` (the CPU gates') are A/Bs.
 
 Recorded to ``--out`` (written after every phase; ``complete`` at the end):
 
@@ -141,7 +149,14 @@ def _args(argv: Optional[list] = None) -> argparse.Namespace:
     p.add_argument("--galaxy", action="store_true", help='preset="galaxy" (p6)')
     p.add_argument("--order", type=int, default=None, help="5 (6 with --galaxy)")
     p.add_argument("--leaf", type=int, default=64)
-    p.add_argument("--leaf-capacity", default="auto", help="'auto' or an int")
+    p.add_argument(
+        "--leaf-capacity",
+        default="mesh",
+        help="LEAVES per tree: 'mesh' (default: bench/multigpu_segment_gate.py's "
+        "_leaf_capacity_like_the_mesh, auto_leaf_capacity(max live cell leaves of a "
+        "device, 1.15); solo and the --check single card: over all N), 'auto' "
+        "(TreeConfig's own rule at the eager prepare) or an int",
+    )
     p.add_argument("--theta", type=float, default=0.8)
     p.add_argument("--softening", type=float, default=None)
     p.add_argument("--kernel", default=None, help="softening kernel (solver's)")
@@ -149,12 +164,15 @@ def _args(argv: Optional[list] = None) -> argparse.Namespace:
     p.add_argument("--params", action="store_true", help="also d/dG and d/deps2")
     p.add_argument(
         "--cross",
-        choices=("auto", "default"),
-        default="auto",
-        help="cross capacities: the library's sizing (auto) or CrossCapacities' "
-        "defaults with max_cells the leaf capacity (the CPU gates'; needs an int "
-        "--leaf-capacity)",
+        choices=("formula", "auto", "default"),
+        default="formula",
+        help="cross capacities: bench/multigpu_segment_gate.py's formulas from the "
+        "leaves per device x --cross-scale, max_cells the leaf capacity (default); "
+        "the library's sizing from a measured start force (auto); or "
+        "CrossCapacities' defaults with max_cells the leaf capacity (default: the CPU "
+        "gates'). formula / default need an explicit leaf capacity (mesh or int)",
     )
+    p.add_argument("--cross-scale", type=float, default=1.0)
     p.add_argument("--cap-factor", type=float, default=1.15, help="mesh rows / (N/K)")
     p.add_argument("--reps", type=int, default=5)
     p.add_argument(
@@ -181,10 +199,10 @@ def _args(argv: Optional[list] = None) -> argparse.Namespace:
     if args.galaxy and args.order not in (None, 6):
         p.error("--galaxy is p6")
     args.order = args.order or (6 if args.galaxy else 5)
-    if args.leaf_capacity != "auto":
+    if args.leaf_capacity not in ("auto", "mesh"):
         args.leaf_capacity = int(args.leaf_capacity)
-    if args.cross == "default" and args.leaf_capacity == "auto":
-        p.error("--cross default needs an int --leaf-capacity (max_cells)")
+    if args.cross != "auto" and args.leaf_capacity == "auto" and args.mode == "mesh":
+        p.error(f"--cross {args.cross} needs an explicit --leaf-capacity (max_cells)")
     if args.check and args.mode == "solo":
         p.error("--check compares the mesh's gradient: --mode mesh")
     if args.check and args.n > CHECK_N_MAX and not args.force_check:
@@ -338,7 +356,8 @@ def card_processes(cards: list) -> list:
 # --------------------------------------------------------------------------
 
 
-def _solver(args: argparse.Namespace, g: float, soft: float):
+def _solver(args: argparse.Namespace, g: float, soft: float, leaf_capacity: Any):
+    """The row's solver at ``leaf_capacity`` (LEAVES per tree: an int or "auto")."""
     import dataclasses
 
     import jax.numpy as jnp
@@ -355,12 +374,12 @@ def _solver(args: argparse.Namespace, g: float, soft: float):
     dtype = jnp.float64 if args.dtype == "float64" else jnp.float32
     if args.galaxy:
         advanced = FastMultipoleMethod(preset="galaxy").advanced
-        if args.leaf_capacity != "auto":
+        if leaf_capacity != "auto":
             advanced = dataclasses.replace(
                 advanced,
                 tree=dataclasses.replace(
                     advanced.tree,
-                    leaf_capacity=int(args.leaf_capacity),
+                    leaf_capacity=int(leaf_capacity),
                     leaf_headroom=None,
                 ),
             )
@@ -385,7 +404,7 @@ def _solver(args: argparse.Namespace, g: float, soft: float):
                 mode="static_radix",
                 leaf_target=args.leaf,
                 leaf_partition="cells",
-                leaf_capacity=args.leaf_capacity,
+                leaf_capacity=leaf_capacity,
             ),
             nearfield=NearFieldConfig(mode="auto"),
             farfield=FarFieldConfig(m2l_chunk_size=512),
@@ -393,6 +412,80 @@ def _solver(args: argparse.Namespace, g: float, soft: float):
         ),
         fixed_order=args.order,
         **extra,
+    )
+
+
+def _leaf_capacity_like_the_mesh(args, ic, mesh, shard, cap) -> tuple[int, float]:
+    """``bench/multigpu_segment_gate.py``'s: the mesh's auto capacity (LEAVES per
+    tree) from each device's live cell leaves in the global box, and their mean."""
+    import jax.numpy as jnp
+
+    from jaccpot.distributed.fused import host_mesh_bounds
+    from jaccpot.distributed.rollout import _mesh_devices, _pad_onto_live_row
+    from jaccpot.distributed.template_force import _by_device
+    from jaccpot.runtime.capacity_plan import auto_leaf_capacity, live_cell_leaves
+
+    engine = _solver(args, ic["G"], ic["softening"], 1 << 20)._impl
+    devices = _mesh_devices(mesh)
+    counts = [int(c) for c in np.asarray(shard.count)]
+    pos_d = [
+        _pad_onto_live_row(jnp.asarray(p), jnp.arange(cap) < counts[d])
+        for d, p in enumerate(_by_device(shard.positions, devices))
+    ]
+    box = host_mesh_bounds(
+        [np.asarray(p) for p in pos_d], counts, cubic=bool(engine._tree_cubic_bounds)
+    )
+    live = [
+        live_cell_leaves(
+            jnp.asarray(p, engine.working_dtype),
+            leaf_size=args.leaf,
+            cell_min_level=int(engine._tree_cell_min_level),
+            bounds=box,
+        )
+        for p in pos_d
+    ]
+    return auto_leaf_capacity(max(live), 1.15), float(np.mean(live))
+
+
+def _leaf_capacity_single(args, ic, pos) -> int:
+    """One card's auto capacity over all ``N`` (LEAVES), in the single card's box."""
+    import jax.numpy as jnp
+
+    from jaccpot.distributed.fused import host_mesh_bounds
+    from jaccpot.runtime.capacity_plan import auto_leaf_capacity, live_cell_leaves
+
+    engine = _solver(args, ic["G"], ic["softening"], 1 << 20)._impl
+    box = host_mesh_bounds([pos], [len(pos)], cubic=bool(engine._tree_cubic_bounds))
+    live = live_cell_leaves(
+        jnp.asarray(pos, engine.working_dtype),
+        leaf_size=args.leaf,
+        cell_min_level=int(engine._tree_cell_min_level),
+        bounds=box,
+    )
+    return auto_leaf_capacity(live, 1.15)
+
+
+def _cross_caps_formula(args, leaves_per_device: float, max_cells: int):
+    """``bench/multigpu_segment_gate.py``'s ``_cross_caps``."""
+    from jaccpot.distributed.cross import CrossCapacities
+
+    per = float(leaves_per_device) * float(args.cross_scale)
+
+    def pow2(x: float, floor: int) -> int:
+        return 1 << max(floor, int(np.ceil(np.log2(max(x, 1)))))
+
+    return CrossCapacities(
+        max_cells=int(max_cells),
+        export_far_cap=pow2(2.5 * 53 * per, 21),
+        export_near_cap=pow2(2.5 * 10 * per, 21),
+        send_node_cap=pow2(2.5 * 1.25 * per, 15),
+        send_csr_cap=pow2(2.5 * 53 * per, 21),
+        recv_node_cap=pow2(2.5 * 1.25 * per, 15),
+        recv_csr_cap=pow2(2.5 * 53 * per, 19),
+        walk_queue=2 * pow2(2.5 * 53 * per, 19),
+        recv_far_cap=pow2(2.5 * 106 * per, 21),
+        recv_near_cap=pow2(2.5 * 60 * per, 21),
+        leaf_width=args.leaf,
     )
 
 
@@ -598,7 +691,7 @@ def _measure(
         col = {
             f: needs[:, base + CROSS_NEEDS_FIELDS.index(f)] for f in CROSS_NEEDS_FIELDS
         }
-        r["cross"] = dict(
+        r["cross_pairs"] = dict(
             far_pairs=col["export_far_cap"].tolist(),
             near_pairs=col["export_near_cap"].tolist(),
             shipped_particles=col["send_particle_cap"].tolist(),
@@ -606,7 +699,7 @@ def _measure(
                 np.all(col["export_far_cap"] > 0) and np.all(col["export_near_cap"] > 0)
             ),
         )
-        _log("cross", r["cross"])
+        _log("cross", r["cross_pairs"])
     _log("force bits", r["force"])
     if not args.no_forward:
         diff_c, r["compile_s"]["diff_forward"] = _compile(
@@ -726,10 +819,21 @@ def _run_mesh(row: _Row, args: argparse.Namespace, ic: dict) -> None:
     x0, m0, counts_d, ids_d = shard.positions, shard.masses, shard.count, shard.ids
     counts = np.asarray(counts_d).astype(np.int64)
     r.update(cap=cap, counts=counts.tolist(), decompose_s=time.perf_counter() - t0)
-    solver = _solver(args, ic["G"], ic["softening"])
-    caps = "auto"
-    if args.cross == "default":
-        caps = CrossCapacities(max_cells=int(args.leaf_capacity), leaf_width=args.leaf)
+    leaf_cap, per_dev = args.leaf_capacity, None
+    if leaf_cap == "mesh":
+        leaf_cap, per_dev = _leaf_capacity_like_the_mesh(args, ic, mesh, shard, cap)
+        r["leaves_per_device"] = per_dev
+    r["leaf_capacity_set"] = leaf_cap
+    solver = _solver(args, ic["G"], ic["softening"], leaf_cap)
+    caps: Any = "auto"
+    if ndev > 1 and args.cross == "default":
+        caps = CrossCapacities(max_cells=int(leaf_cap), leaf_width=args.leaf)
+    elif ndev > 1 and args.cross == "formula":
+        if per_dev is None:  # an int capacity: the live leaves still decide the caps
+            per_dev = _leaf_capacity_like_the_mesh(args, ic, mesh, shard, cap)[1]
+            r["leaves_per_device"] = per_dev
+        caps = _cross_caps_formula(args, per_dev, int(leaf_cap))
+    _log("leaf capacity", leaf_cap, "cross", args.cross)
     force = FusedMeshForce(
         solver,
         mesh,
@@ -848,7 +952,9 @@ def _run_mesh(row: _Row, args: argparse.Namespace, ic: dict) -> None:
         prod=prod,
         pargs=(x0, m0, counts_d, ids_d, *fb),
         diff=diff,
-        dargs=(x0, m0, counts_d, ids_d, p0, seed),
+        # MG1 like for like: the engine's own G / eps2 on both sides (traced
+        # ForceParams change the compiled rounding: 4e-16 in fp64 on the solo path)
+        dargs=(x0, m0, counts_d, ids_d, None, seed),
         loss=loss,
         gargs=(x0, m0, p0, counts_d, ids_d, w, seed),
         argnums=argnums,
@@ -877,7 +983,11 @@ def _run_mesh(row: _Row, args: argparse.Namespace, ic: dict) -> None:
 
     box = host_mesh_bounds([pos], [n], cubic=bool(force.engine._tree_cubic_bounds))
     dev0 = devices[0]
-    s_solver = _solver(args, ic["G"], ic["softening"])
+    s_cap = args.leaf_capacity
+    if s_cap == "mesh":
+        s_cap = _leaf_capacity_single(args, ic, pos)
+    check["single_leaf_capacity"] = s_cap
+    s_solver = _solver(args, ic["G"], ic["softening"], s_cap)
     xs = jax.device_put(jnp.asarray(pos), dev0)
     ms = jax.device_put(jnp.asarray(mass), dev0)
     t0 = time.perf_counter()
@@ -961,7 +1071,11 @@ def _run_solo(row: _Row, args: argparse.Namespace, ic: dict) -> None:
     r, n = row.r, args.n
     dev = jax.devices()[0]
     dtype = np.float64 if args.dtype == "float64" else np.float32
-    solver = _solver(args, ic["G"], ic["softening"])
+    leaf_cap = args.leaf_capacity
+    if leaf_cap == "mesh":
+        leaf_cap = _leaf_capacity_single(args, ic, ic["pos"].astype(dtype))
+    r["leaf_capacity_set"] = leaf_cap
+    solver = _solver(args, ic["G"], ic["softening"], leaf_cap)
     x = jax.device_put(jnp.asarray(ic["pos"].astype(dtype)), dev)
     m = jax.device_put(jnp.asarray(ic["mass"].astype(dtype)), dev)
     t0 = time.perf_counter()
@@ -1025,7 +1139,7 @@ def _run_solo(row: _Row, args: argparse.Namespace, ic: dict) -> None:
         prod=prod,
         pargs=(x, m, aux),
         diff=diff,
-        dargs=(x, m, p0, aux),
+        dargs=(x, m, None, aux),  # MG1 like for like (see the mesh)
         loss=loss,
         gargs=(x, m, p0, w, aux),
         argnums=(0, 1, 2) if args.params else (0, 1),

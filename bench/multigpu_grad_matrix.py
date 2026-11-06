@@ -8,7 +8,9 @@ ragged-exchange flags (``bench/_ragged_exchange_flags.py``). Written for a HoreK
 accelerated node (four A100-40GB on NVLink, ``bench/slurm/multigpu_grad.sbatch``).
 The operating point is ``--preset`` (``galaxy``: ``preset="galaxy"``, dehnen_error
 1e-4 at p6, the production one; ``geometric``: the G1 pin's ``mac_type="dehnen"`` at
-p5, with ``G`` and ``eps2`` differentiated too). The tiers (``--tiers``, all by
+p5, with ``G`` and ``eps2`` differentiated too). Every row sizes its leaf capacity
+(LEAVES per tree) and cross capacities as ``bench/multigpu_segment_gate.py`` does
+(the gate's ``--leaf-capacity mesh --cross formula`` defaults). The tiers (``--tiers``, all by
 default):
 
 =========  ==========================================================================
@@ -329,7 +331,7 @@ def row_summary(tag: str, out_dir: Path) -> dict:
     ma = d.get("memory_analysis") or {}
     grad_ma = ma.get("grad") or {}
     vg_ma = ma.get("value_and_grad") or {}
-    cross = d.get("cross") or {}
+    cross = d.get("cross_pairs") or {}
     check = d.get("check") or {}
     r.update(
         mg1_differ=(d.get("MG1") or {}).get("differing"),
