@@ -611,7 +611,7 @@ Scope of the prototype:
 - One card, the geometric MAC, no external field. `ProductionRunner`'s restarts, callbacks and mesh mode are not
   wired in.
 - Production wiring (the `n_b` cut and the coupling inside `strict_run_v2`'s scan, as a gated program variant) is
-  the follow-up.
+  the follow-up. **Done in wave 3 (ESC, below):** `ProductionRunner(escapers=...)`; `EscaperRunner` is removed.
 
 **Sgr gate (local A100, shared card: functional only).** The 1e8 light-Sgr IC was re-assembled with the same seed
 and inputs but **no clip** (`assemble_sgr.py --r-clip 1e12 --r-clip-sgr 1e12`: 100,000,001 rows, a 45.7 Mpc box).
@@ -635,3 +635,105 @@ The full 1e8 unclipped run needs a free 40 GB card. It was queued when this was 
 - CI shards run locally with CI's arguments, all rc 0: `unit`, `integration-strict-a2` (new), `integration-strict`,
   `integration-strict-runner`, and `distributed-segment-runner` (2 forced devices).
 - The partition check covers 2816 tests.
+
+## ESC — escapers in `ProductionRunner` (wave 3, 2026-11-06)
+
+`ProductionRunner(solver, ..., escapers=EscaperPolicy(r_escape, r_return=None, every=1))` runs a system with far
+tails unclipped through the normal runner path (`jaccpot/escapers.py`, `jaccpot/production.py`,
+`strict_run_v2(..., live_rows=)`). Opt-in; the default path is unchanged (identity 36/36, below). User decisions
+(2026-11-05): the escapers are in the runner, opt-in, and do not attract each other.
+
+### What was built
+
+- **The split in the scan.** `StepParams` gained an optional traced `live` (the tree's row count; `None` leaves the
+  pytree, and every program, as before). With it every refresh in `strict_run_v2`'s particle carry (the start
+  program and each step) builds the tree over the first `n_b` rows: `rebuild(num_valid=n_b)` (the mesh lane's
+  capacity-padded cut: the rows past it get the sentinel Morton code and are in no leaf), in the box of the tree rows
+  alone (`live_bounds`: the escapers folded onto row 0 inside the min/max reductions, no second `[N, 3]` array),
+  with the escapers' masses zero. The self-acceleration is the tree force on the tree rows plus the monopole
+  coupling (`coupling`): escapers feel `-G M_b (x - X_b)/r^3`, every tree row the equal and opposite uniform pull.
+  An `optimization_barrier` orders the coupling after the tree force (measured below: otherwise its rows sat in the
+  arena through the force's peak). The eager caps-only prepare and the segment retry's re-prepare build the same
+  tree (`eager_live_rows`, `replanned(bounds=)`, new kwarg, default `None`).
+- **`dehnen_error`.** The f_b carry is threaded unchanged; an escaper row's f_b is its coupling's magnitude, so a
+  returning particle starts its thresholds from its monopole force.
+- **The runner.** The rows are kept in an internal order (tree rows first; the order on the host). At the start,
+  and at every `every`-th edge, `membership` (one jitted pass) finds who crosses `r_escape` outward or `r_return`
+  (default `r_escape / 2`) inward. A change permutes the state, masses and f_b, drops the handle's start force (the
+  next segment's start program evaluates it in the new split: `strict_run_v2` now continues a handle whose
+  `self_acceleration` is `None` that way) and, with the energy on, evaluates the potential on both sides: the
+  **ledger**. While nobody escapes the segments run the default programs.
+- **Diagnostics rows:** `n_escapers`, `escaper_transfers`, `escaper_jump`, `escaper_ledger`; with the energy
+  `potential_couple` (`W_c`), `kinetic_escapers`, `energy_ledgered = E - ledger` and `energy_ledgered_drift`.
+  `energy` includes `W_c`; `energy_drift` stays raw.
+- **Row order.** Callbacks (`SegmentEdge.state/masses/self_acceleration`), `SnapshotWriter`, restart files and
+  `RunResult.state/masses` are in the caller's order (one gather at the edge, only when a callback exists, and one
+  at the end). The in-scan `step_callback` and the external field see the internal order (documented: a
+  per-particle field works, one with per-row parameters does not).
+- **Restarts** write every array in the caller's rows plus `escaper_order` and `meta["escapers"]` (policy,
+  `n_bound`, ledger, transfers); `_restore` re-orders and prepares the split's tree. A run continues only in its own
+  escaper mode (`ValueError` otherwise). The fingerprint gains `escapers` only when the policy is set.
+- **Refused:** `mesh=` (ValueError naming what it would take: escaper rows outside the equal-count domain cuts, the
+  coupling's centre of mass as one more all-reduce per step, a split-aware migration and restart), the gradient
+  mode (`gradient_plan`/`value_and_grad`), a non-`EscaperPolicy`. `scheme=` works (the split changes only the
+  force; not separately gated beyond the scheme seam's own tests).
+- **The IC guard** (`domain_guard(escapers=)`) names the option and a radius to start from (ten times the 99.9 %
+  radius); with escapers on it checks the tree rows and says to lower `r_escape` if they still dominate.
+- **`EscaperRunner` removed** (one home for the logic: the runner). It was unreleased (only on `mn/wave2`).
+
+### Gates
+
+1. **CPU synthetic** (`tests/integration/strict/test_escapers.py`; N = 1024 Plummer clipped at 3, 8 fliers at 6-12x
+   the escape speed just inside `r_escape` 5, one particle at 5.3 falling in past `r_return` 4.5; CSR interpret,
+   leaf 16, p4, theta 0.6, dt 1e-3, 6 x 10 steps, energy every edge; numbers from `mn-scratch/esc/exp/gate1.py`):
+   escapers 1, 1, 2, 4, 9, 9, 8 (transfers at four edges, the returner back at the last).
+
+   | MAC | max \|`energy_ledgered_drift`\| | no-split control \|dE/E0\| | raw \|dE/E0\| | largest jump / \|E0\| | max momentum drift (control) |
+   |---|---|---|---|---|---|
+   | `dehnen` | 1.47e-5 | 1.56e-5 | 5.2e-5 | 5.3e-5 | 4.3e-9 (7.8e-9) |
+   | `dehnen_error` | 1.7e-7 | 2.3e-7 | 5.9e-5 | 5.3e-5 | 7.6e-9 (7.3e-9) |
+
+   The ledgered energy sits at the control's own noise; without the ledger the jumps dominate. One split scan
+   program and one energy program across every split (the row count is traced). A restart written mid-run and a
+   chained run (`restart_from=RunResult`) equal the run in one go bitwise, ledger included; the callbacks and the
+   result see the caller's rows. Tests: 9 in shard `integration-strict-esc` (new; one worker per MAC).
+2. **Nobody escaping == escapers off, bitwise** (state and every diagnostics field the off run has): by
+   construction (the default programs run while `n_b == N`), and also for the split program itself:
+   `strict_run_v2(live_rows=N)` against `live_rows=None`, 2 x 10 steps, state and self-acceleration bitwise under
+   `dehnen` and `dehnen_error` (`exp/forced_split.py`).
+3. **GPU, 2.2e6 unclipped Sgr** (A2's downsample: all 182,859 tail particles plus a stride-49 bulk; preset galaxy,
+   softening 1.5e-3, dt 1e-3, `r_escape` 80; card 4, shared host, functional only):
+   - geometric theta 0.7, 2 x 5 steps: escapers 182,832 -> 182,834, `energy_ledgered_drift` -5.0e-7, momentum
+     drift 1.7e-10, retries 0 (A2's prototype: 182,828 -> 182,833, within 5.6e-7; the runner's start re-checks the
+     membership from the tree rows' own centre, hence the few more at step 0);
+   - `dehnen_error` (the preset's MAC), 4 x 5 steps: 182,832 -> 182,837, |ledgered drift| <= 5.8e-7, momentum
+     drift 3.8e-10, retries 0.
+4. **GPU, the FULL 1e8 unclipped Sgr** (100,000,001 rows, 45.7 Mpc box; the plain prepare raises `TreeDepthError`
+   at 68 levels, A2) through `ProductionRunner(escapers=EscaperPolicy(80))`, geometric theta 0.7, 3 x 5 steps,
+   `donate_input`, energy every edge, one A100 40 GB (card 4), `XLA_PYTHON_CLIENT_PREALLOCATE=true`, fraction 0.95:
+   runs, no retry; escapers 182,878 -> 182,889; `energy_ledgered_drift` <= 2.7e-7; momentum drift 2.9e-10.
+
+   | 1e8, same card and environment | peak | B / particle |
+   |---|---|---|
+   | escapers OFF, every particle beyond 80 pulled onto r = 80 (same N) | 20.09 GiB | 215.7 |
+   | escapers ON, unclipped (first wiring, cacb7823) | 22.28 GiB | 239.2 |
+   | + coupling after the tree force (barrier) and the order on the host (3c28bdec) | 21.44 GiB | 230.2 |
+   | + the old split's buffers freed at a re-split (7d196bd8, the tip's code) | **21.07 GiB** | **226.2** |
+
+   The remaining +10.5 B/p (+4.9 %) is not attributed (candidates: the tree masses' `where` and the live mask in
+   the step, the split energy program). The trajectory and diagnostics are identical across the three escaper
+   rows. With `PREALLOCATE=false` (fraction 0.75 or 0.95) BOTH arms failed to place one 16-17 GiB block (the
+   escaper arm in the start program, the clipped baseline in the scan): A1's BFC placement sensitivity at 1e8,
+   not the split.
+5. **CI.** New shard `integration-strict-esc` (`test_shards.py`, `ci.yml`, 25 min cap); `test_escapers.py` left
+   `integration-strict-a2`, whose run with it took 27.9 min at `-n 2` on a loaded host (now 4.7 min alone). Local
+   runs with CI's arguments (loaded host): `integration-strict-esc` 11 passed (13.0 min; with
+   `JACCPOT_RUNTIME_TYPECHECK=1` 12.0 min -- it found that a handle's `self_acceleration` must be `Optional`),
+   `integration-strict-a2` 3, `integration-strict` 44, `integration-strict-runner` 44 (36 min),
+   `integration-strict-scheme` 9, `distributed-segment-runner` 5 (2 forced devices), `unit` (typecheck 1) 1328 +
+   the 2 pre-existing `test_domain_guard` failures fixed here (the type checker refuses an unknown `Literal` mode
+   before the guard's `ValueError`), `integration-strict-lane` and `integration-strict-grad-runner`: see the
+   report. Identity: `provider_hlo_identity compare w2-integ-cpu esc-tip-cpu` **PASS 36/36**.
+6. **HoreKa** (prepared, not run): `bench/slurm/escaper_timing.sbatch` + `bench/escaper_timing.py`: step time,
+   per-edge cost and peak memory at 1e8, escapers on / off (clipped) / on-but-nobody-escapes, both MACs, and the
+   energy every 10th edge.

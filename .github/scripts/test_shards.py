@@ -111,14 +111,15 @@ _STRICT_LANE_FILES: tuple[str, ...] = (
     "tests/integration/strict/test_float64_lane.py",
     "tests/integration/strict/test_caps_only_prepare.py",
 )
-# The energy diagnostic's re-plan (#488) and the escaper prototype (A2): a cusp
-# drifting into four blobs through the runner (the CSR near field in interpret
-# mode) and leapfrog runs with an escaper split, ~10 min of compilation on CPU;
-# `integration-strict` had no room for them (23.6 of its 25 min, above).
-_STRICT_A2_FILES: tuple[str, ...] = (
-    "tests/integration/strict/test_energy_replan.py",
-    "tests/integration/strict/test_escapers.py",
-)
+# The energy diagnostic's re-plan (#488, A2): a cusp drifting into four blobs
+# through the runner (the CSR near field in interpret mode), ~7 min of compilation
+# on CPU; `integration-strict` had no room for it (23.6 of its 25 min, above).
+_STRICT_A2_FILES: tuple[str, ...] = ("tests/integration/strict/test_energy_replan.py",)
+# The escaper path in ProductionRunner (wave 3, ESC): runner runs with an escaper
+# split under both MACs, their controls, a restart and a chained run, one worker
+# per MAC (`xdist_group`). With the energy re-plan it took 27.9 min at `-n 2` on a
+# loaded host, past the 25 min cap, so it is a shard of its own.
+_STRICT_ESC = "tests/integration/strict/test_escapers.py"
 # The runner's integration-scheme seam (multi-node plan I1, 2026-11-05): runner pairs
 # (built-in and scheme) at the production-runner operating point, kept out of
 # `integration-strict`, which is near its cap (12.4 min at `-n 2`, loaded host).
@@ -222,6 +223,7 @@ SHARDS: dict[str, list[str]] = {
                 *_STRICT_RUNNER_FILES,
                 *_STRICT_LANE_FILES,
                 *_STRICT_A2_FILES,
+                _STRICT_ESC,
                 _STRICT_SCHEME,
                 *_STRICT_GRAD_FILES,
                 _STRICT_GRAD_ROLLOUT,
@@ -234,6 +236,7 @@ SHARDS: dict[str, list[str]] = {
     "integration-strict-runner": list(_STRICT_RUNNER_FILES),
     "integration-strict-lane": list(_STRICT_LANE_FILES),
     "integration-strict-a2": list(_STRICT_A2_FILES),
+    "integration-strict-esc": [_STRICT_ESC],
     "integration-strict-scheme": [_STRICT_SCHEME],
     "integration-strict-grad": list(_STRICT_GRAD_FILES),
     "integration-strict-grad-rollout": [

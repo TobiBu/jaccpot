@@ -142,9 +142,11 @@ class StrictParticleCarry:
     ----------
     template : PreparedShapeTemplate
         Shapes of the fused lane's prepared state (far list detached).
-    self_acceleration : Array
+    self_acceleration : Optional[Array]
         ``[N, 3]`` self-gravity at the returned state's positions -- the next
-        call's initial force.
+        call's initial force. ``None`` only on a handle whose escaper split
+        changed (``ProductionRunner(escapers=...)``): the next call evaluates
+        its start force in its start program.
     num_particles : int
         ``N``.
     force_scale : Optional[Array]
@@ -173,7 +175,7 @@ class StrictParticleCarry:
     """
 
     template: PreparedShapeTemplate
-    self_acceleration: Array
+    self_acceleration: Optional[Array]
     num_particles: int
     force_scale: Optional[Array] = None
     provider: Any = None

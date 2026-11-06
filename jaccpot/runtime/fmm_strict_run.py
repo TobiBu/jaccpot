@@ -20,6 +20,7 @@ from yggdrax.interactions import DualTreeRetryEvent, NodeNeighborList
 from yggdrax.tree import RadixTree, get_level_offsets
 
 from jaccpot._env import env_choice, env_flag
+from jaccpot.escapers import coupling, split_rebuild
 
 from ._large_n_pipeline import prepare_large_n_state
 from ._large_n_types import LargeNPreparedState, LargeNPrepareRequest
@@ -1005,6 +1006,7 @@ class StrictRunMixin(_EngineBase):
         external_params: Any = None,
         carry_total_acceleration: bool = False,
         scheme: Any = None,
+        live_rows: Optional[int] = None,
     ) -> tuple[Array, Optional[Any], Optional[Array]]:
         """Run endpoint-correct velocity Verlet with strict prepared-state refresh.
 
@@ -1164,6 +1166,20 @@ class StrictRunMixin(_EngineBase):
             evaluation; everything else (refresh, verdict, retry, handle) is
             unchanged. Its ``key()`` joins the compile keys. A scheme that is not
             ``rowwise`` keeps the input order (as the force-scale carry does).
+        live_rows : Optional[int]
+            ``carry="particles"`` only. ``None`` (the default): every row is a
+            tree row, every program as without it. An int ``n_b`` in ``[1, N]``:
+            the ESCAPER SPLIT (:mod:`jaccpot.escapers`, what
+            ``ProductionRunner(escapers=...)`` passes) -- the first ``n_b`` rows
+            are the tree, built over their own box with ``num_valid=n_b``; the
+            rows after them are escapers, coupled to the tree rows' monopole
+            (equal and opposite), and their eq (16b) ``f_b`` is the coupling's
+            magnitude. ``n_b`` rides traced in the step parameters, so another
+            split compiles nothing. Every self-acceleration this call returns
+            (the handle's too) is the split's: tree force plus coupling. A
+            handle whose ``self_acceleration`` is ``None`` (a changed split) is
+            continued from a fresh start force. Not with the tree-order carry
+            or without the caps-only prepare.
 
         Returns
         -------
@@ -1359,7 +1375,22 @@ class StrictRunMixin(_EngineBase):
                 self, leaf_size=int(leaf_size), max_order=int(max_order), theta=theta
             ).resolve_params(force_params)
         step_params: Optional[StepParams] = None
-        if force_resolved is not None or not dt_static or external_params is not None:
+        if live_rows is not None:
+            if carry_mode != "particles":
+                raise ValueError(
+                    "live_rows (the escaper split) needs carry='particles'"
+                )
+            if not 1 <= int(live_rows) <= int(state_arr.shape[0]):
+                raise ValueError(
+                    f"live_rows must be in [1, {int(state_arr.shape[0])}], got "
+                    f"{int(live_rows)}"
+                )
+        if (
+            force_resolved is not None
+            or not dt_static
+            or external_params is not None
+            or live_rows is not None
+        ):
             step_params = StepParams(
                 force=(
                     ForceParams(G=float(self.G), eps2=float(self.softening) ** 2)
@@ -1368,6 +1399,11 @@ class StrictRunMixin(_EngineBase):
                 ),
                 dt=float(dt) if dt_static else jnp.asarray(dt, state_arr.dtype),
                 external=external_params,
+                live=(
+                    None
+                    if live_rows is None
+                    else jnp.asarray(int(live_rows), jnp.int32)
+                ),
             )
         # the integrator's part of the compile keys: the literal dt, or the
         # parameters' structure (their literals, not their traced values)
@@ -1430,7 +1466,38 @@ class StrictRunMixin(_EngineBase):
         caps_only = particle_carry and env_flag(
             "JACCPOT_STRICT_CAPS_ONLY_PREPARE", True
         )
-        if prepared_curr is None and handle_in is None:
+        if live_rows is not None and not caps_only:
+            raise ValueError(
+                "live_rows (the escaper split) needs the caps-only prepare "
+                "(JACCPOT_STRICT_CAPS_ONLY_PREPARE=1, the default): a full "
+                "prepare's eager evaluation knows no split"
+            )
+        if prepared_curr is None and handle_in is None and live_rows is not None:
+            # the split's tree: its rows' box, the escapers mass 0 and in no leaf
+            from jaccpot.escapers import eager_split_inputs
+            from jaccpot.runtime.capacity_plan import eager_live_rows
+
+            masses_tree, live_box = eager_split_inputs(
+                state_arr[:, 0, :],
+                masses_arr,
+                int(live_rows),
+                cubic=bool(getattr(self, "_tree_cubic_bounds", False)),
+            )
+            with eager_live_rows(int(live_rows)):
+                prov, topology_start = FusedForceProvider.prepare(
+                    self,
+                    state_arr[:, 0, :],
+                    masses_tree,
+                    leaf_size=int(leaf_size),
+                    max_order=int(max_order),
+                    theta=theta,
+                    bounds=live_box,
+                    runtime_overrides=runtime_overrides,
+                    caps_only=caps_only,
+                )
+            prepared_curr = topology_start.prepared
+            del topology_start, masses_tree, live_box
+        elif prepared_curr is None and handle_in is None:
             prov, topology_start = FusedForceProvider.prepare(
                 self,
                 state_arr[:, 0, :],
@@ -1536,6 +1603,8 @@ class StrictRunMixin(_EngineBase):
             initial_self_acceleration is None
             and handle_in is not None
             and handle_in.force_key == force_key
+            # a handle whose split changed brings no start force (live_rows)
+            and handle_in.self_acceleration is not None
         ):
             acceleration_self_current = jnp.asarray(
                 handle_in.self_acceleration, dtype=state_arr.dtype
@@ -1582,6 +1651,16 @@ class StrictRunMixin(_EngineBase):
                 self._last_refresh_capacity_ok = None
                 self._last_refresh_walk_needs = None
                 topology = FusedTopology(prepared=prepared_in, fresh=True)
+            elif params is not None and params.live is not None:
+                # the escaper split: the tree over the first ``live`` rows
+                topology = split_rebuild(
+                    prov,
+                    prepared_in,
+                    state_position[:, 0, :],
+                    masses_in,
+                    params.live,
+                    force_scale=scale_in if scale_carry else None,
+                )
             else:
                 topology = prov._rebuild_like(
                     prepared_in,
@@ -1592,6 +1671,32 @@ class StrictRunMixin(_EngineBase):
             acc_self, scale_new = _evaluate_self_scaled(
                 topology.prepared, state_position, params
             )
+            if params is not None and params.live is not None:
+                # the tree force on the tree rows, plus the monopole coupling
+                # (escapers: a_e; tree rows: the uniform a_u); an escaper's f_b is
+                # its coupling's magnitude
+                # after the tree force: the coupling reads only the positions,
+                # and scheduled before the evaluation its rows (acc, scale) sat
+                # in the arena through the force's peak; the barrier orders it
+                # after (values unchanged)
+                acc_self, positions_after = jax.lax.optimization_barrier(
+                    (acc_self, state_position[:, 0, :])
+                )
+                force_now = _force(params)
+                acc_c, scale_c, live_c = coupling(
+                    positions_after,
+                    masses_in,
+                    params.live,
+                    float(self.G) if force_now is None else force_now.G,
+                )
+                acc_self = (
+                    jnp.where(live_c[:, None], acc_self, jnp.zeros((), acc_self.dtype))
+                    + acc_c
+                )
+                if scale_new is not None:
+                    scale_new = jnp.where(
+                        live_c, scale_new, scale_c.astype(scale_new.dtype)
+                    )
             return topology, acc_self, scale_new
 
         def _emit_step(step_index: Array, state_new: Array, fire: Array) -> None:
@@ -1698,6 +1803,8 @@ class StrictRunMixin(_EngineBase):
             and step_callback is None
             # the force-scale carry rides the input order only
             and not scale_carry
+            # the escaper split cuts the rows by index
+            and live_rows is None
             # a scheme that reads other rows sees them in input order only
             and (scheme is None or bool(scheme.rowwise))
         )
@@ -1864,6 +1971,7 @@ class StrictRunMixin(_EngineBase):
                 return_total=bool(carry_total_acceleration),
                 external_key=external_key,
                 caps_only=caps_only,
+                live_rows=live_rows,
             )
         else:
             from jaccpot.runtime.fused_topology import NEEDS_FIELDS
@@ -2164,6 +2272,7 @@ class StrictRunMixin(_EngineBase):
         return_total: bool = False,
         external_key: Optional[tuple] = None,
         caps_only: bool = False,
+        live_rows: Optional[int] = None,
     ) -> tuple[Array, Any, Optional[Array]]:
         """The fused scan of ``strict_run_v2(carry="particles")``.
 
@@ -2269,6 +2378,9 @@ class StrictRunMixin(_EngineBase):
             A segment retry re-prepares caps-only (``FusedForceProvider.replanned``):
             the start force a handle's call consumed comes from the start program
             then, as a first call's does, with the re-prepare's f_b seed kept.
+        live_rows : Optional[int]
+            ``strict_run_v2``'s escaper split: a retry re-prepares the tree rows
+            only, in their box. ``None``: every row.
 
         Returns
         -------
@@ -2724,13 +2836,34 @@ class StrictRunMixin(_EngineBase):
                 assert start_host is not None
                 state_now = jax.device_put(start_host, masses_arr.sharding)
                 donate_state_now = True  # our own copy
-            replanned = prov_i.replanned(
-                needs,
-                state_now[:, 0, :],
-                masses_arr,
-                walk_only=mode == "walk",
-                caps_only=caps_only,
-            )
+            if live_rows is None:
+                replanned = prov_i.replanned(
+                    needs,
+                    state_now[:, 0, :],
+                    masses_arr,
+                    walk_only=mode == "walk",
+                    caps_only=caps_only,
+                )
+            else:
+                from jaccpot.escapers import eager_split_inputs
+                from jaccpot.runtime.capacity_plan import eager_live_rows
+
+                masses_tree, live_box = eager_split_inputs(
+                    state_now[:, 0, :],
+                    masses_arr,
+                    int(live_rows),
+                    cubic=bool(getattr(self, "_tree_cubic_bounds", False)),
+                )
+                with eager_live_rows(int(live_rows)):
+                    replanned = prov_i.replanned(
+                        needs,
+                        state_now[:, 0, :],
+                        masses_tree,
+                        walk_only=mode == "walk",
+                        caps_only=caps_only,
+                        bounds=live_box,
+                    )
+                del masses_tree, live_box
             if replanned is None:
                 self._raise_scan_capacity_saturated(needs, retries=retries - 1)
             prov_i, topology_start = replanned

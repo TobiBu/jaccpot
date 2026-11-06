@@ -303,11 +303,18 @@ class StepParams:
     external : Any
         Parameters of the external field (any pytree; ``None`` for none). Its
         Python-number leaves are static like ``dt``.
+    live : Any
+        The escaper split (``ProductionRunner(escapers=...)``,
+        :mod:`jaccpot.escapers`): the number of leading TREE rows, traced (an
+        ``int32`` scalar), so a changed split compiles nothing; the rows after it
+        are escapers on the monopole coupling. ``None`` (the default): every row
+        is a tree row, and the pytree -- so every program -- is as without it.
     """
 
     force: ForceParams
     dt: Union[float, Array]
     external: Any = None
+    live: Any = None
 
     def tree_flatten(self) -> tuple[list, tuple]:
         """Children (traced fields) and aux (static fields).
@@ -321,7 +328,10 @@ class StepParams:
         """
         ext_leaves, ext_def = jax.tree_util.tree_flatten(self.external)
         children, aux = _split_static((self.dt, *ext_leaves))
-        return [self.force, *children], (ext_def, aux)
+        if self.live is None:
+            return [self.force, *children], (ext_def, aux)
+        # the split's row count rides last; the aux's third entry marks it
+        return [self.force, *children, self.live], (ext_def, aux, "live")
 
     @classmethod
     def tree_unflatten(cls, aux: tuple, children: Any) -> "StepParams":
@@ -339,11 +349,12 @@ class StepParams:
         StepParams
             The parameters.
         """
-        ext_def, static = aux
+        ext_def, static = aux[:2]
         children = list(children)
+        live = children.pop() if len(aux) > 2 else None
         dt, *ext_leaves = _join_static(static, children[1:])
         external = jax.tree_util.tree_unflatten(ext_def, ext_leaves)
-        return _construct(cls, [children[0], dt, external])
+        return _construct(cls, [children[0], dt, external, live])
 
 
 # --------------------------------------------------------------------------

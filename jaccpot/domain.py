@@ -247,6 +247,7 @@ def domain_guard(
     cubic_bounds: bool = True,
     dominance_warn: float = DOMINANCE_WARN,
     sample: int = 1 << 20,
+    escapers: Optional[float] = None,
 ) -> Optional[dict]:
     """Warn about, or refuse, a state whose Morton box a few particles dominate.
 
@@ -268,6 +269,11 @@ def domain_guard(
         The ``dominance`` threshold.
     sample : int
         As in :func:`domain_check`.
+    escapers : Optional[float]
+        The run's ``EscaperPolicy.r_escape`` when the escaper path is on
+        (``ProductionRunner`` then passes the tree rows only), so the message
+        says to lower it; ``None``: the message names the escaper option, with
+        a radius to start from.
 
     Returns
     -------
@@ -299,8 +305,18 @@ def domain_guard(
             )
             + ". "
             + format_domain_check(report)
-            + ". Clip or remove the outliers, or run them on the escaper path "
-            "(jaccpot.escapers.EscaperPolicy)."
+            + ". "
+            + (
+                "The escaper path is on (r_escape "
+                f"{float(escapers):.6g}) and the tree rows still span this box: "
+                "lower r_escape (ten times the 99.9th-percentile radius would be "
+                f"{10.0 * float(report['r_quantile']):.6g})."
+                if escapers is not None
+                else "Run the outliers on the escaper path -- "
+                "ProductionRunner(..., escapers=jaccpot.escapers.EscaperPolicy("
+                f"r_escape={10.0 * float(report['r_quantile']):.6g})), ten times "
+                "the 99.9th-percentile radius, needs no clip -- or clip them."
+            )
         )
         if mode == "error":
             raise ValueError(message)

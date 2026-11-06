@@ -356,8 +356,63 @@ overflow bits and the re-plans tried); a blind `E0` warns too.
 `yggdrax.TreeDepthError` at the eager prepare, a `RuntimeError` from the scan (never
 re-planned: no bound covers it) -- with the Morton box, the level-21 cell and the
 farthest particle. The IC guard above warns first. Far particles can leave the tree on
-the escaper path (`jaccpot.escapers`, a prototype: see `docs/production_2026-11.md`,
-A2).
+the escaper path below.
+
+## Escapers: far particles off the tree (`escapers=`, opt-in)
+
+A few particles far from the system set the Morton box. The 1e8 Sgr IC's sampler tails
+(out to Mpc) made a 45.7 Mpc box and a tree 68 levels deep (`TreeDepthError`), and the
+production runs clipped the tail by hand. Run such a system unclipped with the escaper
+path:
+
+```python
+from jaccpot.escapers import EscaperPolicy
+
+runner = ProductionRunner(
+    solver, settings=settings, segment=segment,
+    escapers=EscaperPolicy(r_escape=80.0),   # code units; r_return defaults to r_escape / 2
+)
+res = runner.run(state, masses, dt=1e-3, num_steps=10_000)
+```
+
+- **Who.** At the start and at every `every`-th segment edge, a tree particle farther
+  than `r_escape` from the tree particles' centre of mass becomes an escaper; an escaper
+  nearer than `r_return` comes back (the hysteresis). The IC guard's warning names a
+  radius to start from (ten times the radius holding 99.9 % of the particles).
+- **The tree** is built over the tree rows only, in their own box, and the escapers are
+  in no leaf. Their count is a traced argument of the programs, so a changed split
+  compiles nothing; while nobody escapes, the segments run the default programs, bit for
+  bit.
+- **The force.** An escaper feels the tree rows' monopole `-G M_b (x - X_b)/|x - X_b|^3`
+  (and the external field, if one is set). Every tree row feels the equal and opposite
+  uniform pull, so the total momentum is conserved up to the FMM's own error. Under
+  `dehnen_error` an escaper's `f_b` is its coupling's magnitude, so a returning particle
+  starts its thresholds from its monopole force.
+- **Neglected:** the escapers' tidal field across the bound system (relative
+  `(r_b / r_e)^2`) and the escapers' gravity on each other (far tails are tracers).
+- **The energy ledger.** A particle that changes side changes the representation of the
+  same phase-space state, and the energy jumps by the far field's multipole error there.
+  With the energy diagnostic on, the runner evaluates the potential on both sides of a
+  changing edge (two energy programs at that edge) and keeps the sum of the jumps. The
+  rows carry `n_escapers`, `escaper_transfers`, `escaper_jump`, `escaper_ledger` and, with
+  the energy, `potential_couple` (`W_c`), `kinetic_escapers`, `energy_ledgered`
+  (`E - ledger`, the conserved quantity) and `energy_ledgered_drift`. `energy_drift`
+  stays the raw `(E - E0)/|E0|`.
+- **Row order.** The runner keeps the rows in an internal order (tree rows first).
+  Callbacks, `SnapshotWriter`, restart files and `RunResult.state` see the caller's order
+  (gathered at the edge, only when something looks). The in-scan `step_callback` and the
+  external field see the internal order: a per-particle field works unchanged, a field
+  with per-row parameters does not. `RunResult.escapers` holds the order, `n_bound`, the
+  ledger and the transfers.
+- **Restarts** carry the split and the ledger (`meta["escapers"]`, the arrays in the
+  caller's rows plus `escaper_order`); a restart and a chained run continue bitwise. A run
+  continues only in its own escaper mode.
+- **Not supported:** the multi-GPU mode (`mesh=`; it would need escaper rows outside the
+  equal-count domain cuts, the coupling's centre of mass as one more all-reduce per step,
+  and a split-aware migration and restart) and the gradient mode. Both refuse.
+- **Cost.** One fused reduction over the rows per step (the bound centre of mass and the
+  coupling sum), a membership check per edge, and at a changing edge a row permutation
+  and two energy evaluations. HoreKa rows: `bench/slurm/escaper_timing.sbatch`.
 
 ## Restart files
 
