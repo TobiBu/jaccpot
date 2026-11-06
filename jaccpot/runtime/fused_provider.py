@@ -62,6 +62,7 @@ from beartype.typing import Callable, Tuple
 from jaxtyping import Array
 
 from ..softening import support_factor
+from ._lane_platform import on_lane_platform, on_lane_platform_of_solver
 from ._large_n_pipeline import evaluate_large_n_potential, evaluate_large_n_state
 from ._large_n_types import LargeNPreparedState
 from .fused_topology import (
@@ -351,6 +352,7 @@ class FusedForceProvider:
     # ----------------------------------------------------------------------
 
     @classmethod
+    @on_lane_platform_of_solver
     def prepare(
         cls,
         solver: Any,
@@ -485,9 +487,18 @@ class FusedForceProvider:
                 **({} if bounds is None else {"bounds": bounds}),
             )
         if not isinstance(prepared, LargeNPreparedState):
+            hint = ""
+            if jax.default_backend() == "cpu" and not bool(
+                getattr(engine, "cpu_fused_lane", False)
+            ):
+                hint = (
+                    ": the lane declines a CPU backend unless the solver takes its "
+                    "CPU route, FMMAdvancedConfig(runtime=RuntimePolicyConfig("
+                    "cpu_fused_lane=True)) (jaccpot.runtime._lane_platform)"
+                )
             raise RuntimeError(
                 "the fused lane's prepare returned a "
-                f"{type(prepared).__name__}, not a LargeNPreparedState"
+                f"{type(prepared).__name__}, not a LargeNPreparedState" + hint
             )
         engine._record_large_n_eval_shape_diagnostics(prepared)
         provider = cls.freeze_template(
@@ -550,6 +561,7 @@ class FusedForceProvider:
             template=template,
         )
 
+    @on_lane_platform
     def replanned(
         self,
         needs: Any,
@@ -946,6 +958,7 @@ class FusedForceProvider:
         """
         return materialize_template(self.template_or_raise())
 
+    @on_lane_platform
     def rebuild(
         self,
         positions: Array,
@@ -1108,6 +1121,7 @@ class FusedForceProvider:
         engine._last_refresh_tree_needs = None
         return topo
 
+    @on_lane_platform
     def accelerations(
         self,
         topology: FusedTopology,
@@ -1175,6 +1189,7 @@ class FusedForceProvider:
             **extra,
         )
 
+    @on_lane_platform
     def potential(
         self,
         topology: FusedTopology,
@@ -1272,6 +1287,7 @@ class FusedForceProvider:
                 ok = ok & ~jnp.asarray(topology.tree_overflow, jnp.bool_)
         return ok
 
+    @on_lane_platform
     def step(
         self,
         positions: Array,
@@ -1318,6 +1334,7 @@ class FusedForceProvider:
     # Differentiable: the gradient plan and the differentiable step (S9).
     # ----------------------------------------------------------------------
 
+    @on_lane_platform
     def with_grad_plan(self, topology: FusedTopology) -> "FusedForceProvider":
         """This provider with the gradient plan's static fields frozen.
 
@@ -1371,6 +1388,7 @@ class FusedForceProvider:
         )
         return provider
 
+    @on_lane_platform
     def grad_plan(self, topology: FusedTopology) -> tuple["LargeNGradPlan", Array]:
         """The gradient plan of a traced topology, and its lists' symmetry verdict.
 
@@ -1421,6 +1439,7 @@ class FusedForceProvider:
             )
         return self.grad_statics
 
+    @on_lane_platform
     def differentiable_accelerations(
         self,
         topology: FusedTopology,
@@ -1494,6 +1513,7 @@ class FusedForceProvider:
                 return_force_scale=bool(force_scale),
             )
 
+    @on_lane_platform
     def differentiable_step(
         self,
         positions: Array,

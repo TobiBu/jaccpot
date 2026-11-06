@@ -22,6 +22,7 @@ from yggdrax.tree import RadixTree, get_level_offsets
 from jaccpot._env import env_choice, env_flag
 from jaccpot.escapers import coupling, split_rebuild
 
+from ._lane_platform import on_lane_platform
 from ._large_n_pipeline import prepare_large_n_state
 from ._large_n_types import LargeNPreparedState, LargeNPrepareRequest
 from ._mac_geometry import walk_geometry_default
@@ -978,6 +979,7 @@ class StrictRunMixin(_EngineBase):
             self._refresh_timing_evaluate_seconds += time.perf_counter() - evaluate_t0
         return next_state, acc
 
+    @on_lane_platform
     def strict_run_v2(
         self,
         *,

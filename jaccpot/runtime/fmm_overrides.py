@@ -361,7 +361,7 @@ class OverridesMixin(_EngineBase):
         if default_mode != "auto":
             return bool(default_mode)
 
-        backend = jax.default_backend()
+        backend = self._lane_backend()
         num_particles = int(jnp.asarray(positions).shape[0])
         # CPU tree build often performs better without JIT for small/medium N.
         if backend == "cpu" and num_particles <= _JIT_TREE_CPU_SMALL_N_MAX:
@@ -604,7 +604,7 @@ class OverridesMixin(_EngineBase):
         l2l_chunk_size = self.l2l_chunk_size
         refine_local_override: Optional[bool] = None
 
-        backend_name = jax.default_backend() if backend is None else str(backend)
+        backend_name = self._lane_backend() if backend is None else str(backend)
         n_particles = int(num_particles)
         production_large_n = self._is_large_n_gpu_production_profile()
         minimum_memory = self.memory_objective == "minimum_memory" or production_large_n
@@ -792,7 +792,7 @@ class OverridesMixin(_EngineBase):
         if self._is_large_n_gpu_production_profile():
             if (
                 not bool(self._explicit_nearfield_mode)
-                and jax.default_backend() == "gpu"
+                and self._lane_backend() == "gpu"
                 and int(num_particles) < _LARGE_N_GPU_BASELINE_NEARFIELD_MAX_PARTICLES
             ):
                 return "baseline"
@@ -800,7 +800,7 @@ class OverridesMixin(_EngineBase):
         mode = str(self.nearfield_mode).strip().lower()
         if mode != "auto":
             return mode
-        backend = jax.default_backend()
+        backend = self._lane_backend()
         if backend == "gpu":
             # See the docstring: the per-pair baseline scan cannot win on a GPU
             # at any size, so there is no crossover to tune here.
@@ -859,7 +859,7 @@ class OverridesMixin(_EngineBase):
             return base_chunk
 
         n = int(num_particles)
-        if jax.default_backend() == "gpu":
+        if self._lane_backend() == "gpu":
             if (
                 str(self.preset).strip().lower() == "large_n_gpu"
                 and str(self.expansion_basis).strip().lower() == "solidfmm"
