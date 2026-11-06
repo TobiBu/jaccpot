@@ -330,6 +330,146 @@ the gate runs 4).
 - Callbacks run on every process; a callback that writes must check `jax.process_index() == 0`.
 - The stacked route (`setup_fused_force`) and `distributed/fmm.py` stay single-process.
 
+## I1 — nornax owns the integration scheme (2026-11-05)
+
+Decision U1: nornax owns the integration schemes, jaccpot the force, decomposition and orchestration, Odisseo the
+science. The design note (`mn-scratch/i1/I1-DESIGN.md`) is summarised in `docs/production.md`, "Integration schemes".
+
+### What was built
+- **jaccpot.** `jaccpot/scheme.py` holds the structural protocol `SplitStepScheme`: `rowwise`, `key()`, `open_step`,
+  `close_step`. Each step of the particle carry's scan is cut at its one force evaluation:
+  `open_step` -> refresh + self + external force -> `close_step`. Refresh, verdict, re-plan/retry, restart and
+  diagnostics stay the runner's. jaccpot does not import nornax.
+  - `strict_run_v2(scheme=None)`: `None` takes the old inline expressions, so default programs are unchanged.
+  - `ProductionRunner(scheme=None)` and `production.run(scheme=)`.
+  - A scheme's `key()` joins the scan's compile key.
+  - A non-rowwise scheme keeps the input order under the tree-order carry.
+  - A restart file records `meta["scheme"]` only when a scheme is set; a restore under another scheme reports
+    `"scheme"`.
+  - Refused: `mesh=` (I2), the gradient mode, and `carry="state"`.
+- **nornax.** `nornax.schemes.LeapfrogKDK`. Its expressions, `drift_positions` and `kick_velocities`, now live in
+  one place, `leapfrog_kdk.py`, and `leapfrog_kdk_step` / `leapfrog_kdk_rollout` call them too.
+- **Odisseo.** `SimulationConfig.fmm_scheme` takes `None`, `"nornax_kdk"` or a scheme object.
+  - It selects lane `fmm_runner` for fixed-step `FMM_ACC` runs.
+  - The block-step, differentiable and older mesh lanes refuse it; `fmm_mesh_runner` refuses it until I2.
+  - Odisseo's FMM leapfrog loop (`integrate_leapfrog_jaccpot_active`, lane `fmm_forward` with fixed steps) and the
+    older mesh lane's KDK are deprecated with a `DeprecationWarning` naming the replacement. Through `integrate()`
+    the warning is issued once, on the caller's line.
+- **Bench.** `fused_memory_budget.py --runner-scheme nornax_kdk`; pins `R1pN` / `R1xN` in `dce_pins.py`.
+- **CI.** Shard `integration-strict-scheme`.
+
+### Gates (CPU unless noted)
+- Identity: `i1-tip-cpu` vs `w2-base-cpu`, 36/36 variants identical.
+- `tests/integration/strict/test_runner_scheme.py`: 9 passed. The KDK scheme is the built-in runner bit for bit
+  (literal and traced parameters, an NFW halo with traced parameters, the tree-order carry). A dt/2 scheme is the
+  built-in at dt/2. Restart and refusals pass. The shard ran 12.4 min at `-n 2` with coverage on a loaded host.
+- nornax: `ProductionRunner(scheme=LeapfrogKDK())` is the built-in runner bit for bit (static, traced, halo).
+  - The scheme's scan over the direct sum is `leapfrog_kdk_rollout` bit for bit.
+  - Suite: 360 passed, coverage 95.5 %; type-check smoke 61 passed.
+- Odisseo: `fmm_scheme="nornax_kdk"` is the built-in runner lane bit for bit (N = 512, NFW halo, 6 steps).
+  - Suite (`-m 'not slow'`): 291 passed, 11 skipped (2-device), 2 xfailed.
+  - The 2-device mesh files on forced devices: 43 passed.
+- Notebook `jaccpot_fmm_first_integration.ipynb`: cells 1-4, 7 and 9 were run on the base stack and the I1 stack.
+  The 4 arrays are bitwise equal and the printed numbers are identical. Cells 7 and 9 fail on both stacks
+  (Odisseo's `E_pot` has no `FMM_ACC` branch; this predates I1).
+- Also passed: `test_shards.py check`; `tests/unit` top level 517 passed; bench-tooling 117; gated
+  `distributed-segment-runner` 5 (2 forced devices).
+- GPU: one shared A100, functional only (`dce_pins.py`, N = 2e5, deterministic ops). R1p and R1x A-vs-A are
+  bitwise. `R1pN` and `R1xN` (the runner with nornax's `LeapfrogKDK`) are bitwise to the built-in's R1p and R1x:
+  states and forces, both arms of R1x.
+
+### Open
+- I2: the mesh runner's seam.
+- U6: the hybrid Hermite scheme (`rowwise=False`; it needs a per-step scheme carry and the `target_points=`
+  exclusion).
+- Retiring the deprecated loops.
+- Whether the default fixed-step FMM lane should switch to the runner. That changes numerics and is a user decision.
+
+## M2 (GPU part) — N processes x 1 GPU on NCCL (2026-11-05)
+
+Plan M2, second session: the multi-process runtime of the CPU part on GPUs. Branch `m2/multiprocess-gpu` on main
+`f868c393`. Local cards are shared A100-PCIE-40GB (selected by autocvd, other users' jobs on them): functional,
+bitwise and memory results only, no timing. The timing and the 4-GPU / 2-node runs are prepared for HoreKa
+(`bench/slurm/m2g/`, not run).
+
+### What jax 0.11.2 gives on GPUs across processes (the spike)
+`tests/distributed/_multiprocess_scenarios.collectives` inside `jit(shard_map)`, three calls each with new data,
+2 processes x 1 GPU against 1 process x 2 GPUs on the same two cards, each side run twice:
+
+| XLA flags | result |
+| --- | --- |
+| production (`RAGGED_EXCHANGE_XLA_FLAGS`: NCCL send/recv ragged fallback, `use_barrier_with_nccl=false`) | `psum` f32/f64/int32, `pmax`, `pmin`, `all_gather`, `all_to_all`, `ppermute`, `jax.lax.ragged_all_to_all` (600-900 rows of 56 f32 per message, above the #398 threshold) and yggdrax's `ragged_all_to_all_exchange` all equal the host references, both arms bitwise, each arm A-vs-A clean; the same with each process given its card by its own `CUDA_VISIBLE_DEVICES` (as SLURM's per-task binding does) |
+| XLA's default (the one-shot kernel, no ragged flags) | works across processes too, the same bits |
+| the NCCL fallback with `use_barrier_with_nccl` at its 0.11 default (on) | **hangs** across processes, as in one process (#398): 300 s, every main thread in `BlockUntilReady` (py-spy, no compile frames). yggdrax's exchange refuses this flag set before tracing (`RuntimeError`) |
+
+So the flag is needed across processes exactly as in one process, and the production flag set already has it. The
+mesh evaluator's warning (`fused._warn_if_slow_ragged_exchange`) covers both; `bench/multiprocess_gate.py` sets the
+flags like every multi-GPU bench.
+
+**Float all-reduce order.** At two devices every order is `a0 + a1`, so the 2-GPU gate cannot see an order
+difference (the probe reports the `psum` against the mesh-order fold: 0 differing elements, both arms). The force
+path has no float all-reduce (verdicts are integer `pmax`/`pmin`, the exchanges move rows). The diagnostics' float
+sums are `mesh_sum`/`mesh_moments`: a psum (XLA's partitioned reduction, NCCL on a GPU) in one process, the
+all-gathered mesh-order fold under several. From three GPUs on, NCCL's in-process order may differ from that fold
+in the last bits of the moments and the energy (never of the state or forces); the HoreKa `node1` job's
+collectives probe measures it at 4 (`psum_*_mesh_order_differs`) and its compares report the edges' diagnostics
+separately from the arrays. If it differs, the fix is to fold in mesh order in one process too (a change to the
+single-process mesh programs: the user's call).
+
+### Gates (2 processes x 1 GPU vs 1 process x 2 GPUs, the same cards, production flags unless noted)
+`tests/distributed/test_multiprocess_gpu.py` (manual: `JACCPOT_RUN_MANUAL_TESTS=1`, two cards in
+`CUDA_VISIBLE_DEVICES`); `_multiprocess_harness.run_side(..., platform="gpu")`: process `r` owns card `r`
+(`JAX_LOCAL_DEVICE_IDS`). Every case: each side twice (A-vs-A), then the sides.
+
+| case | A-vs-A (sp / mp) | sp vs mp |
+| --- | --- | --- |
+| helpers (`mesh_sum`, `mesh_moments`, `host_value`, `decompose_local` == `decompose`) | clean / clean | bitwise |
+| runner + `DirectMeshForce` (N = 256, f64), migrating and not, energy and moments at every edge | clean / clean | bitwise (only `restart_refused` differs, by design) |
+| runner + fused `dehnen`, N = 2048, the real GPU lane, migrating, undersized cross capacity (segment 1 re-planned and retried) | clean / clean | bitwise |
+| runner + fused `dehnen_error`, A3 collapse start: TREE re-plan (leaf capacity 44 -> 1024, retries [1, 1]), f_b carried, energy at every edge | clean / clean | bitwise (state, acceleration, owner, force_scale, every edge, every report) |
+| `bench/multiprocess_gate.py` (the HoreKa entry point) under a simulated SLURM step, `initialize()` without arguments: galaxy preset `dehnen_error`, Plummer 1e5 per GPU, 2 segments x 2 steps, migration, energy at every edge, 2 repeats in the process; every task seeing both cards (jax's `[SLURM_LOCALID]`) and each task bound to one card (`slurm_bound_device_ids` -> `[0]`) | clean (sp) | bitwise, both bindings (state, acceleration, owner, every edge's diagnostics) |
+| runner + fused `dehnen`, galaxy preset (leaf 64, p6), Plummer 2e5 per GPU (4e5), 3 segments x 2 steps, migration (4x the equilibrium speeds), cross capacity far too small at the start (segment 1: 3 re-plans), energy at every edge | clean / clean | bitwise |
+| the same with `dehnen_error` (1e-4), f_b carried | NOT clean on the production flags: one float32 velocity component differs by 1 ulp from run to run (one process and two alike), so the edges' moments differ in the last bits; clean with `--xla_gpu_deterministic_ops=true` | bitwise with deterministic ops (both pairs); on the production flags each sp/mp pair happened to agree bitwise too |
+
+Only `dehnen_error` at 2e5 per GPU needed `--xla_gpu_deterministic_ops=true` for its A-vs-A control: the lane's
+known run-to-run variation on the production flags (`bench/multigpu_runner_gate.py` attributes it to the
+`dehnen_error` seed's scatter-add and the cross field's), present in one process, not something the processes add.
+
+**Discarded attempts.** A segment attempt that overflows a capacity is re-planned and rerun. The counts it reported
+past the overflowing buffer (`SegmentReport.failures[*]["needs"]`: 2 of 25 cross-field counters, at 4e5) vary from
+run to run in one process and two, also with deterministic ops (a kernel's slot counting past capacity, not an XLA
+scatter). Their flag bits, the kept attempt's needs and the re-planned capacities are bitwise; the gate compares
+those (`test_multiprocess_gpu._kept`).
+
+**Memory** (peak bytes in use per card, `memory_stats`): fused 2e5 per GPU 0.136 GiB (`dehnen`) and 0.262 GiB
+(`dehnen_error`, deterministic ops), the same in both arms (process 0's card in the mp arm); the HoreKa entry point at
+1e5 per GPU (`dehnen_error`) 0.14 GiB. Contended cards: no timings.
+
+### What was built
+| piece | what |
+| --- | --- |
+| `multiprocess.initialize` | under SLURM with nothing naming the devices and ONE card in `CUDA_VISIBLE_DEVICES` (`--gpus-per-task=1` with binding), passes `local_device_ids=[0]` (`slurm_bound_device_ids`): jax's own rule, `[SLURM_LOCALID]`, names a missing device from local rank 1 on. Otherwise jax's rule (right when every task sees the node's cards) |
+| `SnapshotWriter`, `DiagnosticsLog` | write their files on process 0 only (every process still takes part in the state gather, a collective, and keeps the rows); `all_processes=True` writes on each. One process: unchanged |
+| `_multiprocess_harness` | `platform="gpu"` (the first n cards of `CUDA_VISIBLE_DEVICES`; `gpu_binding="local_device_ids"` or `"visible"`), `launcher="slurm"` (a simulated SLURM step, `initialize()` without arguments), a py-spy dump of every child before a timeout kills it |
+| scenarios | `collectives`, `fused_runner_large` (the galaxy preset at 2e5 per device, Plummer), `writers`, `launch`; `fused_runner` runs the real lane on a GPU |
+| `bench/multiprocess_gate.py`, `bench/slurm/m2g/` | the HoreKa jobs: `node1` (1 node: 4 processes x 1 GPU vs 1 x 4, both MACs at 2e6 per GPU, A-vs-A, per-task binding arm, deterministic-ops arms; bitwise + timing) and `node2` (2 nodes x 4: functional, A-vs-A across nodes, collectives at 8, the barrier probe across nodes); README documents jax's SLURM detection and the binding choice |
+
+CPU tests (in the `distributed-multiprocess` CI shard): the writers write on process 0 only (and on each with
+`all_processes=True`); `initialize()` from a simulated SLURM step; `slurm_bound_device_ids` (4 cases).
+
+### Default paths
+- Single-card CPU program identity: `w2-base-cpu` vs `m2g-tip-cpu` (`4300467e`): **36/36 identical**.
+- `distributed-multiprocess` shard (CPU): 12 passed, 2 skipped (manual) in 45 min (shared host); with
+  `JACCPOT_RUNTIME_TYPECHECK=1` the fast cases 10 passed. `tests/unit` top level: 517 passed, 32 skipped.
+  `test_shards.py check` rc 0.
+
+### Open
+- Edge 0's energy is `None` when the start's cross capacity is too small (the fused `dehnen` 2048 case): the
+  potential at step 0 reports not-ok and is not re-planned, so there is no `E0` and `energy_drift` stays `None` for
+  the whole run. Also in one process; not changed here.
+- The float reduction order at >= 3 GPUs (above): HoreKa `node1`.
+- `RunResult.state` and the snapshots gather the whole state to every process (M3: per-rank output).
+
 ## H0 — the HoreKa single-node baseline bundle (2026-11-04)
 
 `bench/slurm/h0/` runs every H0 measurement on dedicated HoreKa nodes:
@@ -347,3 +487,151 @@ It was checked on CPU only: every job script ran locally at tiny N with the exac
 one bench bug, now fixed: `multigpu_segment_gate.py` crashed on every one-device mesh row.
 
 Expected cost: about 19 node-hours.
+
+## A2 — diagnostics and domain robustness (2026-11-05)
+
+Branches `a2/diagnostics-robustness` in jaccpot and yggdrax (from f868c393 / 235e1f9). Four items: #488, the
+64-level tree bound, an IC guard, and a prototype escaper policy.
+
+### #488: why the energy diagnostic went blind
+
+The force and the energy disagreed about fitting because they ran on **different level-loop widths**. The level loops'
+batch width lives in a process-level registry (`_level_shapes`). Programs read it when they TRACE, and no provider
+key holds it. A tree re-plan that widens only that batch therefore clears the engine's compiled runners
+(`_replan_tree_from_needs`), so the force scans retrace with the new width. `ProductionRunner._energy_programs`
+was never cleared: the energy program compiled before the re-plan kept the old width and reported
+`energy_ok=False` at every edge whose widest level outgrew it. The force segments ran on with `retries 0`.
+
+- The 4.7e7 merger (`c_fp64_t06`, geometric 0.6, fp64 state) shows it: one retry at step 3040 with leaf, far and
+  near caps unchanged (a width-only re-plan), then blind energy from step 6150 to the end. In a fresh process the
+  energy fitted (the issue's workaround).
+- CPU reproduction, N = 512: the cusp of `test_strict_runners_on_provider.py` drifting a tenth of the way into four
+  blobs. The energy program was compiled on the cusp at rest (width 18); the first segment re-planned the width to 33
+  with the leaf capacity at 128. Before the fix, steps 1 and 2 were blind (step 2 with retries 0). Step 3's leaf
+  re-plan (128 -> 1024, a new key) made the energy fit again.
+
+**The fix** (`jaccpot/production.py`):
+
+- The energy key holds the level registry (`_level_registry_key`). The same reproduction then has no blind row, and
+  its energies equal a fresh run's bitwise (1130.512663611531, 1130.0507250483863, 1129.9680966311746).
+- A rebuild that still does not fit is re-planned for the energy alone, at most twice (`_segment_retry_mode`):
+  - the rebuild's needs come from a small program;
+  - `FusedForceProvider.replanned(caps_only=True)` re-plans at the edge's positions;
+  - the energy program on the grown provider is compiled ahead of time;
+  - all of it runs inside `_trace_state_kept`, so the force's plan, compiled runners, walk caps and level registry
+    come back unchanged;
+  - the grown program is kept for the plan and tried first at later edges.
+
+  Checked with the registry forced to width 4: one re-plan, `W` bitwise the full plan's (-12.166413280530833), and
+  the registry, cache object and validated caps all unchanged.
+- A row that is still blind (retry off, a named cap) warns: `RuntimeWarning` with the time, the overflow bits and the
+  re-plans tried. A failed `E0` warns too. Rows carry `energy_replans`.
+- The mesh energy (`MeshSegmentRunner.potential_energy`) shares its program cache with the mesh force and gets the
+  same warning, but has no energy-only re-plan (open).
+
+### Tree depth > 64: now loud
+
+yggdrax's level tables hold `MAX_TREE_LEVELS` = 64 levels and `num_levels` is clipped to them. A node deeper than
+that is in no level, so every level-ordered sweep (M2M, L2L) skipped it **silently**. It happens when many leaves
+share one level-21 cell, i.e. a box set by far outliers. Before this change:
+
+| path | before | now |
+|---|---|---|
+| yggdrax eager build | clipped, silent | `TreeDepthError` naming the box, the level-21 cell, the farthest particle and the 99.9th-percentile radius (`domain_report`) |
+| jaccpot eager prepare (jitted tree build) | level loops bounded at `min(64, depth + 8)`, silent | `_resolve_upward_num_levels` raises `TreeDepthError` (box and cell from the tree's bounds) |
+| fused scan | flagged, then a wasted re-plan (an eager re-prepare at 1e8), then an error that said "raise leaf_capacity" | never re-planned past 64 (`_segment_retry_mode`); the error says it is yggdrax's bound, with the box and the outliers at the segment's start |
+
+Traced builds are unchanged (no program changes): their callers fold the depth into their verdicts, as jaccpot's
+rebuild already did.
+
+### The IC guard
+
+`jaccpot.domain.domain_check` gives the Morton box, the level-21 cell, the farthest particle, the 99.9th-percentile
+radius about the median centre, the box's dominance over the bulk and a depth bound. The depth bound is
+`64 + ceil(log2 leaves)`, where `leaves` is the densest level-21 cell divided by the leaf size: a tree of unique cell
+codes has at most 64 levels, and the leaves of one wide cell add a balanced subtree below it. The densest cell is
+estimated on the subsample, scaled by its stride, from three hits up. The densest cell need not be at the centre.
+
+| IC (1e8 Sgr, seed 5) | box | level-21 cell | box / bulk diameter | densest level-21 cell | depth bound | observed depth |
+|---|---|---|---|---|---|---|
+| unclipped (this session, `--r-clip 1e12`) | 45.7 Mpc | 21.8 pc | 25 | ~665 (17 at the median centre) | 68 | 68 (`smoke_1e8_deep`) |
+| production clip (800 / 100 kpc) | 1.60 Mpc | 0.76 pc | 1.11 | 1 | 64 | fits |
+
+On the unclipped IC the guard warns, naming particle #27382923 at 29.7 Mpc and the 467 particles beyond 10x the
+99.9 % radius (916 kpc).
+
+Cost: device reductions in one jitted program plus a strided subsample of 2^20 rows. It allocates no
+[N]-sized temporaries.
+
+`ProductionRunner` runs it before the first segment as `SegmentConfig(domain_guard=...)`:
+
+- `"warn"` (default) warns when the box is more than 20x the bulk's diameter;
+- `"error"` refuses the run;
+- `"off"` skips the guard.
+
+It reads the state only. A `TreeDepthError` from the first prepare is re-raised with the guard's report. The depth
+itself is always checked by the prepare: the guard's bound is advisory.
+
+### The escaper policy (prototype, opt-in): `jaccpot.escapers`
+
+**Option (a): escapers leave the tree.** Option (b), clamping the Morton box and treating outliers against the root,
+was rejected. A clamped outlier still lands in a boundary leaf whose particle-range geometry spans the outlier's true
+distance: the near list floods and the corner leaves mix with real particles.
+
+- **Static shapes.** The N rows stay, in an internal order with the `n_b` tree rows first and the escapers last.
+  - The tree is built with `FusedForceProvider.rebuild(num_valid=n_b)`, the multi-GPU lane's capacity-padded cut
+    (rows past `n_b` are in no leaf), with `n_b` traced.
+  - Escaper rows are mapped onto row 0 with mass 0, so the inferred box is the bound rows'.
+  - A changed split is a row permutation between segments, and the provider is kept. Nothing compiles: one scan and
+    one edge program over the whole test.
+- **Hamiltonian** `H = K + W_tree + W_c`, with `W_c = -G M_b sum_e m_e / |x_e - X_b|`:
+  - an escaper feels `-G M_b (x_e - X_b)/|..|^3`;
+  - every tree row feels the FMM force plus the same uniform `G sum_e m_e (x_e - X_b)/|..|^3`;
+  - the pair forces are equal and opposite, so momentum holds up to the FMM's own error;
+  - it is evaluated every step, so the leapfrog conserves `E` as it does without the split.
+  - Neglected: the escapers' tidal field across the system (relative `(r_b / r_e)^2`) and their mutual gravity
+    (O(K^2); far tails are tracers).
+- **The ledger.** A transfer changes the representation of the same phase-space state, and the edge records that
+  jump. `E - sum(jumps)` is the conserved quantity. Rows also carry the escapers' kinetic energy and `W_c` (what they
+  carried away). An escaper returns inside `r_return` (default `r_escape / 2`).
+
+CPU gate: a Plummer sphere (N = 1024) plus 8 fliers at 3x escape speed, `r_escape` 5, dt 1e-3, 200 steps, CSR
+interpret, leaf 16, p 4, theta 0.6. A control is the same run with no split.
+
+| run | max \|ΔE/E0\| | max \|ΔP\| / Σ m\|v\| |
+|---|---|---|
+| with the split (`E - Σ jumps`) | 1.19e-5 | 3.3e-8 |
+| control | 8.7e-6 | 2.3e-8 |
+
+Both sit at the FMM/fp32 noise floor, which is the same at dt 5e-3.
+
+Scope of the prototype:
+
+- `EscaperRunner` is its own segment loop: a jitted KDK scan per segment, with `replanned` on an overflow.
+- One card, the geometric MAC, no external field. `ProductionRunner`'s restarts, callbacks and mesh mode are not
+  wired in.
+- Production wiring (the `n_b` cut and the coupling inside `strict_run_v2`'s scan, as a gated program variant) is
+  the follow-up.
+
+**Sgr gate (local A100, shared card: functional only).** The 1e8 light-Sgr IC was re-assembled with the same seed
+and inputs but **no clip** (`assemble_sgr.py --r-clip 1e12 --r-clip-sgr 1e12`: 100,000,001 rows, a 45.7 Mpc box).
+A downsampled copy keeps every original tail particle beyond 800 kpc of the origin (182,859) plus a stride-49 sample
+of the rest, with the sample's masses scaled up: 2,219,944 rows.
+
+It ran on the escaper path with `r_escape` 80 (800 kpc), the production settings (geometric MAC theta 0.7,
+softening 1.5e-3, dt 1e-3) and 2 segments of 5 steps:
+
+- 182,828 to 182,833 escapers, no clip;
+- every row fitted;
+- `E - Σ jumps` within 5.6e-7 of `E0`;
+- total momentum moved by 4.6e-8, absolute.
+
+The full 1e8 unclipped run needs a free 40 GB card. It was queued when this was written
+(`mn-scratch/a2/sgr/gpu_gate.sh`).
+
+### Gates
+
+- Identity: `provider_hlo_identity compare w2-base-cpu a2-tip-cpu` is **36/36**.
+- CI shards run locally with CI's arguments, all rc 0: `unit`, `integration-strict-a2` (new), `integration-strict`,
+  `integration-strict-runner`, and `distributed-segment-runner` (2 forced devices).
+- The partition check covers 2816 tests.

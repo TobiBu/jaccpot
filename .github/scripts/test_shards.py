@@ -83,6 +83,8 @@ _SEGMENT_CRITERION = "tests/distributed/test_mesh_segment_dehnen_error.py"
 _SEGMENT_MIGRATION = "tests/distributed/test_mesh_segment_migration_fused.py"
 # the multi-GPU mode as N processes x 1 device against 1 process x N devices (M2)
 _MULTIPROCESS = "tests/distributed/test_multiprocess_runtime.py"
+# its GPU half (M2G): manual, skipped without JACCPOT_RUN_MANUAL_TESTS=1 and two cards
+_MULTIPROCESS_GPU = "tests/distributed/test_multiprocess_gpu.py"
 # the mesh potential and the production runner's multi-GPU mode on the fused force
 # (S11 session 2, tracks E and D): ~11 min of compilation between them on CI
 _SEGMENT_RUNNER_FILES = (
@@ -109,6 +111,18 @@ _STRICT_LANE_FILES: tuple[str, ...] = (
     "tests/integration/strict/test_float64_lane.py",
     "tests/integration/strict/test_caps_only_prepare.py",
 )
+# The energy diagnostic's re-plan (#488) and the escaper prototype (A2): a cusp
+# drifting into four blobs through the runner (the CSR near field in interpret
+# mode) and leapfrog runs with an escaper split, ~10 min of compilation on CPU;
+# `integration-strict` had no room for them (23.6 of its 25 min, above).
+_STRICT_A2_FILES: tuple[str, ...] = (
+    "tests/integration/strict/test_energy_replan.py",
+    "tests/integration/strict/test_escapers.py",
+)
+# The runner's integration-scheme seam (multi-node plan I1, 2026-11-05): runner pairs
+# (built-in and scheme) at the production-runner operating point, kept out of
+# `integration-strict`, which is near its cap (12.4 min at `-n 2`, loaded host).
+_STRICT_SCHEME = "tests/integration/strict/test_runner_scheme.py"
 # The differentiable fused step and the rollout over it (S9): every Pallas kernel in
 # interpret mode, and reverse programs of the whole lane (2-5 min of compilation
 # each on CPU). With them `integration-strict` was cancelled at its cap on #490
@@ -207,6 +221,8 @@ SHARDS: dict[str, list[str]] = {
             for path in (
                 *_STRICT_RUNNER_FILES,
                 *_STRICT_LANE_FILES,
+                *_STRICT_A2_FILES,
+                _STRICT_SCHEME,
                 *_STRICT_GRAD_FILES,
                 _STRICT_GRAD_ROLLOUT,
                 _STRICT_GRAD_RUNNER,
@@ -217,6 +233,8 @@ SHARDS: dict[str, list[str]] = {
     ],
     "integration-strict-runner": list(_STRICT_RUNNER_FILES),
     "integration-strict-lane": list(_STRICT_LANE_FILES),
+    "integration-strict-a2": list(_STRICT_A2_FILES),
+    "integration-strict-scheme": [_STRICT_SCHEME],
     "integration-strict-grad": list(_STRICT_GRAD_FILES),
     "integration-strict-grad-rollout": [
         _STRICT_GRAD_ROLLOUT,
@@ -283,7 +301,12 @@ SHARDS: dict[str, list[str]] = {
     "distributed-segment-runner": [*_SEGMENT_RUNNER_FILES, "-m", "distributed_segment"],
     # the multi-GPU mode as N localhost processes (M2): child processes against
     # one process with N forced devices; its own job (no forced devices needed)
-    "distributed-multiprocess": [_MULTIPROCESS, "-m", "distributed_multiprocess"],
+    "distributed-multiprocess": [
+        _MULTIPROCESS,
+        _MULTIPROCESS_GPU,
+        "-m",
+        "distributed_multiprocess",
+    ],
 }
 
 # The two jobs that do not run on every pull request. Each costs minutes of

@@ -74,6 +74,7 @@ __all__ = [
     "process_info",
     "put_host_copy",
     "refuse_in_multiprocess",
+    "slurm_bound_device_ids",
 ]
 
 
@@ -116,9 +117,20 @@ def initialize(
     Call it once per process, before anything initialises a backend (the first
     ``jax.devices()``, any array). With all three of ``coordinator_address``,
     ``num_processes`` and ``process_id`` ``None``, ``jax.distributed`` reads them
-    from the cluster environment (SLURM: ``SLURM_*`` with one task per GPU; set
-    ``local_device_ids`` or ``--gpus-per-task=1`` so each process sees its own
-    card). On CPU the cross-process collectives are gloo's.
+    from the cluster environment (SLURM: ``SLURM_*`` with one task per GPU). On CPU
+    the cross-process collectives are gloo's.
+
+    **One GPU per process under SLURM.** jax's SLURM detection sets
+    ``local_device_ids=[SLURM_LOCALID]``: right when every task of a node sees all
+    of the node's cards (``--ntasks-per-node=G --gres=gpu:G``, no per-task GPU
+    binding: task ``l`` takes card ``l``), WRONG when SLURM binds one card to each
+    task (``--gpus-per-task=1`` with binding, ``--gpu-bind=single:1``): the task
+    then sees one card, as device 0, and ``[SLURM_LOCALID]`` names a device that
+    does not exist from local rank 1 on. So when SLURM is detected, nothing names
+    the devices (no ``local_device_ids``, no ``JAX_LOCAL_DEVICE_IDS``) and
+    ``CUDA_VISIBLE_DEVICES`` lists exactly one card, this passes
+    ``local_device_ids=[0]`` (:func:`slurm_bound_device_ids`). Both launches then
+    give each process its own card.
 
     Parameters
     ----------
@@ -129,7 +141,8 @@ def initialize(
     process_id : Optional[int]
         This process's index, ``0..num_processes-1``.
     local_device_ids : Optional[Sequence[int]]
-        The devices this process owns (``None``: jax's default).
+        The devices this process owns (``None``: jax's default, or ``[0]`` for a
+        SLURM task bound to one card; see above).
     cpu_collectives : str
         ``jax_cpu_collectives_implementation`` (``"gloo"``; ``"mpi"`` needs an
         MPItrampoline build of MPI).
@@ -143,6 +156,12 @@ def initialize(
     """
     jax.config.update("jax_cpu_collectives_implementation", cpu_collectives)
     kwargs: dict = {"initialization_timeout": int(initialization_timeout)}
+    if local_device_ids is None and None in (
+        coordinator_address,
+        num_processes,
+        process_id,
+    ):
+        local_device_ids = slurm_bound_device_ids()
     if local_device_ids is not None:
         kwargs["local_device_ids"] = list(local_device_ids)
     jax.distributed.initialize(
@@ -152,6 +171,37 @@ def initialize(
         **kwargs,
     )
     return process_info()
+
+
+#: what jax's SLURM detection reads (``jax._src.clusters.slurm_cluster``)
+_SLURM_VARIABLES = (
+    "SLURM_JOB_ID",
+    "SLURM_STEP_NODELIST",
+    "SLURM_NTASKS",
+    "SLURM_PROCID",
+    "SLURM_LOCALID",
+)
+
+
+def slurm_bound_device_ids() -> Optional[list]:
+    """``[0]`` for a SLURM task whose ``CUDA_VISIBLE_DEVICES`` is one card, else ``None``.
+
+    ``None`` (jax's own choice, ``[SLURM_LOCALID]``) outside SLURM, when
+    ``JAX_LOCAL_DEVICE_IDS`` is set, and when ``CUDA_VISIBLE_DEVICES`` is unset or
+    lists several cards (a task that sees the node's cards). See
+    :func:`initialize`.
+
+    Returns
+    -------
+    Optional[list]
+        ``[0]`` or ``None``.
+    """
+    if not all(env_text(name) for name in _SLURM_VARIABLES):
+        return None
+    if env_text("JAX_LOCAL_DEVICE_IDS"):
+        return None
+    cards = [c for c in env_text("CUDA_VISIBLE_DEVICES").split(",") if c.strip()]
+    return [0] if len(cards) == 1 else None
 
 
 def process_info() -> ProcessInfo:

@@ -1942,6 +1942,7 @@ class FastMultipoleMethod:
         force_params: Optional[ForceParams] = None,
         external_params: Any = None,
         carry_total_acceleration: bool = False,
+        scheme: Any = None,
     ) -> tuple[Array, Optional[Any], Optional[Array]]:
         """Strict V2 segmented runner with raw tensor API.
 
@@ -2043,6 +2044,11 @@ class FastMultipoleMethod:
             the field again outside the scan. Chained calls are then one call of
             all their steps, bit for bit (see the impl docstring). The production
             runner passes it.
+        scheme : Any
+            ``carry="particles"`` only. ``None`` (the default): the built-in
+            velocity Verlet. A :class:`jaccpot.scheme.SplitStepScheme` (nornax's
+            ``LeapfrogKDK``) does the step's drift and kick around its one force
+            evaluation; the force, verdict, retry and handle stay the lane's.
 
         Returns
         -------
@@ -2077,6 +2083,7 @@ class FastMultipoleMethod:
             force_params=force_params,
             external_params=external_params,
             carry_total_acceleration=bool(carry_total_acceleration),
+            scheme=scheme,
         )
 
     def strict_fused_prepared_eval_fn(

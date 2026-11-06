@@ -166,6 +166,19 @@ jobs:
           - shard: integration-strict-lane
             typecheck: "0"
             timeout: 25
+          # The energy re-plan (#488) and the escaper prototype (A2), out of
+          # `integration-strict` from the start (no room under its cap).
+          - shard: integration-strict-a2
+            typecheck: "0"
+            timeout: 25
+          # The runner's integration-scheme seam (multi-node plan I1, 2026-11-05): the
+          # built-in runner against a scheme at the runner tests' operating point;
+          # out of `integration-strict`, which is near its cap. Measured at `-n 2`,
+          # coverage, cold cache, on a 64-core host loaded by four other suites:
+          # 12.4 min.
+          - shard: integration-strict-scheme
+            typecheck: "0"
+            timeout: 25
           # The differentiable fused step and the rollout over it (S9, #490): every
           # Pallas kernel in interpret mode and reverse programs of the whole lane;
           # with them `integration-strict` was cancelled at its cap. Measured as
