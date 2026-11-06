@@ -4,8 +4,8 @@
 rebuilt from the inputs' stopped gradients with a cross hook that records the frozen
 cross layout (``grad_sink`` -> ``CrossGradPlan``), S8's differentiable evaluation at
 the live inputs with the cross far sources in its far chain (seam A) and the cross
-near term (seam B). The seams are G1's placeholders here: the production launches
-forward, reverses that raise. Gates, on CPU (the S9 interpret set, the GPU's
+near term (seam B), with the default (real) seams; their forwards are the production
+launches, so the forward gates hold for the placeholders too. Gates, on CPU (the S9 interpret set, the GPU's
 target-sorted symmetric walk in interpret mode, the ``buf`` exchange), N = 2048
 uniform cube, leaf 64 (capacity 128), p4, fp32:
 
@@ -16,10 +16,11 @@ uniform cube, leaf 64 (capacity 128), p4, fp32:
 * MG2: at one device (no hook, no seam reached) the mesh gradient -- ``jax.grad`` of
   a loss OUTSIDE the ``shard_map`` -- equals the single card's differentiable path in
   the same box, bitwise, in the positions and the masses;
-* at two devices ``jax.grad`` reaches the placeholder seams and raises.
+* at two devices, with the placeholder seams, ``jax.grad`` reaches them and raises
+  (no route bypasses the seams; the real seams are G4's, test_mesh_grad_gates.py).
 
 Each program is minutes of interpret-mode compilation on a loaded host (``slow``,
-``distributed_segment``).
+``distributed_grad``).
 
     XLA_FLAGS=--xla_force_host_platform_device_count=4 JAX_PLATFORMS=cpu \\
         pytest tests/distributed/test_mesh_grad_forward.py -q -n 0
@@ -53,7 +54,7 @@ pytestmark = [
         jax.device_count() < 2, reason="the fused multi-GPU lane needs >= 2 devices"
     ),
     pytest.mark.slow,
-    pytest.mark.distributed_segment,
+    pytest.mark.distributed_grad,
 ]
 
 AXIS = "gpus"
@@ -356,8 +357,11 @@ class _OneShard:
 
 
 def test_the_gradient_reaches_the_placeholder_seams_and_raises():
-    """Two devices: the reverse needs seams A and B, which G1 leaves unwired --
-    ``jax.grad`` raises instead of returning a gradient without the cross terms."""
+    """Two devices, the placeholder seams passed explicitly: the reverse reaches
+    seams A and B -- ``jax.grad`` raises there instead of returning a gradient
+    without the cross terms (no route bypasses the seams)."""
+    from jaccpot.distributed import grad as G
+
     mesh = _mesh(2)
     cap = int(N / 2 * 1.3)
     pos, vel, mass = _cube(N, 0)
@@ -368,7 +372,12 @@ def test_the_gradient_reaches_the_placeholder_seams_and_raises():
     def loss(x, m):
         def body(xx, mm, nn, ii):
             return force.differentiable_shard(
-                xx, mm, jnp.minimum(nn[0], xx.shape[0]), ii
+                xx,
+                mm,
+                jnp.minimum(nn[0], xx.shape[0]),
+                ii,
+                far_seam=G.placeholder_far_seam,
+                near_seam=G.placeholder_near_seam,
             )[0]
 
         acc = jax.shard_map(

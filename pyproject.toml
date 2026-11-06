@@ -270,6 +270,11 @@ markers = [
     # a loaded 64-core host, ~9 min for the file), more than the standard tier's
     # budget has room for; its own job, like the criterion's.
     "distributed_segment: the fused mesh lane's segment runner end to end on forced devices; minutes of compile each, so opt-in via -m distributed_segment",
+    # Reverse-mode gradients of the fused multi-GPU lane (WP-G): the cross seams'
+    # oracles (seconds-minutes) and the whole-lane gradient gates (minutes of
+    # interpret-mode compilation per case, ~10 GB each); jobs of their own on four
+    # forced devices, so the 4-device cases run.
+    "distributed_grad: reverse-mode gradients of the fused multi-GPU lane on four forced devices; minutes of compile each, so opt-in via -m distributed_grad",
     "distributed_multiprocess: the multi-GPU mode as N localhost processes (jax.distributed, gloo) against one process with N forced devices; spawns child processes, so opt-in via -m distributed_multiprocess",
 ]
 # `-n auto` runs the (compilation-bound) JAX test suite across all logical cores

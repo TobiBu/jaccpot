@@ -1943,7 +1943,8 @@ class FusedMeshForce:
             Force parameters (``None``: the solver's).
         far_seam, near_seam : Optional[Callable[..., Any]]
             The cross seams (:mod:`jaccpot.distributed.grad`); ``None``: the
-            placeholders, whose reverses raise.
+            real ones (:func:`~jaccpot.distributed.grad.cross_far_seam`,
+            :func:`~jaccpot.distributed.grad.cross_near_seam`).
 
         Returns
         -------
@@ -1991,8 +1992,8 @@ class FusedMeshForce:
             axis_name=self.axis_name,
             force_scale=force_scale,
             params=params,
-            far_seam=far_seam or _grad.placeholder_far_seam,
-            near_seam=near_seam or _grad.placeholder_near_seam,
+            far_seam=far_seam or _grad.cross_far_seam,
+            near_seam=near_seam or _grad.cross_near_seam,
         )
 
     # ------------------------------------------------------------------

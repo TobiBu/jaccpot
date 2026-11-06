@@ -62,6 +62,7 @@ pytestmark = [
         jax.device_count() < 2, reason="the cross seam needs >= 2 devices"
     ),
     pytest.mark.slow,
+    pytest.mark.distributed_grad,
 ]
 
 AXIS = "gpus"
