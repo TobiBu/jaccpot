@@ -100,7 +100,12 @@ def _mesh():
 
 
 def _direct_runner(
-    escapers=EscaperPolicy(R_ESCAPE, R_RETURN), *, migrate=False, force=None, **seg
+    escapers=EscaperPolicy(R_ESCAPE, R_RETURN),
+    *,
+    migrate=False,
+    force=None,
+    migration_cap="auto",
+    **seg,
 ):
     config = dict(steps=STEPS, diagnostics_every_energy=1)
     config.update(seg)
@@ -113,6 +118,7 @@ def _direct_runner(
             cap=int(np.ceil(1.5 * (N + K + 1) / NDEV)),
             num_samples=64,
             migrate=migrate,
+            migration_cap=migration_cap,
             force=force or DirectMeshForce(G=G, softening=SOFT, axis_name=AXIS),
         ),
     )
@@ -132,7 +138,9 @@ def _escaper_programs(force) -> dict:
 def direct_run(request, tmp_path_factory):
     migrate = request.param
     state, masses = _system()
-    path = str(tmp_path_factory.mktemp(f"mesc_{int(migrate)}") / "restart_{segment}.npz")
+    path = str(
+        tmp_path_factory.mktemp(f"mesc_{int(migrate)}") / "restart_{segment}.npz"
+    )
     force = DirectMeshForce(G=G, softening=SOFT, axis_name=AXIS)
     runner = _direct_runner(
         migrate=migrate,
@@ -263,6 +271,27 @@ def test_a_tail_that_outgrows_its_capacity_is_grown(direct_run, monkeypatch):
     assert [e.diagnostics["n_escapers"] for e in res.edges] == COUNTS
     want = direct_run["res"]
     np.testing.assert_allclose(res.state, want.state, rtol=0, atol=1e-5)
+
+
+def test_a_retried_segment_restores_the_tail():
+    """A migration buffer of one row overflows in the first segment (the tail
+    already holds the returner): the segment is re-run from its start, the tail's
+    state from its host copy -- bitwise the run whose buffer fitted."""
+    state, masses = _system()
+    state = state.copy()
+    state[:, 1] *= 3.0  # rows cross the cuts within the first segment
+
+    def run(migration_cap):
+        runner = _direct_runner(
+            diagnostics_every_energy=0, migrate=True, migration_cap=migration_cap
+        )
+        return runner.run(state, masses, dt=DT, num_steps=4 * STEPS)
+
+    small, ample = run(1), run(4096)
+    assert small.edges[1].retries >= 1, [e.retries for e in small.edges]
+    assert all(e.retries == 0 for e in ample.edges)
+    assert [e.diagnostics["n_escapers"] for e in small.edges][0] == 1
+    assert np.array_equal(small.state, ample.state)
 
 
 def test_the_tail_programs_are_equal_and_opposite():

@@ -407,12 +407,63 @@ res = runner.run(state, masses, dt=1e-3, num_steps=10_000)
 - **Restarts** carry the split and the ledger (`meta["escapers"]`, the arrays in the
   caller's rows plus `escaper_order`); a restart and a chained run continue bitwise. A run
   continues only in its own escaper mode.
-- **Not supported:** the multi-GPU mode (`mesh=`; it would need escaper rows outside the
-  equal-count domain cuts, the coupling's centre of mass as one more all-reduce per step,
-  and a split-aware migration and restart) and the gradient mode. Both refuse.
+- **Not supported:** the gradient mode (it refuses).
 - **Cost.** One fused reduction over the rows per step (the bound centre of mass and the
   coupling sum), a membership check per edge, and at a changing edge a row permutation
   and two energy evaluations. HoreKa rows: `bench/slurm/escaper_timing.sbatch`.
+
+### Escapers on the mesh (`mesh=` with `escapers=`; wave 3, MESC)
+
+The same policy, Hamiltonian, ledger and diagnostics in the multi-GPU mode, in both of its
+runtimes (one process with N devices, and N processes with one device each):
+
+```python
+runner = ProductionRunner(
+    solver, settings=settings, segment=segment,
+    mesh=MeshRunConfig(mesh),
+    escapers=EscaperPolicy(r_escape=80.0),
+)
+```
+
+- **The layout.** The bound rows are the ordinary mesh layout (`MeshState`), so the
+  decomposition, the cuts, the global and Morton boxes, the cross walk, the migration,
+  the repartition and every capacity see the bound rows only: an escaper at Mpc stretches
+  no device's box. The escapers live in a TAIL of their own
+  (`jaccpot.distributed.escapers.EscaperTail`): a block of `cap_e` rows per device,
+  sharded like the layout, never sorted, cut or migrated. A particle stays on the device
+  it escaped from; a returner re-enters that device's bound rows (the next migration or
+  repartition takes it to its domain). Every move at an edge is device-local.
+- **Per step**, inside the segment program: the tail drifts and kicks with the bound
+  rows; after the tree force, `M_b` and `X_b` (per-device fp64 sums) and then the
+  escapers' total pull (a 3-vector) are all-gathered and folded in mesh order -- two
+  small all-gathers, not `psum`, so one process and N processes give the same bits.
+- **At an edge** (every `every`-th): a small program counts, per device, the bound rows
+  beyond `r_escape` and the escapers within `r_return`; on a change the potential is
+  evaluated before and after (the ledger's jump), the tail grows first if a device's
+  escapers outgrow `cap_e` (`tail_capacity`: 1.5x the largest device's count, at least
+  64 rows; a new `cap_e` compiles the tail programs again, counted in
+  `RunResult.escapers["tail_grown"]`), and one device-local program moves the rows. The
+  carried accelerations are dropped (the next segment's start force evaluates the new
+  split). Under `migrate=True` the bound box changed with the split, and the migration's
+  fixed cuts are Morton codes of the old box, so the runner re-cuts with a full
+  repartition in the new box (`RunResult.escapers["recuts"]`).
+- **While the tail is empty** the segments run the DEFAULT programs: escapers on but
+  nobody escaping is the run without them, bitwise (state, diagnostics). Once someone
+  has escaped, one start and one segment program carry the tail for every split.
+- **Output.** `RunResult.state`, `MeshSegmentEdge.state_host()` / `gather()` (and so
+  `SnapshotWriter`) and the restart files are by id over the bound rows and the tail.
+  `edge.state` / `edge.layout` are the bound layout only; `edge.escapers` is the tail.
+  `edge.plan["escapers"]` has the tail's `cap` and per-device `counts`.
+- **Restart files** (one process; several processes continue from a `RunResult`, as
+  without escapers): the by-id arrays cover every particle, `escaper_ids` is the tail's
+  layout and `meta["escapers"]` the policy, split and ledger. On the same mesh a restart
+  is bitwise; on another mesh the bound rows are decomposed there and the escapers placed
+  in its tail. After a changed split the file holds no acceleration (the continuation's
+  start force computes it), as on one card.
+- **What it neglects:** as on one card (the escapers' tides across the bound system and
+  their mutual gravity). The tail's cost per step is O(`cap_e`) per device plus the two
+  all-gathers; its memory is ~60 B per tail row (Sgr 2.2e6 on two cards: see
+  `docs/production_2026-11.md`, MESC).
 
 ## Restart files
 

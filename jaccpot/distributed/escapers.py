@@ -371,9 +371,11 @@ def initial_membership(
             )
             for d in local
         }
-        parts = allgather_by_device(mesh, sums) if is_multiprocess() else [
-            sums[d] for d in range(ndev)
-        ]
+        parts = (
+            allgather_by_device(mesh, sums)
+            if is_multiprocess()
+            else [sums[d] for d in range(ndev)]
+        )
         total = parts[0]
         for part in parts[1:]:
             total = total + part
@@ -653,7 +655,9 @@ def membership(
     program = _PROGRAMS.get(key)
     if program is None:
 
-        def body(bstate: Any, bmasses: Any, bcount: Any, tstate: Any, tcount: Any):
+        def body(
+            bstate: Any, bmasses: Any, bcount: Any, tstate: Any, tcount: Any
+        ) -> tuple:
             _, _, out, back, _, _ = _masks(
                 bstate, bmasses, bcount, tstate, tcount, r_out, r_in, axis_name
             )
@@ -673,7 +677,9 @@ def membership(
             )
         )
         _PROGRAMS[key] = program
-    out, back = program(layout.state, layout.masses, layout.count, tail.state, tail.count)
+    out, back = program(
+        layout.state, layout.masses, layout.count, tail.state, tail.count
+    )
     return host_value(out).astype(np.int64), host_value(back).astype(np.int64)
 
 
@@ -732,7 +738,16 @@ def resplit(
 
     r_out, r_in = float(policy.r_escape), float(policy.return_radius)
     with_fb = layout.force_scale is not None
-    key = ("resplit", _mesh_key(mesh), axis_name, r_out, r_in, float(G), with_fb, donate)
+    key = (
+        "resplit",
+        _mesh_key(mesh),
+        axis_name,
+        r_out,
+        r_in,
+        float(G),
+        with_fb,
+        donate,
+    )
     program = _PROGRAMS.get(key)
     if program is None:
 

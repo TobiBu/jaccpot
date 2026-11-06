@@ -1391,9 +1391,7 @@ class MeshSegmentRunner:
                 state, masses, count, ids = args[:4]
                 f_b = args[4] if nfb else None
                 tail_in = tuple(args[4 + nfb : 7 + nfb])
-                return start_force(
-                    state, masses, count, ids, args[-1], f_b, tail_in
-                )
+                return start_force(state, masses, count, ids, args[-1], f_b, tail_in)
 
             in_specs: tuple = (spec,) * (7 + nfb) + (P(),)
             out_specs: tuple = (spec,) * (1 + nfb) + (P(), P(), P(), spec)
@@ -2675,11 +2673,7 @@ class MeshSegmentRunner:
                     state.count,
                     state.ids,
                     *scale_now,
-                    *(
-                        ()
-                        if tail is None
-                        else (tail_state, tail.masses, tail.count)
-                    ),
+                    *(() if tail is None else (tail_state, tail.masses, tail.count)),
                 )
                 if tail is not None:
                     tail_acc = outputs[-1]

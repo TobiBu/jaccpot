@@ -971,6 +971,56 @@ jobs:
             exit 1
           fi
 
+  # The escaper path in the runner's multi-GPU mode (wave 3, MESC).
+  test-distributed-segment-escapers:
+    name: test-distributed-segment-escapers
+    needs: changes
+    if: needs.changes.outputs.gated == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+      XLA_FLAGS: --xla_force_host_platform_device_count=2
+      JACCPOT_TEST_JAX_CACHE_DIR: ${{ github.workspace }}/.jax_cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Restore JAX compilation cache
+        uses: actions/cache@v4
+        with:
+          path: .jax_cache
+          key: jax-cache-segment-escapers-${{ runner.os }}--${{ hashFiles('jaccpot/**/*.py', 'tests/**/*.py') }}
+          restore-keys: |
+            jax-cache-segment-escapers-${{ runner.os }}--
+      - name: Install package + dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install -e ".[dev]"
+      - name: The escaper path on the mesh (MESC) on forced devices
+        # `-n 1`: the direct-force cases share a module fixture, the fused ones
+        # minutes of compile each.
+        run: |
+          set -o pipefail
+          rc=0
+          mapfile -t selection < <(python .github/scripts/test_shards.py args distributed-segment-escapers)
+          pytest "${selection[@]}" -n 1 -rs --durations=10 \
+            | tee pytest-segment-escapers-tier.txt || rc=$?
+          if [ "$rc" != 0 ] && [ "$rc" != 5 ]; then exit "$rc"; fi
+      - name: Fail if the tier was skipped rather than run
+        run: |
+          if grep -qE "no tests ran|collected 0 items" pytest-segment-escapers-tier.txt \
+             || grep -qE "^SKIPPED.*needs >= 2 devices" pytest-segment-escapers-tier.txt; then
+            echo "::error::the mesh escaper tier did not run on forced devices"
+            exit 1
+          fi
+
   # The multi-GPU mode as N localhost processes with one CPU device each
   # (`jax.distributed`, gloo; M2, tests/distributed/test_multiprocess_runtime.py)
   # against ONE process with N forced devices, bitwise. Every case spawns its own

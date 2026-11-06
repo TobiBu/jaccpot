@@ -216,7 +216,10 @@ ESCAPER_CASES = [
     # the fused lane: minutes of compile a process
     *(
         pytest.param(
-            {"MESC_FORCE": "fused", "MESC_MAC": mac}, 2, id=f"fused-{mac}-2", marks=_MANUAL
+            {"MESC_FORCE": "fused", "MESC_MAC": mac},
+            2,
+            id=f"fused-{mac}-2",
+            marks=_MANUAL,
         )
         for mac in ("dehnen", "dehnen_error")
     ),

@@ -606,7 +606,11 @@ class MeshBackend:
                 # records the ledger's jump
                 edge_split.update(
                     self._resplit(
-                        msr, split, policy, n_all, energy=energy_on,
+                        msr,
+                        split,
+                        policy,
+                        n_all,
+                        energy=energy_on,
                         external_arg=external_arg,
                     )
                 )
@@ -962,7 +966,9 @@ class MeshBackend:
         }
         return msr, split
 
-    def _split_in(self, split_in: Optional[dict], policy: Any, msr: Any) -> Optional[dict]:
+    def _split_in(
+        self, split_in: Optional[dict], policy: Any, msr: Any
+    ) -> Optional[dict]:
         """A continued run's split (a ``RunResult``'s or a restart file's).
 
         Parameters
@@ -1274,9 +1280,9 @@ class MeshBackend:
                     external_potential_fn=self.runner.external_potential_fn,
                     external_params=external_arg,
                 )
-                potential["external"] = potential["external"] + extra[
-                    "external_escapers"
-                ]
+                potential["external"] = (
+                    potential["external"] + extra["external_escapers"]
+                )
                 potential["couple"] = extra["couple"]
                 potential["kinetic_escapers"] = extra["kinetic_escapers"]
             return potential, None
@@ -1845,9 +1851,7 @@ class MeshBackend:
         n = int(state.shape[0])
         escaper = np.zeros(n, bool)
         escaper[tail_ids[tail_ids >= 0]] = True
-        most = max(
-            int(escaper[a:b].sum()) for a, b in _device_chunks(n, self.ndev)
-        )
+        most = max(int(escaper[a:b].sum()) for a, b in _device_chunks(n, self.ndev))
         migrate = bool(self.config.migrate)
         cubic = _force_box_cubic(force) if migrate else None
         shard, tail = place_split(

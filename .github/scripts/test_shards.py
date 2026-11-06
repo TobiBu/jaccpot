@@ -91,6 +91,9 @@ _SEGMENT_RUNNER_FILES = (
     "tests/distributed/test_mesh_potential.py",
     "tests/distributed/test_production_runner_mesh_fused.py",
 )
+# the escaper path in the runner's multi-GPU mode (wave 3, MESC): direct-force runs
+# (seconds of compile) and the fused force under both MACs (minutes each)
+_SEGMENT_ESCAPERS = "tests/distributed/test_production_runner_mesh_escapers.py"
 _MUTUAL_STATIC_DEVICE = "tests/integration/test_mutual_fmm_static_device.py"
 # The fused strict lane's CPU tests (every case a full fused-lane solve, 60-245 s on
 # CPU) left the integration shard in 2026-10 (S3): with them it ran 42 of its 50
@@ -279,6 +282,7 @@ SHARDS: dict[str, list[str]] = {
         "distributed_segment",
         f"--ignore={_SEGMENT_CRITERION}",
         f"--ignore={_SEGMENT_MIGRATION}",
+        f"--ignore={_SEGMENT_ESCAPERS}",
         *(f"--ignore={path}" for path in _SEGMENT_RUNNER_FILES),
     ],
     # the same runner under Dehnen's error criterion (S12), a job of its own: with it
@@ -291,6 +295,9 @@ SHARDS: dict[str, list[str]] = {
     # session 2, tracks E and D): with them the segment job took ~24 of its 40
     # minutes (1,390 s of calls on this host at -n 1, ~1.2x that on CI)
     "distributed-segment-runner": [*_SEGMENT_RUNNER_FILES, "-m", "distributed_segment"],
+    # the escaper path on the mesh (MESC), a job of its own: the fused cases are
+    # minutes of compile each
+    "distributed-segment-escapers": [_SEGMENT_ESCAPERS, "-m", "distributed_segment"],
     # the multi-GPU mode as N localhost processes (M2): child processes against
     # one process with N forced devices; its own job (no forced devices needed)
     "distributed-multiprocess": [
@@ -312,6 +319,7 @@ GATED_SHARDS: tuple[str, ...] = (
     "distributed-segment-criterion",
     "distributed-segment-migration",
     "distributed-segment-runner",
+    "distributed-segment-escapers",
     "distributed-multiprocess",
     "nornax-distributed",
 )
