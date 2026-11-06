@@ -225,6 +225,38 @@ cols = lin.apply({"positions": D}, directions_per_pass=2)   # D: [n_dirs, N, 3]
   estimated peak and the largest `k` that fits a card (`card_bytes`, default an
   A100-40 at 0.95). An estimate from one card and one configuration: measure with
   `bench/forward_mode_memory.py` before a production run.
+* **Tangent groups: less memory per direction, primal once
+  (`JACCPOT_FORWARD_TANGENT_GROUP=<g>`, opt-in, round 2).** Most of `b` is the
+  force's own tangent intermediates, `K`-stacked: at the M2L the multipole-tangent
+  table is read while the local-tangent table is written, two `f32[K, nodes, 49]`
+  tables (p = 6) live at once. With the knob set (`g >= 1`; unset or `0`: the
+  ungrouped program, unchanged), each force evaluation of the fused lane
+  (`FusedForceProvider.differentiable_step`, so every forward-mode rollout,
+  `jacfwd`, `GradientPlan` forward twin built on it) is traced once, linearized
+  once -- the primal runs once, with the production kernels -- and its linear
+  tangent map is applied `g` directions at a time in a loop inside ONE primitive
+  (`jaccpot.runtime._forward_group`): every tangent kernel runs at `K = g` and only
+  `g` directions' tables are live; a partial last group runs once more at its own
+  size. Unlike `directions_per_pass` nothing is recomputed, and it composes with
+  it. Only the tangents crossing the force's boundary (positions, masses, `G`,
+  `eps2`, accelerations, the integrator's carries) stay `K`-stacked. The tangents
+  equal the single pass to round-off (bitwise on CPU, float64; strict test
+  `test_tangent_groups_are_the_single_pass`). F8 at `T = 16`, `g = 2` (A100,
+  contended: memory and compile only), temporaries in B/p:
+
+  | N | K = 1 | K = 8 (ungrouped) | slope per direction (ungrouped) | compile K = 8 |
+  |---|---|---|---|---|
+  | 2e6 | 494 (494) | 990 (1690) | 71 (171) | 392 s (417 s) |
+  | 8e6 | 410 (410) | 877 (1397) | 67 (141) | 387 s (414 s) |
+
+  `K = 1` is unchanged (one group). At 2e6, `K = 8`, by group size: `g = 1` 854
+  B/p (compile 179 s: the tangent kernels at `K = 1` only), `g = 2` 990 (392 s),
+  `g = 4` 1265 (398 s), `g = 8` = ungrouped 1690 (417 s): each direction a group
+  holds costs ~137 B/p, each direction outside it ~51 (the boundary tangents).
+  The run-time price (`K / g` launches of each
+  tangent kernel instead of one) is measured on HoreKa
+  (`t_2p5e7_jacfwd_k8_group{1,2,4}` in `bench/slurm/forward_mode_timing.sbatch`);
+  whether it becomes the default is decided there.
 * **Compile time, tangents per program, and the persistent compilation cache.**
   Round 1's tangent kernels unrolled all `K` columns in one Triton program body, and
   their compile grew superlinearly in `K` (A100, 2e6 `jacfwd`: `K = 1` ~5 min,

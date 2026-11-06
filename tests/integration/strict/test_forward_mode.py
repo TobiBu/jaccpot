@@ -21,7 +21,9 @@ interpret mode on CPU):
   jvps to round-off;
 * G-batch -- ``jacfwd`` in chunks of ``directions_per_pass`` in {1, 3} directions
   (``jacfwd_batched``) equals the single pass over 8 and 11 parameters, and the
-  gradient plan's ``jacfwd(directions_per_pass=1)`` its single pass;
+  gradient plan's ``jacfwd(directions_per_pass=1)`` its single pass; the force's
+  tangent in groups of 3 directions (``JACCPOT_FORWARD_TANGENT_GROUP``) equals it
+  over 8;
 * F7 -- caps sized on a configuration with fewer pairs: the step's verdict fails
   and its tangent is NaN (never a plausible wrong number);
 * F9 -- ``jax.linearize`` applied to three directions equals three jvps.
@@ -449,6 +451,16 @@ def _embedded(lane: Any, num: int) -> Any:
     return f
 
 
+def _single_pass(num: int) -> np.ndarray:
+    """``jax.jacfwd`` of :func:`_embedded` over ``num`` parameters (cached data)."""
+    key = ("single", num)
+    if key not in _CACHE:
+        f = _embedded(_lane("plummer"), num)
+        _CACHE[key] = np.asarray(jax.jit(jax.jacfwd(f))(jnp.zeros((num,))))
+        _drop_executables()
+    return _CACHE[key]
+
+
 @pytest.mark.parametrize("num", [8, 11])
 def test_jacfwd_in_chunks_is_the_single_pass(num):
     """G-batch: ``jacfwd_batched(directions_per_pass=k)`` for ``k`` in {1, 3} equals
@@ -460,8 +472,7 @@ def test_jacfwd_in_chunks_is_the_single_pass(num):
     lane = _lane("plummer")
     f = _embedded(lane, num)
     theta = jnp.zeros((num,))
-    single = np.asarray(jax.jit(jax.jacfwd(f))(theta))
-    _drop_executables()
+    single = _single_pass(num)
     assert single.shape == (2, num)
     assert np.all(single != 0.0)
     scale = np.max(np.abs(single), axis=0)
@@ -471,6 +482,38 @@ def test_jacfwd_in_chunks_is_the_single_pass(num):
         assert got.shape == single.shape
         err = np.max(np.abs(got - single) / scale)
         assert err <= 1e-12, (k, err, got, single)
+
+
+def test_tangent_groups_are_the_single_pass(monkeypatch):
+    """Track M: with ``JACCPOT_FORWARD_TANGENT_GROUP=3`` the force's tangent runs in
+    groups of 3 directions (8 = 3 + 3 + 2: a partial last group) and ``jax.jacfwd``
+    over 8 parameters equals the single pass to round-off; the step's jvp primal is
+    still ``step``'s bitwise."""
+    from jaccpot.runtime._forward_group import ENV_FORWARD_TANGENT_GROUP
+    from jaccpot.runtime.grad_options import ad_mode_override
+
+    num = 8
+    single = _single_pass(num)
+    lane = _lane("plummer")
+    monkeypatch.setenv(ENV_FORWARD_TANGENT_GROUP, "3")
+    got = np.asarray(jax.jit(jax.jacfwd(_embedded(lane, num)))(jnp.zeros((num,))))
+    _drop_executables()
+    scale = np.max(np.abs(single), axis=0)
+    err = np.max(np.abs(got - single) / scale)
+    assert err <= 1e-12, (err, got, single)
+
+    prov, x, m = lane.provider, lane.positions, lane.masses
+    want_acc, _ = jax.jit(lambda y: prov.step(y, m, None, lane.aux0))(x)
+    d = _directions(lane)[0][0]
+    with ad_mode_override("forward"):
+        (acc, _), (t_acc, _) = jax.jit(
+            lambda y, t: jax.jvp(
+                lambda z: prov.differentiable_step(z, m, None, lane.aux0), (y,), (t,)
+            )
+        )(x, d)
+    _drop_executables()
+    assert _bitwise_equal(acc, want_acc)
+    assert bool(jnp.all(jnp.isfinite(t_acc))) and float(jnp.max(jnp.abs(t_acc))) > 0
 
 
 # ---------------------------------------------------------------------------

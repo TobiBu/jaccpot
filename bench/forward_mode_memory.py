@@ -45,10 +45,11 @@ each also per particle; the verdict bits; finiteness; A-vs-A (two calls of the s
 executable, the tangents / gradients' sha256 equal); the allocator environment
 (``XLA_PYTHON_CLIENT_*``, set by the caller: prealloc at 0.95 for 1e8, S9-D).
 
-Rows are JSON files ``n{N}_{program}_k{K}_t{T}.json`` in ``--out-dir``; a row whose
+Rows are JSON files ``n{N}_{program}_k{K}_t{T}.json`` in ``--out-dir`` (``..._g{g}.json``
+with the tangents in groups of ``g``, ``JACCPOT_FORWARD_TANGENT_GROUP``); a row whose
 file exists (with ``"done": true``) is skipped, so a sweep resumes.
 
-``--summarize DIR`` prints the rows and fits, per ``(N, T)``, ``W_fwd(K) = a + b K``
+``--summarize DIR`` prints the rows and fits, per ``(N, T, g)``, ``W_fwd(K) = a + b K``
 to the forward rows' temporaries (``jvp`` as ``K = 1``), checks flatness in ``T``
 (each forward row against its ``T = 1`` twin) and sets the reverse row beside it;
 it writes ``DIR/summary.json``.
@@ -88,6 +89,7 @@ _ENV_KEYS = (
     "XLA_PYTHON_CLIENT_ALLOCATOR",
     "CUDA_VISIBLE_DEVICES",
     "JACCPOT_GRAD_FORWARD_TANGENT_KERNELS",
+    "JACCPOT_FORWARD_TANGENT_GROUP",
     "JACCPOT_COMPILATION_CACHE_DIR",
     "XLA_FLAGS",
 )
@@ -137,8 +139,11 @@ def _args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 
 def _row_path(args: argparse.Namespace) -> str:
+    # tangents in groups (JACCPOT_FORWARD_TANGENT_GROUP): a row of its own
+    group = os.environ.get("JACCPOT_FORWARD_TANGENT_GROUP", "").strip()
+    tail = f"_g{group}" if group not in ("", "0") else ""
     return os.path.join(
-        args.out_dir, f"n{args.n}_{args.program}_k{args.k}_t{args.steps}.json"
+        args.out_dir, f"n{args.n}_{args.program}_k{args.k}_t{args.steps}{tail}.json"
     )
 
 
@@ -579,6 +584,23 @@ def run(args: argparse.Namespace) -> dict:
 # --------------------------------------------------------------------------
 
 
+def _group_of(rec: dict) -> int:
+    """The row's tangent group (``JACCPOT_FORWARD_TANGENT_GROUP``; 0: off).
+
+    Parameters
+    ----------
+    rec : dict
+        A row.
+
+    Returns
+    -------
+    int
+        ``g``, or 0.
+    """
+    raw = str((rec.get("env") or {}).get("JACCPOT_FORWARD_TANGENT_GROUP") or "")
+    return int(raw) if raw.strip().isdigit() else 0
+
+
 def summarize(directory: str) -> dict:
     """Print the rows, fit ``W_fwd(K) = a + b K`` per ``(N, T)``, check T-flatness.
 
@@ -605,6 +627,7 @@ def summarize(directory: str) -> dict:
                 "program": c["program"],
                 "k": c["k"],
                 "steps": c["steps"],
+                "group": _group_of(rec),
                 "temp_bpp": rec["per_particle"]["temp"],
                 "peak_bpp": rec["per_particle"]["peak"],
                 "temp_GiB": _gib(rec["temp_bytes"]),
@@ -615,11 +638,20 @@ def summarize(directory: str) -> dict:
                 **{key: (rec.get("topology") or {}).get(key) for key in TOPOLOGY_KEYS},
             }
         )
-    rows.sort(key=lambda r: (r["n"], r["steps"], PROGRAMS.index(r["program"]), r["k"]))
+    rows.sort(
+        key=lambda r: (
+            r["n"],
+            r["steps"],
+            r["group"],
+            PROGRAMS.index(r["program"]),
+            r["k"],
+        )
+    )
     for r in rows:
         peak = "-" if r["peak_bpp"] is None else f"{r['peak_bpp']:.1f}"
         print(
-            f"N {r['n']:>11,} T {r['steps']:>3} {r['program']:>8} K {r['k']}  "
+            f"N {r['n']:>11,} T {r['steps']:>3} {r['program']:>8} K {r['k']} "
+            f"g {r['group']}  "
             f"temp {r['temp_bpp']:8.1f} B/p ({r['temp_GiB']} GiB)  peak {peak} B/p "
             f"({r['peak_GiB']} GiB)  bits {r['bits']:#x} finite {r['finite']} "
             f"A-vs-A {r['a_vs_a']}  nodes {r['total_nodes']} levels "
@@ -627,17 +659,21 @@ def summarize(directory: str) -> dict:
         )
     fits: dict = {}
     forward = [r for r in rows if r["program"] in ("jvp", "jacfwd")]
-    for n, t in sorted({(r["n"], r["steps"]) for r in forward}):
+    for n, t, g in sorted({(r["n"], r["steps"], r["group"]) for r in forward}):
         pts = sorted(
-            {(r["k"], r["temp_bpp"]) for r in forward if (r["n"], r["steps"]) == (n, t)}
+            {
+                (r["k"], r["temp_bpp"])
+                for r in forward
+                if (r["n"], r["steps"], r["group"]) == (n, t, g)
+            }
         )
-        key = f"n{n}_t{t}"
+        key = f"n{n}_t{t}" + (f"_g{g}" if g else "")
         if len(pts) >= 2:
             k = np.asarray([p[0] for p in pts], float)
             y = np.asarray([p[1] for p in pts], float)
             b, a = np.polyfit(k, y, 1)
             fits[key] = {"a_bpp": float(a), "b_bpp_per_k": float(b), "points": pts}
-            print(f"N {n:,} T {t}: W_fwd(K) = {a:.1f} + {b:.1f} K  B/particle")
+            print(f"N {n:,} T {t} g {g}: W_fwd(K) = {a:.1f} + {b:.1f} K  B/particle")
     flat = []
     for r in forward:
         if r["steps"] == 1:
@@ -645,8 +681,8 @@ def summarize(directory: str) -> dict:
         base = [
             q
             for q in forward
-            if (q["n"], q["program"], q["k"], q["steps"])
-            == (r["n"], r["program"], r["k"], 1)
+            if (q["n"], q["program"], q["k"], q["steps"], q["group"])
+            == (r["n"], r["program"], r["k"], 1, r["group"])
         ]
         if base:
             ratio = r["temp_bpp"] / base[0]["temp_bpp"]
