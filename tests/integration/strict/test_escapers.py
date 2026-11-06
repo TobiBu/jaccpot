@@ -128,7 +128,7 @@ def run(request, tmp_path_factory):
         )
 
     # the run writes its mid-run restart (segment 3) for the restart test
-    path = str(tmp_path_factory.mktemp(f"esc_{mac}") / "restart.npz")
+    path = str(tmp_path_factory.mktemp(f"esc_{mac}") / "restart_{segment}.npz")
     runner = _runner(mac, restart_every=SEGMENTS // 2, restart_path=path)
     runner.callbacks = (look,)
     res = runner.run(state, masses, dt=DT, num_steps=STEPS * SEGMENTS)
@@ -189,8 +189,9 @@ def test_the_caller_sees_its_own_rows(run):
 def test_restart_and_chained_equal_one_go(run):
     mac, state, masses, _, res, _, _, path = run
     half = STEPS * SEGMENTS // 2
-    assert res.restarts == [path]
-    resumed = _runner(mac).run(dt=DT, num_steps=STEPS * SEGMENTS, restart_from=path)
+    mid = path.format(segment=SEGMENTS // 2)
+    assert res.restarts == [mid, path.format(segment=SEGMENTS)]
+    resumed = _runner(mac).run(dt=DT, num_steps=STEPS * SEGMENTS, restart_from=mid)
     assert resumed.restored["bitwise"], resumed.restored
     assert np.array_equal(np.asarray(resumed.state), np.asarray(res.state))
     assert resumed.escapers["ledger"] == res.escapers["ledger"]
