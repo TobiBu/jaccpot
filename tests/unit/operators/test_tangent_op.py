@@ -217,3 +217,120 @@ def test_mismatched_tangent_axes_are_refused(data):
     x, m = data["x"], data["m"]
     with pytest.raises(ValueError, match="same leading tangent axis"):
         _toy_tangent(x, m, jnp.zeros((2, _N)), jnp.zeros((3, _N)), live=(True, True))
+
+
+# ---------------------------------------------------------------------------
+# Dead tangents (round 2): symbolic zeros are (1, ...) placeholders, never K copies.
+# ---------------------------------------------------------------------------
+
+_SEEN: list[tuple] = []
+
+
+def _tangent_kernel_live(x_ref, m_ref, tx_ref, tm_ref, o_ref, *, k, live):
+    rows = pl.ds(pl.program_id(0) * _BLOCK, _BLOCK)
+    _, lin = linearize_lanes(_body, (x_ref[rows], m_ref[rows]))
+    zero = jnp.zeros((_BLOCK,), x_ref.dtype)
+    for j in range(k):
+        tx = tx_ref[j, rows] if live[0] else zero
+        tm = tm_ref[j, rows] if live[1] else zero
+        o_ref[j, rows] = lin(tx, tm)
+
+
+def _tangent_impl_placeholders(x, m, tx, tm, *, live):
+    """A ``dead_placeholders=True`` implementation: K from the live operands."""
+    k = max(int(tx.shape[0]), int(tm.shape[0]))
+    _SEEN.append((tuple(tx.shape), tuple(tm.shape), tuple(live)))
+    return [
+        pl.pallas_call(
+            functools.partial(_tangent_kernel_live, k=k, live=tuple(live)),
+            grid=(x.shape[0] // _BLOCK,),
+            in_specs=[_whole(x), _whole(m), _whole(tx), _whole(tm)],
+            out_specs=_whole(jax.ShapeDtypeStruct((k, _N), x.dtype)),
+            out_shape=jax.ShapeDtypeStruct((k, _N), x.dtype),
+            interpret=True,
+        )(x, m, tx, tm)
+    ]
+
+
+def _recording_impl(x, m, tx, tm, *, live):
+    _SEEN.append((tuple(tx.shape), tuple(tm.shape), tuple(live)))
+    return _tangent_impl(x, m, tx, tm, live=live)
+
+
+_toy_dense = make_tangent_op("toy_dense_test", _recording_impl, num_primals=2)
+_toy_placeholders = make_tangent_op(
+    "toy_placeholder_test",
+    _tangent_impl_placeholders,
+    num_primals=2,
+    dead_placeholders=True,
+    abstract_eval=lambda x, m, tx, tm, **_: [
+        jax.ShapeDtypeStruct((tx.shape[0], _N), x.dtype)
+    ],
+)
+
+
+def _make_seam(op):
+    @jax.custom_jvp
+    def seam(x, m):
+        return _primal(x, m)
+
+    def rule(primals, tangents):
+        out = seam(*primals)
+        tk, live = with_tangent_axis(tangents, primals)
+        (t,) = drop_tangent_axis(op(*primals, *tk, live=live))
+        return out, t
+
+    seam.defjvp(rule, symbolic_zeros=True)
+    return seam
+
+
+@pytest.mark.parametrize("columns", [3, 8, 11])
+@pytest.mark.parametrize("op", ["dense", "placeholders"])
+def test_a_dead_tangent_is_never_broadcast_to_the_columns(data, columns, op):
+    """``jacfwd`` over ``x`` only (``m`` constant: a symbolic-zero tangent): the
+    live tangent is folded to ``K``, the dead one reaches the implementation as a
+    ``(1, 1)`` placeholder (``dead_placeholders=True``) or as a dense zero of the
+    chunk's bucket (the default) -- never as the vmap's broadcast -- and the
+    Jacobian is the reference's."""
+    x, m, A = data["x"], data["m"], data["A"][:, :columns]
+    seam = _make_seam(_toy_placeholders if op == "placeholders" else _toy_dense)
+    _SEEN.clear()
+    jac = jax.jit(jax.jacfwd(lambda th: seam(x + A @ th, m)))(jnp.zeros(columns))
+    ref = jax.jacfwd(lambda th: _body(x + A @ th, m))(jnp.zeros(columns))
+    np.testing.assert_allclose(jac, ref, rtol=1e-13, atol=1e-13)
+    assert _SEEN, "the implementation was not traced"
+    buckets = [
+        tangent_k_bucket(min(MAX_TANGENT_K, columns - s))
+        for s in range(0, columns, MAX_TANGENT_K)
+    ]
+    for (tx_shape, tm_shape, live), kb in zip(_SEEN, buckets):
+        assert live == (True, False)
+        assert tx_shape == (kb, _N)
+        assert tm_shape == ((1, 1) if op == "placeholders" else (kb, _N))
+    # the program binds the primitive with the placeholder, not a [K, N] zero
+    text = str(
+        jax.make_jaxpr(jax.jacfwd(lambda th: seam(x + A @ th, m)))(jnp.zeros(columns))
+    )
+    assert f"f64[{columns},{_N}]" in text
+    assert "dead_shapes=(None, (32,))" in text
+
+
+def test_a_dead_mass_and_a_live_mass_agree(data):
+    """The same Jacobian with the mass tangent dead (symbolic zero) and live but
+    zero (a dense zero direction): the placeholder path is exact."""
+    x, m, A, B = data["x"], data["m"], data["A"][:, :5], data["B"][:, :5]
+    seam = _make_seam(_toy_placeholders)
+    dead = jax.jacfwd(lambda th: seam(x + A @ th, m))(jnp.zeros(5))
+    live = jax.jacfwd(lambda th: seam(x + A @ th, m + 0.0 * (B @ th)))(jnp.zeros(5))
+    np.testing.assert_allclose(dead, live, rtol=1e-14, atol=1e-15)
+
+
+def test_all_dead_tangents_return_zeros_without_a_launch(data):
+    x, m = data["x"], data["m"]
+    _SEEN.clear()
+    # (a closed-form abstract_eval: the implementation is never traced)
+    (out,) = _toy_placeholders(
+        x, m, jnp.zeros((1, _N)), jnp.zeros((1, _N)), live=(False, False)
+    )
+    assert out.shape == (1, _N) and bool(jnp.all(out == 0.0))
+    assert _SEEN == []

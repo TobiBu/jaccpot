@@ -1749,6 +1749,10 @@ class ProductionRunner:
                 "ProductionRunner chains strict_run_v2(carry='particles') calls "
                 f"through their handle; settings.carry={settings.carry!r}"
             )
+        from jaccpot.runtime.compile_cache import maybe_enable_compilation_cache
+
+        # opt-in persistent compilation cache (JACCPOT_COMPILATION_CACHE_DIR)
+        maybe_enable_compilation_cache()
         self.solver = solver
         self.engine = getattr(solver, "_impl", solver)
         self.settings = settings

@@ -37,6 +37,7 @@ from jaccpot.operators.m2l_real_rot_scale import m2l_rot_scale_real_batch
 from jaccpot.pallas._tangent import drop_tangent_axis, with_tangent_axis
 from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
 from jaccpot.pallas.m2l_real_csr_lanes import (
+    _m2l_tangent_impl,
     _m2l_tangent_twin,
     m2l_real_csr_lanes_pallas,
     m2l_real_csr_lanes_pallas_tangent,
@@ -197,6 +198,76 @@ def test_tangent_op_matches_the_jnp_reference(variant, k, dtype):
     assert _rel(got, want) < _TOL[dtype], _rel(got, want)
     # the empty row gets nothing
     assert not np.any(np.asarray(got)[:, 9])
+
+
+_TPP_ONE: dict = {}
+
+
+@pytest.mark.parametrize("k", [1, 3, 8, 11])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+def test_tangents_per_program_grid(tpp, k):
+    """Tangents on the grid: any ``K`` (a partial last group masked in-kernel, no
+    padding) at every tangents-per-program equals the reference, on-axis lanes
+    included, and equals ``tpp = 1`` to round-off (G-tpp)."""
+    err, err_one = _tpp_grid(tpp, k)
+    assert err < 1e-12, err
+    assert err_one < 1e-14, err_one
+
+
+@pytest.mark.parametrize("k", [3, 8])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+def test_native_tangents_per_program_grid(tpp, k):
+    """G-tpp natively, float64 (skips without an Ampere card)."""
+    _native_or_skip(False)
+    err, err_one = _tpp_grid(tpp, k, interpret=False)
+    assert err < 1e-12, err
+    assert err_one < 1e-14, err_one
+
+
+def _tpp_grid(tpp, k, *, interpret=True):
+    c = _case(1, 3, np.float64)
+    n_far, exact, band = _far_and_axis_pairs(c)
+    assert n_far > 0 and exact > 0 and band > 0
+    tm, tc = _tangents(c, k, seed=k)
+    args = (c.mult, c.cent, *_list(c, False), tm, tc)
+
+    def run(t):
+        params = dict(_params(c, False), interpret=interpret)
+        (out,) = _m2l_tangent_impl(*args, **params, tangents_per_program=t)
+        return np.asarray(out)
+
+    got = run(tpp)
+    key = (k, interpret)
+    if key not in _TPP_ONE:
+        _TPP_ONE[key] = run(1)
+    (want,) = m2l_real_csr_lanes_pallas_tangent_jnp(*args, **_params(c, False))
+    assert got.shape == (k, c.nt, c.C)
+    assert not np.any(got[:, 9])
+    return _rel(got, want), _rel(got, _TPP_ONE[key])
+
+
+@pytest.mark.parametrize("live", [(True, False), (False, True)])
+def test_dead_placeholders_are_never_read(live):
+    """A dead tangent bound as its ``(1, ...)`` placeholder (NaN, so a read would
+    show): ``K`` comes from the live tangent."""
+    c = _case(2, 2, np.float64)
+    tm, tc = _tangents(c, 3, seed=2)
+    dense = (
+        tm if live[0] else jnp.zeros_like(tm),
+        tc if live[1] else jnp.zeros_like(tc),
+    )
+    sparse = tuple(
+        t if on else jnp.full((1,) * t.ndim, jnp.nan) for t, on in zip(dense, live)
+    )
+    params = _params(c, False, live=live)
+    (got,) = _m2l_tangent_impl(
+        c.mult, c.cent, *_list(c, False), *sparse, **params, tangents_per_program=2
+    )
+    (want,) = m2l_real_csr_lanes_pallas_tangent_jnp(
+        c.mult, c.cent, *_list(c, False), *dense, **params
+    )
+    assert got.shape == want.shape
+    assert _rel(got, want) < 1e-12
 
 
 @pytest.mark.parametrize("live", [(True, False), (False, True)])

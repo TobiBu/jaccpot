@@ -190,6 +190,13 @@ _STRICT_GRAD_FORWARD_ADJOINT: tuple[str, ...] = tuple(
     )
     for lane in ("plummer", "dehnen_error")
 )
+# G-batch (forward mode round 2): jacfwd in chunks of directions_per_pass against the
+# single pass, 8 and 11 columns -- three jacfwd programs per case (the single pass
+# at K = 8 / 8 + 4, chunks of 1 and 3). Its own shard, one worker.
+_STRICT_GRAD_FORWARD_BATCH: tuple[str, ...] = tuple(
+    f"{_STRICT_GRAD_FORWARD}::test_jacfwd_in_chunks_is_the_single_pass[{num}]"
+    for num in (8, 11)
+)
 _STRICT_GRAD_RUNNER_OPT: tuple[str, ...] = (
     _STRICT_GRAD_RUNNER_START_FORCE,
     _STRICT_GRAD_RUNNER_ARRAYS,
@@ -245,9 +252,13 @@ SHARDS: dict[str, list[str]] = {
     "integration-strict-grad-arrays": [_STRICT_GRAD_RUNNER_ARRAYS],
     "integration-strict-grad-forward": [
         _STRICT_GRAD_FORWARD,
-        *(f"--deselect={node}" for node in _STRICT_GRAD_FORWARD_ADJOINT),
+        *(
+            f"--deselect={node}"
+            for node in (*_STRICT_GRAD_FORWARD_ADJOINT, *_STRICT_GRAD_FORWARD_BATCH)
+        ),
     ],
     "integration-strict-grad-forward-adjoint": list(_STRICT_GRAD_FORWARD_ADJOINT),
+    "integration-strict-grad-forward-batch": list(_STRICT_GRAD_FORWARD_BATCH),
     "mutual-static-device": [_MUTUAL_STATIC_DEVICE],
     "unit": [
         "tests/unit",

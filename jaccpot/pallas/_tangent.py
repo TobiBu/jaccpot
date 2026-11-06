@@ -46,9 +46,39 @@ Contract of a tangent op
   tuples), passed to the kernel implementation unchanged.
 * returns -- the tangent outputs, each with the leading ``K`` axis.
 
-The kernel implementation sees ``K`` only from :data:`TANGENT_K_BUCKETS` (padded
-with zero tangents, chunked above the largest), so each seam compiles at most four
-tangent kernels however many columns ``jacfwd`` asks for.
+By default the kernel implementation sees ``K`` only from :data:`TANGENT_K_BUCKETS`
+(padded with zero tangents, chunked above the largest), so each seam compiles at
+most four tangent kernels however many columns ``jacfwd`` asks for. An op made with
+``make_tangent_op(..., any_k=True)`` (the six Pallas tangent kernels since round 2:
+``K`` is a grid axis over tangent groups, :mod:`jaccpot.pallas._tangent_grid`) is
+called once at the operands' own ``K``: no padded ``concatenate`` copy at
+``K = 3, 5, 6, 7`` and no chunking above 8.
+
+Dead tangents (round 2)
+-----------------------
+A tangent the rule received as a symbolic zero (``live[i]`` False) is never
+materialised as ``K`` dense copies. :meth:`TangentOp.__call__` replaces it by a
+``(1, 1, ...)`` placeholder (same rank, never read) and records its per-direction
+shape in the static primitive parameter ``dead_shapes`` (``None`` for a live
+operand); the batching rule passes it through unbatched, so ``jax.jacfwd`` no
+longer ``broadcast_to``-s a zero mass or position tangent to ``K`` copies. What
+the implementation then sees depends on the op:
+
+* ``make_tangent_op(..., dead_placeholders=True)``: the ``(1, ...)`` placeholder
+  itself. The implementation must take ``K`` from the LIVE operands (the largest
+  leading axis of the tangents: a placeholder's is 1) and never read a dead one
+  (its ``live`` mask says which; a ``pallas_call`` may still take it as a
+  whole-array operand of shape ``(1, ...)``).
+* ``dead_placeholders=False`` (the default, every kernel of round 1): a dense
+  zero of the chunk's ``K`` (``(Kb, *shape)``), built per chunk just before the
+  call -- what the implementation saw before, so no kernel changes.
+
+If every tangent is dead the op returns zeros without a launch (the placeholders
+then keep the leading ``K``, so the zeros have the caller's tangent axis). A LIVE tangent
+the vmap did not batch (the same for every column) while another one is batched
+is broadcast to the columns, as before (correct; does not arise on the
+production rollout: COMMON round-2 track G STATUS); if NO live tangent is batched
+the op runs once at its own ``K`` and its outputs stay unbatched.
 
 Contract of a forward seam (the ``custom_jvp`` rule)
 ----------------------------------------------------
@@ -143,11 +173,21 @@ class TangentOp:
         The registered primitive.
     num_primals : int
         How many leading operands are primals.
+    dead_placeholders : bool
+        Its implementation takes dead tangents as ``(1, ...)`` placeholders
+        (:func:`make_tangent_op`).
     """
 
-    def __init__(self, primitive: Primitive, num_primals: int) -> None:
+    def __init__(
+        self,
+        primitive: Primitive,
+        num_primals: int,
+        *,
+        dead_placeholders: bool = False,
+    ) -> None:
         self.primitive = primitive
         self.num_primals = int(num_primals)
+        self.dead_placeholders = bool(dead_placeholders)
 
     @property
     def name(self) -> str:
@@ -168,15 +208,102 @@ class TangentOp:
         *operands : Array
             ``num_primals`` primals, then the tangents (leading axis ``K``).
         **params : Any
-            Static parameters of the kernel implementation.
+            Static parameters of the kernel implementation. A ``live`` mask
+            (one bool per tangent) marks the dead tangents, which are bound as
+            ``(1, ...)`` placeholders (module docstring, "Dead tangents").
 
         Returns
         -------
         tuple[Array, ...]
             The tangent outputs, each with the leading ``K`` axis.
         """
-        _check_tangent_axis(operands[self.num_primals :], self.name)
-        return tuple(self.primitive.bind(*operands, **params))
+        primals = operands[: self.num_primals]
+        tangents = list(operands[self.num_primals :])
+        live = params.get("live")
+        dead: list[Any] = [None] * len(tangents)
+        if live is not None and len(tuple(live)) == len(tangents):
+            flags = [not bool(on) and jnp.ndim(t) >= 1 for t, on in zip(tangents, live)]
+            # every tangent dead: the placeholders keep the caller's K (the only
+            # place it is still recorded), so the zero outputs get the right axis
+            keep_k = all(flags)
+            for i, (t, off) in enumerate(zip(tangents, flags)):
+                if off:
+                    dead[i] = tuple(int(d) for d in jnp.shape(t)[1:])
+                    tangents[i] = _placeholder(t, keep_k=keep_k)
+        _check_tangent_axis(
+            [t for t, d in zip(tangents, dead) if d is None] or tangents[:1],
+            self.name,
+        )
+        return tuple(
+            self.primitive.bind(*primals, *tangents, dead_shapes=tuple(dead), **params)
+        )
+
+
+def _placeholder(t: Array, *, keep_k: bool = False) -> Array:
+    """A dead tangent's stand-in: ``(1, 1, ...)`` zeros of its rank and dtype.
+
+    Parameters
+    ----------
+    t : Array
+        The dense tangent (leading axis ``K``).
+    keep_k : bool
+        Keep the leading axis ``K`` (``(K, 1, ...)``): every tangent of the op is
+        dead, and :func:`_tangent_k` reads ``K`` off the placeholders.
+
+    Returns
+    -------
+    Array
+        ``zeros((1,) * t.ndim)``, or ``zeros((K,) + (1,) * (t.ndim - 1))``.
+    """
+    lead = int(jnp.shape(t)[0]) if keep_k else 1
+    return jnp.zeros((lead,) + (1,) * (jnp.ndim(t) - 1), jnp.result_type(t))
+
+
+def _tangent_k(tangents: Sequence[Array], dead: Sequence[Any]) -> int:
+    """``K`` of an op's tangents: the live operands' leading axis.
+
+    With every operand dead, the placeholders' largest leading axis (they keep
+    ``K`` then: :meth:`TangentOp.__call__`).
+
+    Parameters
+    ----------
+    tangents : Sequence[Array]
+        The tangent operands.
+    dead : Sequence[Any]
+        ``dead_shapes``: ``None`` for a live operand.
+
+    Returns
+    -------
+    int
+        ``K``.
+    """
+    ks = [int(jnp.shape(t)[0]) for t, d in zip(tangents, dead) if d is None]
+    if not ks:
+        ks = [int(jnp.shape(t)[0]) for t in tangents if jnp.ndim(t) >= 1]
+    return max(ks) if ks else 1
+
+
+def _expand_dead(tangents: Sequence[Array], dead: Sequence[Any], k: int) -> list[Array]:
+    """The tangents with each dead placeholder a dense ``(k, *shape)`` zero.
+
+    Parameters
+    ----------
+    tangents : Sequence[Array]
+        The tangent operands.
+    dead : Sequence[Any]
+        ``dead_shapes``.
+    k : int
+        The leading axis to give them.
+
+    Returns
+    -------
+    list[Array]
+        Dense tangents.
+    """
+    return [
+        t if d is None else jnp.zeros((int(k),) + tuple(d), jnp.result_type(t))
+        for t, d in zip(tangents, dead)
+    ]
 
 
 def _check_tangent_axis(tangents: Sequence[Array], name: str) -> int:
@@ -193,9 +320,14 @@ def _check_tangent_axis(tangents: Sequence[Array], name: str) -> int:
 
 
 def _chunked(
-    impl: Callable[..., Sequence[Array]], num_primals: int
+    impl: Callable[..., Sequence[Array]],
+    num_primals: int,
+    *,
+    dead_placeholders: bool = False,
+    any_k: bool = False,
+    shapes: Callable[..., Sequence[Any]] | None = None,
 ) -> Callable[..., list[Array]]:
-    """Run ``impl`` over the tangent axis in bucket-sized chunks.
+    """Run ``impl`` over the tangent axis in bucket-sized chunks (or once, ``any_k``).
 
     Parameters
     ----------
@@ -203,24 +335,58 @@ def _chunked(
         The K-tangent kernel implementation (any ``K`` in the buckets).
     num_primals : int
         How many leading operands are primals.
+    dead_placeholders : bool
+        Hand dead tangents to ``impl`` as their ``(1, ...)`` placeholders;
+        ``False``: as dense zeros of the chunk's ``K`` (module docstring).
+    any_k : bool
+        ``impl`` takes any ``K`` (a tangent-group grid axis masks the partial last
+        group, :mod:`jaccpot.pallas._tangent_grid`): one call at the operands'
+        ``K``, no bucket padding (``concatenate``) and no chunks of
+        :data:`MAX_TANGENT_K`.
+    shapes : Callable[..., Sequence[Any]] | None
+        ``shapes(*dense operand specs, **params)``: the output shapes, for an op
+        whose tangents are ALL dead (zeros, no launch); ``None``: ``eval_shape``
+        of ``impl`` on dense zeros.
 
     Returns
     -------
     Callable[..., list[Array]]
-        ``f(*primals, *tangents, **params)`` for any ``K``.
+        ``f(*primals, *tangents, dead_shapes=..., **params)`` for any ``K``.
     """
 
     @functools.wraps(impl)
-    def run(*operands: Array, **params: Any) -> list[Array]:
+    def run(*operands: Array, dead_shapes: Any = None, **params: Any) -> list[Array]:
         primals = operands[:num_primals]
-        tangents = operands[num_primals:]
-        k_total = int(tangents[0].shape[0])
+        tangents = list(operands[num_primals:])
+        dead = list(dead_shapes) if dead_shapes else [None] * len(tangents)
+        k_total = _tangent_k(tangents, dead)
+        if all(d is not None for d in dead):
+            dense = _expand_dead(tangents, dead, k_total)
+            specs = [
+                jax.ShapeDtypeStruct(jnp.shape(a), jnp.result_type(a))
+                for a in list(primals) + dense
+            ]
+            if shapes is not None:
+                outs = shapes(*specs, **params)
+            else:
+                outs = jax.eval_shape(functools.partial(impl, **params), *specs)
+            return [jnp.zeros(o.shape, o.dtype) for o in outs]
+        if any_k:
+            whole = (
+                tangents if dead_placeholders else _expand_dead(tangents, dead, k_total)
+            )
+            return list(impl(*primals, *whole, **params))
         pieces: list[list[Array]] = []
         for start in range(0, k_total, MAX_TANGENT_K):
             k = min(MAX_TANGENT_K, k_total - start)
             kb = tangent_k_bucket(k)
             chunk = []
-            for t in tangents:
+            for t, d in zip(tangents, dead):
+                if d is not None:
+                    chunk.append(
+                        t if dead_placeholders else _expand_dead([t], [d], kb)[0]
+                    )
+                    continue
                 piece = t[start : start + k]
                 if kb > k:
                     pad = jnp.zeros((kb - k,) + tuple(piece.shape[1:]), piece.dtype)
@@ -241,6 +407,8 @@ def make_tangent_op(
     *,
     num_primals: int,
     abstract_eval: Callable[..., Sequence[jax.ShapeDtypeStruct]] | None = None,
+    dead_placeholders: bool = False,
+    any_k: bool = False,
 ) -> TangentOp:
     """Register a tangent op whose lowering is ``impl``.
 
@@ -258,6 +426,16 @@ def make_tangent_op(
         ``abstract_eval(*operand_shape_dtypes, **params)`` -> the output shapes for
         the operands' ``K``. ``None``: ``jax.eval_shape`` of the chunked ``impl``
         (traces the kernel once more per bind; pass a closed form for big kernels).
+        Always called with DENSE tangent specs (a dead one at the live ones'
+        ``K``), so it never sees a placeholder.
+    dead_placeholders : bool
+        ``impl`` accepts a dead tangent as its ``(1, ...)`` placeholder (takes
+        ``K`` from the live tangents, never reads a dead one); ``False``: it gets
+        dense zeros of the chunk's ``K`` (module docstring, "Dead tangents").
+    any_k : bool
+        ``impl`` takes any ``K >= 1`` and is called once at the operands' ``K``
+        (no bucket padding, no chunks); ``False``: only bucket ``K``-s
+        (:data:`TANGENT_K_BUCKETS`), chunked above :data:`MAX_TANGENT_K`.
 
     Returns
     -------
@@ -266,24 +444,56 @@ def make_tangent_op(
     """
     prim = Primitive(f"jaccpot_tangent_{name}")
     prim.multiple_results = True
-    run = _chunked(impl, num_primals)
+    run = _chunked(
+        impl,
+        num_primals,
+        dead_placeholders=dead_placeholders,
+        any_k=any_k,
+        shapes=abstract_eval,
+    )
 
     prim.def_impl(run)
 
-    def _abstract(*avals: Any, **params: Any) -> list[ShapedArray]:
+    def _abstract(
+        *avals: Any, dead_shapes: Any = None, **params: Any
+    ) -> list[ShapedArray]:
         specs = [jax.ShapeDtypeStruct(a.shape, a.dtype) for a in avals]
+        dead = list(dead_shapes) if dead_shapes else [None] * (len(specs) - num_primals)
+        tspecs = specs[num_primals:]
+        k = _tangent_k(tspecs, dead)
+        dense = specs[:num_primals] + [
+            t if d is None else jax.ShapeDtypeStruct((k,) + tuple(d), t.dtype)
+            for t, d in zip(tspecs, dead)
+        ]
         if abstract_eval is not None:
-            outs = abstract_eval(*specs, **params)
+            outs = abstract_eval(*dense, **params)
         else:
-            outs = jax.eval_shape(functools.partial(run, **params), *specs)
+            outs = jax.eval_shape(functools.partial(run, **params), *dense)
         return [ShapedArray(o.shape, o.dtype) for o in outs]
 
     prim.def_abstract_eval(_abstract)
     mlir.register_lowering(prim, mlir.lower_fun(run, multiple_results=True))
 
     def _batch(
-        args: Sequence[Array], dims: Sequence[int | None], **params: Any
-    ) -> tuple[list[Array], list[int]]:
+        args: Sequence[Array],
+        dims: Sequence[int | None],
+        *,
+        dead_shapes: Any = None,
+        **params: Any,
+    ) -> tuple[list[Array], list[Any]]:
+        dead = list(dead_shapes) if dead_shapes else [None] * (len(args) - num_primals)
+        params = dict(params, dead_shapes=tuple(dead))
+        args = list(args)
+        dims = list(dims)
+        for i, d in enumerate(dead):
+            j = num_primals + i
+            if d is not None and dims[j] is not None:
+                # a dead placeholder is zero for every member: drop the batch axis
+                args[j] = jnp.take(args[j], 0, axis=dims[j])
+                dims[j] = None
+        if all(d is None for d in dims):
+            outs = prim.bind(*args, **params)
+            return list(outs), [None] * len(outs)
         size = next(int(jnp.shape(a)[d]) for a, d in zip(args, dims) if d is not None)
         if any(d is not None for d in dims[:num_primals]):
             # Batched primals (a vmap over systems, not over tangents): the
@@ -303,9 +513,16 @@ def make_tangent_op(
             outs = jax.lax.map(one, [moved[i] for i in mapped])
             return list(outs), [0] * len(outs)
         primals = list(args[:num_primals])
+        tangent_dims = dims[num_primals:]
+        tangent_args = args[num_primals:]
         folded = []
-        k = None
-        for a, d in zip(args[num_primals:], dims[num_primals:]):
+        k = 1
+        for a, d, dd in zip(tangent_args, tangent_dims, dead):
+            if dd is not None:
+                folded.append(a)  # the placeholder: unbatched, never read
+                continue
+            # a LIVE tangent the vmap did not batch is the same for every member:
+            # broadcast it (correct; the production rollout does not produce one)
             t = (
                 jnp.broadcast_to(a, (size,) + tuple(a.shape))
                 if d is None
@@ -314,7 +531,6 @@ def make_tangent_op(
             k = int(t.shape[1])
             folded.append(jnp.reshape(t, (size * k,) + tuple(t.shape[2:])))
         outs = prim.bind(*primals, *folded, **params)
-        assert k is not None
         return (
             [jnp.reshape(o, (size, k) + tuple(o.shape[1:])) for o in outs],
             [0] * len(outs),
@@ -337,7 +553,7 @@ def make_tangent_op(
 
     ad.primitive_transposes[prim] = _refuse_transpose
     ad.primitive_jvps[prim] = _refuse_jvp
-    return TangentOp(prim, num_primals)
+    return TangentOp(prim, num_primals, dead_placeholders=dead_placeholders)
 
 
 def instantiate_tangent(tangent: Any, primal: Array) -> tuple[Array, bool]:

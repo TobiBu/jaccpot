@@ -21,6 +21,7 @@ pytest.importorskip("jax.experimental.pallas")
 
 from jaccpot.pallas._tangent import drop_tangent_axis, with_tangent_axis  # noqa: E402
 from jaccpot.pallas.l2p_real import (  # noqa: E402
+    _l2p_tangent_impl,
     l2p_real_particles_jnp,
     l2p_real_particles_pallas,
     l2p_real_particles_pallas_cvjp,
@@ -207,6 +208,87 @@ def test_unbucketed_k_pads_and_chunks(k):
     (got,) = _op(args, tangents)
     (want,) = _ref(args, tangents)
     assert got.shape[0] == k
+    assert _rel_max(got, want) < 1e-12
+
+
+_TPP_ONE: dict = {}
+
+
+@pytest.mark.parametrize("k", [1, 3, 8, 11])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+def test_tangents_per_program_grid(tpp, k):
+    """Tangents on the grid: any ``K`` (a partial last group masked in-kernel, no
+    padding) at every tangents-per-program equals the twin's jvp, and equals
+    ``tpp = 1`` to round-off (G-tpp)."""
+    err, err_one = _tpp_grid(tpp, k)
+    assert err < 1e-12, err
+    assert err_one < 1e-14, err_one
+
+
+@pytest.mark.parametrize("k", [3, 8])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+def test_native_tangents_per_program_grid(tpp, k):
+    """G-tpp natively, float64 (skips without an Ampere card)."""
+    _native_or_skip(False)
+    err, err_one = _tpp_grid(tpp, k, interpret=False)
+    assert err < 1e-12, err
+    assert err_one < 1e-14, err_one
+
+
+def _tpp_grid(tpp, k, *, interpret=True):
+    args = _case(0, jnp.float64)
+    tangents = _tangents(args, k, 30 + k)
+
+    def run(t):
+        (out,) = _l2p_tangent_impl(
+            *args,
+            *tangents,
+            order=_ORDER,
+            block=32,
+            interpret=interpret,
+            backend="triton",
+            num_warps=4,
+            live=(True, True, True),
+            tangents_per_program=t,
+        )
+        return np.asarray(out)
+
+    got = run(tpp)
+    key = (k, interpret)
+    if key not in _TPP_ONE:
+        _TPP_ONE[key] = run(1)
+    (want,) = _ref(args, tangents)
+    assert got.shape == (k,) + args[2].shape
+    return _rel_max(got, want), _rel_max(got, _TPP_ONE[key])
+
+
+@pytest.mark.parametrize(
+    "live", [(True, False, True), (False, True, False), (True, False, False)]
+)
+def test_dead_placeholders_are_never_read(live):
+    """A dead tangent bound as its ``(1, ...)`` placeholder (NaN, so a read would
+    show): ``K`` comes from the live tangents; per-operand liveness of the centre
+    and position tangents."""
+    args = _case(0, jnp.float64)
+    dense = tuple(
+        t if on else jnp.zeros_like(t) for t, on in zip(_tangents(args, 3, 6), live)
+    )
+    sparse = tuple(
+        t if on else jnp.full((1,) * t.ndim, jnp.nan) for t, on in zip(dense, live)
+    )
+    (got,) = _l2p_tangent_impl(
+        *args,
+        *sparse,
+        order=_ORDER,
+        block=32,
+        interpret=True,
+        backend="triton",
+        num_warps=4,
+        live=live,
+        tangents_per_program=2,
+    )
+    (want,) = _ref(args, dense)
+    assert got.shape == want.shape
     assert _rel_max(got, want) < 1e-12
 
 

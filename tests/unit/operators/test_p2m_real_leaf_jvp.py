@@ -23,6 +23,7 @@ pytest.importorskip("yggdrax")
 
 from jaccpot.pallas._tangent import drop_tangent_axis, with_tangent_axis  # noqa: E402
 from jaccpot.pallas.p2m_real_leaf import (  # noqa: E402
+    _p2m_tangent_impl,
     p2m_real_leaves_jnp,
     p2m_real_leaves_pallas,
     p2m_real_leaves_pallas_cvjp,
@@ -192,6 +193,88 @@ def test_unbucketed_k_pads_and_chunks(tree):
     (got,) = _op(tree, args, tangents, 3)
     (want,) = _ref(tree, args, tangents, 3)
     assert got.shape[0] == 11
+    assert _rel_max(got, want) < 1e-12
+
+
+_TPP_ONE: dict = {}
+
+
+def _tpp_grid(tree, tpp, k, *, interpret=True, dtype=jnp.float64):
+    order = 3
+    args = tree.args(dtype)
+    tangents = _tangents(args, k, 20 + k)
+
+    def run(t):
+        (out,) = _p2m_tangent_impl(
+            *args,
+            *tangents,
+            **tree.static(order),
+            leaf_width=tree.leaf,
+            interpret=interpret,
+            backend="triton",
+            num_warps=None,
+            live=(True, True, True),
+            tangents_per_program=t,
+        )
+        return np.asarray(out)
+
+    got = run(tpp)
+    key = (k, interpret, dtype)
+    if key not in _TPP_ONE:
+        _TPP_ONE[key] = run(1)
+    (want,) = _ref(tree, args, tangents, order)
+    assert got.shape == (k, tree.tot, (order + 1) ** 2)
+    return _rel_max(got, want), _rel_max(got, _TPP_ONE[key])
+
+
+@pytest.mark.parametrize("k", [1, 3, 8, 11])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+def test_tangents_per_program_grid(tree, tpp, k):
+    """Tangents on the grid: any ``K`` (a partial last group masked in-kernel, no
+    padding) at every tangents-per-program equals the twin's jvp, and equals
+    ``tpp = 1`` to round-off (G-tpp)."""
+    err, err_one = _tpp_grid(tree, tpp, k)
+    assert err < 1e-12, err
+    assert err_one < 1e-14, err_one
+
+
+@pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
+@pytest.mark.parametrize("k", [3, 8])
+@pytest.mark.parametrize("tpp", [1, 2, 4, 8])
+def test_native_tangents_per_program_grid(tree, tpp, k, dtype):
+    """G-tpp natively (skips without an Ampere card)."""
+    _native_or_skip(False)
+    err, err_one = _tpp_grid(tree, tpp, k, interpret=False, dtype=dtype)
+    assert err < _NATIVE_TOL[dtype], err
+    assert err_one < (1e-14 if dtype == jnp.float64 else 1e-6), err_one
+
+
+@pytest.mark.parametrize("live", [(True, False, True), (False, True, False)])
+def test_dead_placeholders_are_never_read(tree, live):
+    """A dead tangent bound as its ``(1, ...)`` placeholder (track G's
+    ``dead_placeholders``; NaN here, so a read would show): ``K`` comes from the
+    live tangents and the result equals the dense-zero call's reference."""
+    order = 3
+    args = tree.args(jnp.float64)
+    dense = tuple(
+        t if on else jnp.zeros_like(t) for t, on in zip(_tangents(args, 3, 5), live)
+    )
+    sparse = tuple(
+        t if on else jnp.full((1,) * t.ndim, jnp.nan) for t, on in zip(dense, live)
+    )
+    (got,) = _p2m_tangent_impl(
+        *args,
+        *sparse,
+        **tree.static(order),
+        leaf_width=tree.leaf,
+        interpret=True,
+        backend="triton",
+        num_warps=None,
+        live=live,
+        tangents_per_program=2,
+    )
+    (want,) = _ref(tree, args, dense, order)
+    assert got.shape == want.shape
     assert _rel_max(got, want) < 1e-12
 
 
