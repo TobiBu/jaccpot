@@ -18,7 +18,15 @@ the parent array (seven gathers of the ``[nodes, 4]`` sums cover a depth of 128)
 then one gather per particle. No scatter, no ``N``-sized float64 buffer, the same
 sums in every run.
 
-It is OFF unless :func:`gather_reverse_mass_moments` is active: the forward is
+In forward mode (``ad_mode="forward"``) :func:`tree_mass_moments` is a
+``custom_jvp`` instead (:func:`_mass_moments_forward`): the primal is yggdrax's call,
+bitwise, and the tangent a tangent op that takes the ``K`` directions one at a time
+(``lax.map``). JAX's own jvp of the prefix sums materialised ``f64[K, N, 3]``
+weighted-position tangents and their prefix sums -- 24 to 48 B per particle per
+direction (2e6 jacfwd K = 8: a 366 MiB ``f64[8, 2e6, 3]`` in ``fmm_upward``); one
+direction at a time they cost the same as at ``K = 1``.
+
+The reverse is OFF unless :func:`gather_reverse_mass_moments` is active: the forward is
 yggdrax's call either way (the same bits), but the ``custom_vjp`` boundary would
 move constants in the production programs' text. The large-N seam
 (:func:`~jaccpot.runtime._large_n_grad.large_n_farfield_locals_at`) turns it on: its
@@ -33,8 +41,20 @@ from typing import Any, Iterator
 
 import jax
 import jax.numpy as jnp
+from jax import lax
 from jaxtyping import Array
-from yggdrax.tree_moments import TreeMassMoments, compute_tree_mass_moments
+from yggdrax.tree_moments import (
+    TreeMassMoments,
+    _accumulation_dtype,
+    _prefix_range_sums,
+    compute_tree_mass_moments,
+)
+
+from jaccpot.pallas._tangent import (
+    drop_tangent_axis,
+    make_tangent_op,
+    with_tangent_axis,
+)
 
 __all__ = ["gather_reverse_mass_moments", "tree_mass_moments"]
 
@@ -87,6 +107,10 @@ def tree_mass_moments(
         yggdrax's, bitwise; under :func:`gather_reverse_mass_moments` its reverse
         is the gather-only one.
     """
+    from jaccpot.runtime.grad_options import forward_mode_enabled
+
+    if forward_mode_enabled():
+        return _mass_moments_forward(tree, positions_sorted, masses_sorted)
     if not _GATHER_REVERSE.get():
         return compute_tree_mass_moments(tree, positions_sorted, masses_sorted)
     return _mass_moments_cvjp(tree, positions_sorted, masses_sorted)
@@ -153,3 +177,141 @@ def _mass_moments_bwd(residual, cotangent):
 
 
 _mass_moments_cvjp.defvjp(_mass_moments_fwd, _mass_moments_bwd)
+
+
+# --------------------------------------------------------------------------
+# Forward mode: the tangent one direction at a time.
+# --------------------------------------------------------------------------
+
+
+def _mass_moments_tangent_impl(
+    positions: Array,
+    masses: Array,
+    node_ranges: Array,
+    t_positions: Array,
+    t_masses: Array,
+    *,
+    live: tuple[bool, ...],
+) -> tuple[Array, Array]:
+    """``[K, nodes]`` mass and ``[K, nodes, 3]`` centre tangents, one ``k`` at a time.
+
+    The same wide accumulation as the primal (:func:`_prefix_range_sums` in
+    yggdrax's accumulation dtype); ``com' = (moment' - com * mass') / mass`` per
+    node, zero for an empty node.
+
+    Parameters
+    ----------
+    positions : Array
+        ``[N, 3]`` sorted positions.
+    masses : Array
+        ``[N]`` sorted masses.
+    node_ranges : Array
+        ``[nodes, 2]`` inclusive particle ranges.
+    t_positions : Array
+        ``[K, N, 3]`` position tangents (a ``(1, 1, 1)`` placeholder when dead).
+    t_masses : Array
+        ``[K, N]`` mass tangents (a ``(1, 1)`` placeholder when dead).
+    live : tuple[bool, ...]
+        Static: which of the two tangents are nonzero. A dead one is never read
+        (the op is made with ``dead_placeholders=True``; at least one is live, an
+        all-dead op returns zeros without calling this).
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``([K, nodes] mass tangents, [K, nodes, 3] centre tangents)``, in the
+        primals' dtypes.
+    """
+    acc = _accumulation_dtype(positions.dtype)
+    ranges = jnp.asarray(node_ranges).astype(jnp.int32)
+    starts = ranges[:, 0]
+    ends = ranges[:, 1] + 1
+    m_acc = masses.astype(acc)
+    total = _prefix_range_sums(m_acc, starts, ends)
+    empty = total == 0
+    safe = jnp.where(empty, jnp.ones_like(total), total)
+    com = _prefix_range_sums(m_acc[:, None] * positions.astype(acc), starts, ends)
+    com = com / safe[:, None]
+    live_x, live_m = bool(live[0]), bool(live[1])
+    nodes = int(ranges.shape[0])
+
+    def one(tangent: tuple[Array, ...]) -> tuple[Array, Array]:
+        tx = tangent[0] if live_x else None
+        tm = tangent[-1] if live_m else None
+        d_moment = jnp.zeros((nodes, 3), acc)
+        d_mass = jnp.zeros((nodes,), acc)
+        if live_x:
+            d_moment = d_moment + _prefix_range_sums(
+                m_acc[:, None] * tx.astype(acc), starts, ends
+            )
+        if live_m:
+            tm_acc = tm.astype(acc)
+            d_mass = _prefix_range_sums(tm_acc, starts, ends)
+            d_moment = d_moment + _prefix_range_sums(
+                tm_acc[:, None] * positions.astype(acc), starts, ends
+            )
+        d_com = (d_moment - com * d_mass[:, None]) / safe[:, None]
+        d_com = jnp.where(empty[:, None], jnp.zeros((), acc), d_com)
+        return d_mass.astype(masses.dtype), d_com.astype(positions.dtype)
+
+    mapped = tuple(t for t, on in ((t_positions, live_x), (t_masses, live_m)) if on)
+    return lax.map(one, mapped)
+
+
+#: The tangent op of :func:`_mass_moments_forward` (a ``jnp`` impl: the prefix sums
+#: are memory-bound scans, and ``lax.map`` keeps one direction's ``N``-sized float64
+#: rows alive at a time). Any ``K``; a dead tangent stays its placeholder.
+mass_moments_tangent = make_tangent_op(
+    "mass_moments",
+    _mass_moments_tangent_impl,
+    num_primals=3,
+    dead_placeholders=True,
+    any_k=True,
+)
+
+
+@jax.custom_jvp
+def _mass_moments_cjvp(
+    tree: Any, positions_sorted: Array, masses_sorted: Array
+) -> tuple[Array, Array]:
+    out = compute_tree_mass_moments(tree, positions_sorted, masses_sorted)
+    return out.mass, out.center_of_mass
+
+
+def _mass_moments_jvp(primals: tuple, tangents: tuple) -> tuple[Any, Any]:
+    tree, positions, masses = primals
+    _, t_positions, t_masses = tangents
+    out = _mass_moments_cjvp(tree, positions, masses)
+    tk, live = with_tangent_axis([t_positions, t_masses], [positions, masses])
+    t_mass, t_com = drop_tangent_axis(
+        mass_moments_tangent(
+            positions, masses, jnp.asarray(tree.node_ranges), *tk, live=live
+        )
+    )
+    return out, (t_mass, t_com)
+
+
+_mass_moments_cjvp.defjvp(_mass_moments_jvp)
+
+
+def _mass_moments_forward(
+    tree: Any, positions_sorted: Array, masses_sorted: Array
+) -> TreeMassMoments:
+    """Forward-mode :func:`tree_mass_moments`: yggdrax's primal, a one-at-a-time tangent.
+
+    Parameters
+    ----------
+    tree : Any
+        The radix tree (``node_ranges`` in the particles' order).
+    positions_sorted : Array
+        ``[N, 3]`` positions in tree order.
+    masses_sorted : Array
+        ``[N]`` masses, same order.
+
+    Returns
+    -------
+    TreeMassMoments
+        yggdrax's, bitwise.
+    """
+    mass, com = _mass_moments_cjvp(tree, positions_sorted, masses_sorted)
+    return TreeMassMoments(mass=mass, center_of_mass=com)

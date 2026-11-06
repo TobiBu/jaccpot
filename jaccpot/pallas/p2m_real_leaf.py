@@ -887,12 +887,14 @@ def _p2m_block_tangent_kernel(
     row_offset: int,
     num_leaves: int,
     k: int,
+    tpp: int,
     live: tuple[bool, bool, bool],
 ) -> None:
-    """``block`` leaves, their particles ``chunk`` lanes at a time, ``K`` tangents.
+    """``block`` leaves, their particles ``chunk`` lanes at a time, ``tpp`` tangents.
 
     The forward's program (:func:`_p2m_block_kernel`) with the lane body replaced by
-    its linear map (:func:`_p2m_lane_linear`) applied to the ``K`` tangents.
+    its linear map (:func:`_p2m_lane_linear`) applied to the tangents of this
+    program's group (grid axis 1, :mod:`jaccpot.pallas._tangent_grid`).
 
     Parameters
     ----------
@@ -931,14 +933,18 @@ def _p2m_block_tangent_kernel(
     num_leaves : int
         ``L``. Static.
     k : int
-        ``K``. Static.
+        ``K``, the tangents of the launch. Static.
+    tpp : int
+        Tangents per program: this program carries tangents ``g tpp ..
+        g tpp + tpp - 1`` (``g`` its group), those past ``K`` clamped on load and
+        not stored. Static.
     live : tuple[bool, bool, bool]
         Which of the position, mass and centre tangents can be nonzero. Static.
 
     Returns
     -------
     None
-        Writes the block's ``K`` tangent rows.
+        Writes the block's tangent rows of this group.
     """
     del table_in
     assert pl is not None and plgpu is not None
@@ -946,6 +952,11 @@ def _p2m_block_tangent_kernel(
     live_pos, live_mass, live_cent = (bool(v) for v in live)
     live_delta = live_pos or live_cent
     dtype = out_ref.dtype
+    group = pl.program_id(1)
+    tails = int(k) % int(tpp) != 0
+    js = [group * tpp + jj for jj in range(tpp)]
+    # a partial last group reads tangent K - 1 in its spare slots, stores none
+    jl = [jnp.minimum(j, k - 1) for j in js] if tails else js
     leaf = pl.program_id(0) * block + lax.broadcasted_iota(jnp.int32, (block,), 0)
     on = leaf < num_leaves
     lf = jnp.where(on, leaf, 0)
@@ -954,7 +965,11 @@ def _p2m_block_tangent_kernel(
     cx = cent_ref[lf, 0][:, None]
     cy = cent_ref[lf, 1][:, None]
     cz = cent_ref[lf, 2][:, None]
-    tc = [[t_cent_ref[j, lf, a][:, None] for a in range(3)] for j in range(k)]
+    tc = (
+        [[t_cent_ref[j, lf, a][:, None] for a in range(3)] for j in jl]
+        if live_cent
+        else []
+    )
     lane = lax.broadcasted_iota(jnp.int32, (block, chunk), 1)
     n_coef = (p + 1) * (p + 1)
     zero_lanes = jnp.zeros((block, chunk), dtype)
@@ -978,7 +993,7 @@ def _p2m_block_tangent_kernel(
             live_delta=live_delta,
         )
         new = list(acc)
-        for j in range(k):
+        for jj, j in enumerate(jl):
             dm = zero_lanes
             if live_mass:
                 dm = jnp.where(valid, t_mass_ref[j, idx], jnp.asarray(0.0, dtype))
@@ -988,28 +1003,27 @@ def _p2m_block_tangent_kernel(
                 if live_pos:
                     da = da + t_pos_ref[j, idx, a]
                 if live_cent:
-                    da = da - tc[j][a]
+                    da = da - tc[jj][a]
                 dd.append(da)
             for c, term in enumerate(lin(dm, *dd)):
                 term = jnp.where(valid, term, jnp.asarray(0.0, dtype))
-                new[j * n_coef + c] = acc[j * n_coef + c] + jnp.sum(term, axis=1)
+                new[jj * n_coef + c] = acc[jj * n_coef + c] + jnp.sum(term, axis=1)
         return tuple(new)
 
     trips = (jnp.max(count) + (chunk - 1)) // chunk
     zero = jnp.zeros((block,), dtype)
-    acc = lax.fori_loop(0, trips, body, tuple(zero for _ in range(k * n_coef)))
+    acc = lax.fori_loop(0, trips, body, tuple(zero for _ in range(tpp * n_coef)))
     cidx = lax.broadcasted_iota(jnp.int32, (block, coeff_pad), 1)
     row = (row_offset + leaf)[:, None]
     _, n_rows, n_coeffs = out_ref.shape
-    for j in range(k):
+    for jj, j in enumerate(js):
         out = jnp.zeros((block, coeff_pad), dtype)
         for c in range(n_coef):
-            out = jnp.where(cidx == c, acc[j * n_coef + c][:, None], out)
-        plgpu.store(
-            out_ref.at[j, row, cidx],
-            out,
-            mask=(cidx < n_coeffs) & on[:, None] & (row < n_rows),
-        )
+            out = jnp.where(cidx == c, acc[jj * n_coef + c][:, None], out)
+        mask = (cidx < n_coeffs) & on[:, None] & (row < n_rows)
+        if tails:
+            mask = mask & (j < k)
+        plgpu.store(out_ref.at[jl[jj], row, cidx], out, mask=mask)
 
 
 def _p2m_tangent_impl(
@@ -1029,8 +1043,9 @@ def _p2m_tangent_impl(
     backend: str,
     num_warps: int | None,
     live: tuple[bool, ...],
+    tangents_per_program: int | None = None,
 ) -> list[Array]:
-    """The ``K``-tangent P2M launch (``K`` from the buckets; see the op).
+    """The ``K``-tangent P2M launch (any ``K``; see the op).
 
     Parameters
     ----------
@@ -1064,6 +1079,9 @@ def _p2m_tangent_impl(
         Warps per program (``None``: the forward's default).
     live : tuple[bool, ...]
         Which of the three tangents can be nonzero.
+    tangents_per_program : int | None
+        Tangents per program (``None``: ``JACCPOT_TANGENT_TPP_P2M``; see
+        :func:`~jaccpot.pallas._tangent_grid.tangents_per_program`). Static.
 
     Returns
     -------
@@ -1079,6 +1097,8 @@ def _p2m_tangent_impl(
         If ``JACCPOT_P2M_BLOCK`` is ``0`` or negative.
     """
     from jaccpot._env import env_int
+    from jaccpot.pallas._tangent_grid import late_zeros, tangent_groups, tangent_k
+    from jaccpot.pallas._tangent_grid import tangents_per_program as _tpp
 
     del leaf_width
     if pl is None:
@@ -1098,11 +1118,20 @@ def _p2m_tangent_impl(
     dtype = jnp.result_type(positions_sorted.dtype, masses_sorted.dtype)
     n = int(positions_sorted.shape[0])
     L = int(leaf_ranges.shape[0])
-    k = int(t_positions.shape[0])
-    table = jnp.zeros((k, int(total_nodes), C), dtype)
+    # a dead tangent may be its (1, ...) placeholder: never read (``live``)
+    k = tangent_k(t_positions, t_masses, t_leaf_centers)
     flags = (bool(live[0]), bool(live[1]), bool(live[2]))
     if n == 0 or L == 0 or not any(flags):
-        return [table]
+        return [jnp.zeros((k, int(total_nodes), C), dtype)]
+    # the table the kernel writes its leaves' rows into: made after this call's
+    # inputs exist, never hoisted and merged with another force's (late_zeros)
+    table = late_zeros(
+        (k, int(total_nodes), C),
+        dtype,
+        positions_sorted,
+        interpret=bool(interpret),
+        backend=backend,
+    )
     pos = jnp.asarray(positions_sorted, dtype)
     mass = jnp.asarray(masses_sorted, dtype)
     ranges = jnp.asarray(leaf_ranges)
@@ -1114,6 +1143,7 @@ def _p2m_tangent_impl(
     t_cent = jnp.asarray(t_leaf_centers, dtype)
     B = _next_pow2(int(block))
     ch = _next_pow2(int(chunk))
+    tpp = _tpp("P2M", k, tangents_per_program)
     kernel = functools.partial(
         _p2m_block_tangent_kernel,
         order=p,
@@ -1124,6 +1154,7 @@ def _p2m_tangent_impl(
         row_offset=int(num_internal),
         num_leaves=L,
         k=k,
+        tpp=tpp,
         live=flags,
     )
     backend_kwargs = pallas_backend_kwargs(backend, interpret)
@@ -1140,13 +1171,13 @@ def _p2m_tangent_impl(
     operands = [pos, mass, starts, counts, cent, t_pos, t_mass, t_cent]
     out = pl.pallas_call(
         kernel,
-        grid=(-(-L // B),),
+        grid=(-(-L // B), tangent_groups(k, tpp)),
         in_specs=[_full(o) for o in operands + [table]],
         out_specs=_full(table),
         out_shape=jax.ShapeDtypeStruct(table.shape, dtype),
         input_output_aliases={len(operands): 0},
         interpret=bool(interpret),
-        name=f"p2m_tan_real_block_p{p}_b{B}_c{ch}_k{k}",
+        name=f"p2m_tan_real_block_p{p}_b{B}_c{ch}_k{k}_tpp{tpp}",
         **backend_kwargs,
     )(*operands, table)
     return [out]
@@ -1167,27 +1198,33 @@ def _p2m_tangent_shapes(*specs: Any, **params: Any) -> list[jax.ShapeDtypeStruct
     list[jax.ShapeDtypeStruct]
         ``[K, total_nodes, (p+1)^2]``.
     """
-    pos, mass, t_pos = specs[0], specs[1], specs[4]
-    shape = (t_pos.shape[0], int(params["total_nodes"]), sh_size(int(params["order"])))
+    from jaccpot.pallas._tangent_grid import tangent_k
+
+    pos, mass = specs[0], specs[1]
+    k = tangent_k(*specs[4:7])
+    shape = (k, int(params["total_nodes"]), sh_size(int(params["order"])))
     return [jax.ShapeDtypeStruct(shape, jnp.result_type(pos.dtype, mass.dtype))]
 
 
 def _make_p2m_tangent_op() -> Any:
     from jaccpot.pallas._tangent import make_tangent_op
+    from jaccpot.pallas._tangent_grid import tangent_op_options
 
     return make_tangent_op(
         "p2m_real_leaves",
         _p2m_tangent_impl,
         num_primals=4,
         abstract_eval=_p2m_tangent_shapes,
+        **tangent_op_options(),
     )
 
 
 #: Forward-mode tangent op of :func:`p2m_real_leaves_pallas_cvjp`: operands
 #: ``(positions_sorted, masses_sorted, leaf_centers, leaf_ranges, t_positions,
 #: t_masses, t_leaf_centers)``, the tangents ``K``-stacked; params ``order,
-#: num_internal, total_nodes, leaf_width, interpret, backend, num_warps, live``;
-#: returns ``([K, total_nodes, (p+1)^2],)``.
+#: num_internal, total_nodes, leaf_width, interpret, backend, num_warps, live``
+#: and optionally ``tangents_per_program``; returns ``([K, total_nodes, (p+1)^2],)``.
+#: Any ``K``: the kernel's tangent-group grid axis masks a partial last group.
 p2m_real_leaves_pallas_tangent = _make_p2m_tangent_op()
 
 

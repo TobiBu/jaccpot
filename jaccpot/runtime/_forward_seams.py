@@ -87,6 +87,7 @@ __all__ = [
     "p2m_real_leaves_forward",
     "primal_exact",
     "resolve_tangent",
+    "resolve_tangent_out",
     "tangent_gate",
 ]
 
@@ -154,12 +155,34 @@ def resolve_tangent(seam: str, choice: Optional[str] = None) -> tuple[Callable, 
     return _REFERENCES[seam], "reference"
 
 
+def resolve_tangent_out(seam: str) -> Optional[Callable]:
+    """The seam's Pallas ``<op>_out`` sibling, or ``None`` if its module has none.
+
+    The ``_out`` op takes the seam's primal output as one more primal after the
+    seam's arrays (the M2M / L2L tangent cascades read the forward's table instead
+    of recomputing it). Only used when :func:`resolve_tangent` chose ``"pallas"``.
+
+    Parameters
+    ----------
+    seam : str
+        A key of :data:`SEAM_TANGENT_OPS`.
+
+    Returns
+    -------
+    Optional[Callable]
+        The op, or ``None``.
+    """
+    module_name, op_name = SEAM_TANGENT_OPS[seam]
+    return getattr(importlib.import_module(module_name), op_name + "_out", None)
+
+
 def _tangents(
     kernels: str,
     seam: str,
     primals: Sequence[Any],
     tangents: Sequence[Any],
     diff: tuple[int, ...],
+    output: Any = None,
     **params: Any,
 ) -> tuple[Array, ...]:
     """One rule's output tangents: the resolved op at ``K = 1``.
@@ -179,6 +202,11 @@ def _tangents(
         The rule's tangents, same order (topology's are float0 / symbolic zeros).
     diff : tuple[int, ...]
         The differentiable arguments' positions: the op's tangents, in order.
+    output : Any
+        The seam's primal output, or ``None``. Given, and the Pallas op resolved,
+        its ``<op>_out`` sibling (if the kernel module has one) is called with the
+        output as an extra primal after the seam's arrays: the M2M / L2L tangent
+        cascades read it instead of recomputing the forward.
     **params : Any
         The seam's static arguments by name.
 
@@ -187,10 +215,14 @@ def _tangents(
     tuple[Array, ...]
         One tangent per primal output.
     """
-    op, _ = resolve_tangent(seam, kernels)
+    op, source = resolve_tangent(seam, kernels)
     tk, live = with_tangent_axis(
         [tangents[i] for i in diff], [primals[i] for i in diff]
     )
+    if output is not None and source == "pallas":
+        out_op = resolve_tangent_out(seam)
+        if out_op is not None:
+            return drop_tangent_axis(out_op(*primals, output, *tk, live=live, **params))
     return drop_tangent_axis(op(*primals, *tk, live=live, **params))
 
 
@@ -1047,6 +1079,7 @@ def _m2m_jvp(
         primals,
         tangents,
         (0, 1),
+        output=out,
         order=order,
         num_internal=num_internal,
         num_levels=num_levels,
@@ -1186,6 +1219,7 @@ def _l2l_jvp(
         primals,
         tangents,
         (0, 1),
+        output=out,
         order=order,
         num_levels=num_levels,
         level_batch_width=level_batch_width,

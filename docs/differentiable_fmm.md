@@ -94,8 +94,10 @@ through the reverse (+5.2 GiB at 1e8): when memory binds, take the value from a
 separate forward.
 
 `prepare_state` is dominated by **compilation**, not computation (2026-07: at 1 M
-the first call 82 s, the second 1.5 s). Set `jax_compilation_cache_dir` and a cold
-process drops from 81 s to 17 s.
+the first call 82 s, the second 1.5 s). Set `jax_compilation_cache_dir` (or
+`JACCPOT_COMPILATION_CACHE_DIR`, which the runner and `GradientPlan` apply: see
+[Forward mode](#forward-mode-ad_modeforward)) and a cold process drops from 81 s to
+17 s.
 
 ---
 
@@ -176,6 +178,13 @@ plan = runner.gradient_plan(state, masses, dt=dt, num_steps=T)
 res = plan.jvp(None, {"positions": dx0}, wrt=("positions",))   # value, tangent, result
 jac = plan.jacfwd(lambda r, inp: jnp.sum(w * r.positions), wrt=("dt",))
 lin = plan.linearize(wrt=("positions",)).tangent                  # tangents -> output
+
+# more columns than fit a card: k directions per pass, in one jitted program
+from jaccpot.runtime import forward_memory_estimate, jacfwd_batched
+k = forward_memory_estimate(n=len(x0), k=8)["largest_k_that_fits"]   # 1 at 1e8 / A100-40
+jac = plan.jacfwd(fn, wrt=("external_params",), directions_per_pass=k)
+J = jax.jit(jacfwd_batched(lambda theta: ..., directions_per_pass=1))(theta)
+cols = lin.apply({"positions": D}, directions_per_pass=2)   # D: [n_dirs, N, 3]
 ```
 
 * **Selecting it.** `ad_mode="forward"` on `differentiable_rollout`; the
@@ -193,6 +202,53 @@ lin = plan.linearize(wrt=("positions",)).tangent                  # tangents -> 
   `W + 16 B/p` per step (S9) does not apply. `jax.linearize` keeps the
   linearization point's intermediates, so it grows with the steps like a reverse
   pass.
+* **Memory per direction, and `directions_per_pass`.** `jax.jacfwd` pushes every
+  column through the program at once: the tangent kernels carry all `K` columns,
+  and the device peak is `W(K) = a + b K` bytes per particle (round-1 F8, A100-40,
+  galaxy preset at p = 6, float32, `T = 16`: `a` ~ 260-370 and `b` ~ 120-195 B/p
+  per column, smaller at larger N). At **1e8 on an A100-40 one direction already
+  peaks at 384 B/p = 35.8 GiB** (of 37.5 GiB usable at 0.95 preallocation), so a
+  Jacobian there runs **one direction per pass**.
+  `GradientPlan.jacfwd(..., directions_per_pass=k)` and
+  `jaccpot.runtime.jacfwd_batched(f, directions_per_pass=k)` (any forward-mode
+  function, `jax.jacfwd`'s result and structure) build ONE jitted program that
+  `lax.map`s over chunks of `k` columns, each a `jax.jvp` vmapped over its `k`
+  columns (the tangent kernels see `K = k`), the last chunk padded with zero
+  directions and sliced off. Memory is `W(k)`; the price is the primal recomputed
+  per chunk plus one primal after the loop for the returned value (ordered there by
+  an `optimization_barrier`, so no `N`-sized final state is carried through the
+  loop). `None` (default) is today's single-pass program, unchanged. The result
+  equals the single pass to round-off (gate G-batch). `plan.linearize(...).tangent`
+  is a `LinearMap`: call it on one direction, or `.apply(directions,
+  directions_per_pass=k)` on a leading axis of directions.
+  `jaccpot.runtime.forward_memory_estimate(n, k, steps)` is the F8 model: the
+  estimated peak and the largest `k` that fits a card (`card_bytes`, default an
+  A100-40 at 0.95). An estimate from one card and one configuration: measure with
+  `bench/forward_mode_memory.py` before a production run.
+* **Compile time, tangents per program, and the persistent compilation cache.**
+  Round 1's tangent kernels unrolled all `K` columns in one Triton program body, and
+  their compile grew superlinearly in `K` (A100, 2e6 `jacfwd`: `K = 1` ~5 min,
+  `K = 4` 23 min, `K = 8` ~75 min). Since round 2 every Pallas tangent kernel (P2M,
+  M2M, L2L, M2L, L2P, near field) has a grid axis over *tangent groups*: one program
+  carries `tpp` columns (`jaccpot.pallas._tangent_grid`), a partial last group is
+  masked, so any `K` runs without padding. Choose `tpp` per seam with
+  **`JACCPOT_TANGENT_TPP_<SEAM>`** (`SEAM` in `P2M M2M L2L M2L L2P NEAR`; values
+  1/2/4/8, default 2, clamped to the power of two at or above `K`; `tpp = K` is the
+  old fused body). A smaller `tpp` compiles faster and spills less but recomputes
+  the shared primal terms once per group. Compile of the 2e6 `jacfwd` at `K = 8`,
+  tpp 2 everywhere: ~7 min (418 s, contended A100; per kernel at tpp 1 / 2 / 8:
+  M2M 137 / 377 / 4243 s, L2L 37 / 131 / 1598 s, M2L 45 / 114 / 1565 s). The
+  run-time defaults come from the HoreKa sweep (`bench/forward_mode_timing.py`).
+  Set **`JACCPOT_COMPILATION_CACHE_DIR=<dir>`** (opt-in,
+  off by default) and the `ProductionRunner`, `GradientPlan` and the forward-mode
+  benches point JAX's persistent compilation cache there
+  (`jaccpot.runtime.compile_cache.maybe_enable_compilation_cache`: once per
+  process, idempotent, re-armed if something compiled before it was set), so a
+  second process loads the executable instead of compiling it.
+  `JACCPOT_COMPILATION_CACHE_MIN_COMPILE_S` (default 1 s) skips the small programs;
+  `JACCPOT_COMPILATION_CACHE_MAX_BYTES` bounds the directory (LRU eviction). Entries
+  match only the same jax / jaxlib / CUDA / driver and the same program (N, order,
+  leaf capacity, `K`, `T` are all in it). Leave it unset when timing compiles.
 * **The verdict.** The tangent of a step whose capacity verdict failed
   (`overflow_ok(bits)` false) is NaN; `GradientPlan.jvp` / `jacfwd` / `linearize`
   refuse it on the host (`RolloutVerdictError`). Forward mode needs no symmetric
