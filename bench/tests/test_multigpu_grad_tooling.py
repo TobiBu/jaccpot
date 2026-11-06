@@ -106,7 +106,7 @@ def test_cpu_smoke_env_is_the_cpu_gates_set():
         ["--n", "1e5", "--mode", "solo", "--ndev", "2"],
         ["--n", "4e6", "--check"],
         ["--n", "1e5", "--mode", "solo", "--check"],
-        ["--n", "1e5", "--cross", "default"],
+        ["--n", "1e5", "--leaf-capacity", "auto"],
         ["--n", "2e7", "--ic", "disc", "--seed", "1"],
     ],
 )
@@ -137,7 +137,7 @@ def _done(**kw):
         force=dict(bits_ok=True),
         grad_bits=dict(grad_ok=True),
         grad_finite=True,
-        cross=dict(far_pairs=[10, 12], near_pairs=[3, 4], nonempty=True),
+        cross_pairs=dict(far_pairs=[10, 12], near_pairs=[3, 4], nonempty=True),
         time_ms=dict(
             force=[10.0, 11.0],
             force_b=[9.0, 10.0],
