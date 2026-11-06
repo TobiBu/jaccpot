@@ -611,7 +611,7 @@ Scope of the prototype:
 - One card, the geometric MAC, no external field. `ProductionRunner`'s restarts, callbacks and mesh mode are not
   wired in.
 - Production wiring (the `n_b` cut and the coupling inside `strict_run_v2`'s scan, as a gated program variant) is
-  the follow-up.
+  the follow-up. **Done in wave 3 (ESC, below):** `ProductionRunner(escapers=...)`; `EscaperRunner` is removed.
 
 **Sgr gate (local A100, shared card: functional only).** The 1e8 light-Sgr IC was re-assembled with the same seed
 and inputs but **no clip** (`assemble_sgr.py --r-clip 1e12 --r-clip-sgr 1e12`: 100,000,001 rows, a 45.7 Mpc box).
@@ -635,3 +635,50 @@ The full 1e8 unclipped run needs a free 40 GB card. It was queued when this was 
 - CI shards run locally with CI's arguments, all rc 0: `unit`, `integration-strict-a2` (new), `integration-strict`,
   `integration-strict-runner`, and `distributed-segment-runner` (2 forced devices).
 - The partition check covers 2816 tests.
+
+## ESC — escapers in `ProductionRunner` (wave 3, 2026-11-06)
+
+`ProductionRunner(solver, ..., escapers=EscaperPolicy(r_escape, r_return=None, every=1))` runs a system with far
+tails unclipped through the normal runner path (`jaccpot/escapers.py`, `jaccpot/production.py`,
+`strict_run_v2(..., live_rows=)`). Opt-in; the default path is unchanged (identity 36/36, below). User decisions
+(2026-11-05): the escapers are in the runner, opt-in, and do not attract each other.
+
+### What was built
+
+- **The split in the scan.** `StepParams` gained an optional traced `live` (the tree's row count; `None` leaves the
+  pytree, and every program, as before). With it every refresh in `strict_run_v2`'s particle carry (the start
+  program and each step) builds the tree over the first `n_b` rows: `rebuild(num_valid=n_b)` (the mesh lane's
+  capacity-padded cut: the rows past it get the sentinel Morton code and are in no leaf), in the box of the tree rows
+  alone (`live_bounds`: the escapers folded onto row 0 inside the min/max reductions, no second `[N, 3]` array),
+  with the escapers' masses zero. The self-acceleration is the tree force on the tree rows plus the monopole
+  coupling (`coupling`): escapers feel `-G M_b (x - X_b)/r^3`, every tree row the equal and opposite uniform pull.
+  An `optimization_barrier` orders the coupling after the tree force (measured below: otherwise its rows sat in the
+  arena through the force's peak). The eager caps-only prepare and the segment retry's re-prepare build the same
+  tree (`eager_live_rows`, `replanned(bounds=)`, new kwarg, default `None`).
+- **`dehnen_error`.** The f_b carry is threaded unchanged; an escaper row's f_b is its coupling's magnitude, so a
+  returning particle starts its thresholds from its monopole force.
+- **The runner.** The rows are kept in an internal order (tree rows first; the order on the host). At the start,
+  and at every `every`-th edge, `membership` (one jitted pass) finds who crosses `r_escape` outward or `r_return`
+  (default `r_escape / 2`) inward. A change permutes the state, masses and f_b, drops the handle's start force (the
+  next segment's start program evaluates it in the new split: `strict_run_v2` now continues a handle whose
+  `self_acceleration` is `None` that way) and, with the energy on, evaluates the potential on both sides: the
+  **ledger**. While nobody escapes the segments run the default programs.
+- **Diagnostics rows:** `n_escapers`, `escaper_transfers`, `escaper_jump`, `escaper_ledger`; with the energy
+  `potential_couple` (`W_c`), `kinetic_escapers`, `energy_ledgered = E - ledger` and `energy_ledgered_drift`.
+  `energy` includes `W_c`; `energy_drift` stays raw.
+- **Row order.** Callbacks (`SegmentEdge.state/masses/self_acceleration`), `SnapshotWriter`, restart files and
+  `RunResult.state/masses` are in the caller's order (one gather at the edge, only when a callback exists, and one
+  at the end). The in-scan `step_callback` and the external field see the internal order (documented: a
+  per-particle field works, one with per-row parameters does not).
+- **Restarts** write every array in the caller's rows plus `escaper_order` and `meta["escapers"]` (policy,
+  `n_bound`, ledger, transfers); `_restore` re-orders and prepares the split's tree. A run continues only in its own
+  escaper mode (`ValueError` otherwise). The fingerprint gains `escapers` only when the policy is set.
+- **Refused:** `mesh=` (ValueError naming what it would take: escaper rows outside the equal-count domain cuts, the
+  coupling's centre of mass as one more all-reduce per step, a split-aware migration and restart), the gradient
+  mode (`gradient_plan`/`value_and_grad`), a non-`EscaperPolicy`. `scheme=` works (the split changes only the
+  force; not separately gated beyond the scheme seam's own tests).
+- **The IC guard** (`domain_guard(escapers=)`) names the option and a radius to start from (ten times the 99.9 %
+  radius); with escapers on it checks the tree rows and says to lower `r_escape` if they still dominate.
+- **`EscaperRunner` removed** (one home for the logic: the runner). It was unreleased (only on `mn/wave2`).
+
+### Gates

@@ -558,6 +558,7 @@ class FusedForceProvider:
         *,
         walk_only: bool = False,
         caps_only: bool = False,
+        bounds: Optional[Tuple[Array, Array]] = None,
     ) -> Optional[tuple["FusedForceProvider", FusedTopology]]:
         """Re-plan from what a failed segment needed and re-prepare at its start.
 
@@ -586,6 +587,10 @@ class FusedForceProvider:
             Re-prepare caps-only (:meth:`prepare`): the particle carry's retry,
             whose re-run starts from the start program. The topology then holds
             a ``PreparedCaps``, on which nothing can be evaluated.
+        bounds : Optional[Tuple[Array, Array]]
+            The re-prepare's Morton box; ``None`` (the default) infers it from
+            ``positions``. The escaper split passes its tree rows' box
+            (:func:`jaccpot.escapers.live_bounds`).
 
         Returns
         -------
@@ -617,6 +622,8 @@ class FusedForceProvider:
             jit_tree=engine._jit_tree_default,
             runtime_overrides_override=self.runtime_overrides,
         )
+        if bounds is not None:
+            prepare_kw["bounds"] = bounds
         prepared: Any = (
             engine.prepare_state_caps_only(positions, masses, **prepare_kw)
             if caps_only

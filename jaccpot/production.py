@@ -84,6 +84,7 @@ from typing import Any, Callable, Iterator, Literal, Optional, Sequence, Union
 import numpy as np
 from yggdrax import TreeDepthError
 
+from jaccpot.escapers import EscaperPolicy
 from jaccpot.scheme import check_scheme, scheme_record
 
 __all__ = [
@@ -486,6 +487,14 @@ class RunResult:
         ``masses`` are host arrays gathered by id, ``handle`` the
         :class:`~jaccpot.distributed.segment.MeshSegmentRunner`); a run continues
         only a result of its own mode.
+    escapers : Optional[dict]
+        The escaper split at the end (``ProductionRunner(escapers=...)``; ``None``
+        without): ``order`` (``int32[N]`` on the host, internal row ``i`` is caller
+        row ``order[i]``, or ``None`` for the identity), ``n_bound`` (tree rows),
+        ``ledger`` (the sum of the energy jumps, ``None`` once a jump was
+        unknown), ``transfers`` (particles that changed side). ``state`` and
+        ``masses`` are in the CALLER's order; ``handle``'s arrays in the internal
+        one (a continuation re-orders the state).
     """
 
     state: Any
@@ -505,6 +514,7 @@ class RunResult:
     time_anchor: tuple = (0.0, 0)
     state_owned: bool = True
     mode: str = "single"
+    escapers: Optional[dict] = None
 
 
 def segment_lengths(num_steps: int, steps: int) -> tuple:
@@ -856,6 +866,9 @@ def _energy_fields(kinetic: float, potential: Optional[dict], base: dict) -> dic
     if potential is None or not fields["energy_ok"]:
         return fields
     w = potential["self"] + potential["external"]
+    if "couple" in potential:
+        # the escaper split's coupling W_c (escapers=)
+        w = w + potential["couple"]
     energy = float(kinetic) + w
     e0 = base.get("energy")
     fields.update(
@@ -1437,6 +1450,158 @@ def _atomic_savez(path: str, **arrays: Any) -> None:
 # --------------------------------------------------------------------------
 
 
+def _energy_result(out: Any, replans: int) -> dict:
+    """:meth:`ProductionRunner.potential_energy`'s dict from a fitted program's output.
+
+    Parameters
+    ----------
+    out : Any
+        ``(W_self, W_ext, ok[, W_c, K_escapers])`` on the host.
+    replans : int
+        Energy-only re-plans it took.
+
+    Returns
+    -------
+    dict
+        ``self``, ``external``, ``ok``, ``replans``, ``bits`` and, for the escaper
+        split, ``couple`` and ``kinetic_escapers``.
+    """
+    result = {
+        "self": float(out[0]),
+        "external": float(out[1]),
+        "ok": True,
+        "replans": int(replans),
+        "bits": None,
+    }
+    if len(out) > 3:
+        result.update(couple=float(out[3]), kinetic_escapers=float(out[4]))
+    return result
+
+
+def _split_energy_body(
+    prov: Any, force_key: Any, field: Optional[Callable[..., Any]], G: float
+) -> Callable:
+    """The energy program's body under the escaper split (``escapers=``).
+
+    ``W_self`` is the tree rows' (a rebuild over the first ``n_b`` rows, as the
+    segments build it, and ``1/2 sum m phi`` over them), ``W_ext`` every row's, and
+    the coupling ``W_c`` and the escapers' kinetic energy from
+    :func:`jaccpot.escapers.coupling_energy`.
+
+    Parameters
+    ----------
+    prov : Any
+        The ``FusedForceProvider``.
+    force_key : Any
+        The handle's force parameters as host floats, or ``None``.
+    field : Optional[Callable[..., Any]]
+        The external potential.
+    G : float
+        The solver's ``G`` (``force_key``'s wins).
+
+    Returns
+    -------
+    Callable
+        ``(state, masses, f_b, external_params, n_b) -> (W_self, W_ext, ok, W_c,
+        K_escapers)``.
+    """
+    import jax.numpy as jnp
+
+    from jaccpot.escapers import coupling_energy, split_rebuild
+    from jaccpot.runtime.fused_topology import ForceParams
+
+    params = (
+        None
+        if force_key is None
+        else ForceParams(G=float(force_key[0]), eps2=float(force_key[1]))
+    )
+    g = float(G) if force_key is None else float(force_key[0])
+
+    def energy(
+        state_in: Any, masses_in: Any, scale_in: Any, external_in: Any, live_in: Any
+    ) -> tuple:
+        topology = split_rebuild(
+            prov, prov.like(), state_in[:, 0], masses_in, live_in, force_scale=scale_in
+        )
+        phi = prov.potential(topology, params)
+        m = jnp.asarray(masses_in).astype(jnp.float64)
+        live = jnp.arange(m.shape[0], dtype=jnp.int32) < live_in
+        w_self = 0.5 * jnp.sum(jnp.where(live, m * phi.astype(jnp.float64), 0.0))
+        if field is None:
+            w_ext = jnp.zeros((), jnp.float64)
+        else:
+            ext = field(state_in) if external_in is None else field(state_in, external_in)
+            w_ext = jnp.sum(m * jnp.asarray(ext).astype(jnp.float64))
+        extra = coupling_energy(state_in, masses_in, live_in, g)
+        return (
+            w_self,
+            w_ext,
+            prov.capacity_ok(topology),
+            extra["couple"],
+            extra["kinetic_escapers"],
+        )
+
+    return energy
+
+
+def _escaper_fields(
+    split: dict,
+    edge: dict,
+    row: dict,
+    base: dict,
+    n_all: int,
+    potential: Optional[dict],
+    energy_on: bool,
+) -> dict:
+    """The escaper path's diagnostics fields of one edge (``escapers=``).
+
+    Parameters
+    ----------
+    split : dict
+        The run's split (``n_bound``, ``ledger``, ...).
+    edge : dict
+        This edge's re-split (``transfers``, ``jump``; empty without one).
+    row : dict
+        The edge's row so far (its ``energy``, when due).
+    base : dict
+        Step 0's baselines (``energy``: ``E0``).
+    n_all : int
+        Particles.
+    potential : Optional[dict]
+        The edge's potential energies, when evaluated.
+    energy_on : bool
+        Whether the run tracks the energy (else the ledger is ``None``).
+
+    Returns
+    -------
+    dict
+        ``n_escapers``, ``escaper_transfers`` (particles that changed side at this
+        edge), ``escaper_jump`` (this edge's energy jump, ``None`` without a
+        change or the energy), ``escaper_ledger`` (the sum of the jumps); with the
+        energy also ``potential_couple`` (``W_c``), ``kinetic_escapers``,
+        ``energy_ledgered`` (``E - ledger``, the conserved energy) and
+        ``energy_ledgered_drift`` (against ``E0``).
+    """
+    ledger = split["ledger"] if energy_on else None
+    fields: dict = {
+        "n_escapers": int(n_all) - int(split["n_bound"]),
+        "escaper_transfers": int(edge.get("transfers", 0)),
+        "escaper_jump": edge.get("jump"),
+        "escaper_ledger": ledger,
+    }
+    if row.get("energy") is not None and potential is not None:
+        fields["potential_couple"] = float(potential.get("couple", 0.0))
+        fields["kinetic_escapers"] = potential.get("kinetic_escapers")
+        if ledger is not None:
+            ledgered = float(row["energy"]) - float(ledger)
+            e0 = base.get("energy")
+            fields["energy_ledgered"] = ledgered
+            fields["energy_ledgered_drift"] = (
+                (ledgered - float(e0)) / abs(float(e0)) if e0 else None
+            )
+    return fields
+
+
 class ProductionRunner:
     """A long fused-lane run: ``strict_run_v2(carry="particles")`` segments on a host loop.
 
@@ -1512,12 +1677,31 @@ class ProductionRunner:
         retries, restarts and diagnostics stay the runner's. One card only (the
         multi-GPU mode takes one in I2), and not in the gradient mode. Anything
         else is a ``TypeError`` (:func:`jaccpot.scheme.check_scheme`).
+    escapers : Optional[EscaperPolicy]
+        ``None`` (the default): every particle is in the tree, every program as
+        without it. A :class:`jaccpot.escapers.EscaperPolicy`: the ESCAPER PATH
+        (wave 3, ESC; :mod:`jaccpot.escapers`). Particles farther than
+        ``r_escape`` from the tree rows' centre of mass leave the tree and move
+        on its monopole (equal and opposite pull on the tree rows; no mutual
+        gravity among escapers; an external field acts on them too); they come
+        back inside ``r_return``. The membership is checked at the start and at
+        every ``every``-th edge; a change permutes the rows (tree rows first)
+        and costs two energy evaluations when the energy diagnostic is on (the
+        LEDGER: ``energy_ledgered = E - sum(jumps)`` is the conserved energy).
+        The tree's row count is traced, so a changed split compiles nothing;
+        while nobody escapes, the segments run the default programs. Callbacks,
+        snapshots, restart files and the result see the CALLER's row order; the
+        in-scan ``step_callback`` and the external field see the internal one
+        (tree rows first: a per-particle field works unchanged, a field with
+        per-row parameters does not). One card only, not in the gradient mode.
 
     Raises
     ------
     ValueError
         If ``settings.carry`` is not ``"particles"``, or with ``mesh`` and a
-        ``step_callback`` or a ``scheme``.
+        ``step_callback``, a ``scheme`` or ``escapers``.
+    TypeError
+        If ``escapers`` is not an :class:`~jaccpot.escapers.EscaperPolicy`.
 
     Notes
     -----
@@ -1546,6 +1730,7 @@ class ProductionRunner:
         step_callback_stride: int = 1,
         mesh: Any = None,
         scheme: Any = None,
+        escapers: Optional[EscaperPolicy] = None,
     ) -> None:
         if settings.carry != "particles":
             raise ValueError(
@@ -1563,6 +1748,13 @@ class ProductionRunner:
         self.step_callback_stride = int(step_callback_stride)
         #: the integration scheme (``None``: the built-in KDK)
         self.scheme = check_scheme(scheme)
+        if escapers is not None and not isinstance(escapers, EscaperPolicy):
+            raise TypeError(
+                "escapers must be a jaccpot.escapers.EscaperPolicy, got "
+                f"{type(escapers).__name__}"
+            )
+        #: the escaper path's policy (``None``: off)
+        self.escapers: Optional[EscaperPolicy] = escapers
         #: (steps, remainder) plans already warned about
         self._warned: set = set()
         #: the run's position at its last edge (what save_restart writes)
@@ -1593,6 +1785,14 @@ class ProductionRunner:
                 raise ValueError(
                     "the multi-GPU mode runs the built-in KDK only (its scheme seam "
                     "is the multi-node plan's I2); pass scheme=None"
+                )
+            if escapers is not None:
+                raise ValueError(
+                    "the escaper path runs on one card (mesh=None): on the mesh the "
+                    "escapers would need their own rows outside the domain "
+                    "decomposition (the cuts and the migration are equal-count over "
+                    "every row), the coupling's centre of mass as one more "
+                    "all-reduce per step, and a split-aware restart; not built"
                 )
             self.mesh = mesh if isinstance(mesh, MeshRunConfig) else MeshRunConfig(mesh)
             self._mesh_backend = MeshBackend(self)
@@ -1709,9 +1909,11 @@ class ProductionRunner:
             baselines = res.baselines
             owned = bool(res.state_owned) or bool(self.segment.donate_input)
             restored = {"from": "RunResult", "step": step, "bitwise": True}
+            split_in = res.escapers
             res.state = res.handle = None  # consumed
         elif isinstance(restart_from, (str, os.PathLike)):
             arrays, meta = load_restart(restart_from)
+            split_in = meta.get("escapers")
             if meta.get("mesh") is not None:
                 raise ValueError(
                     f"{restart_from} was written by the multi-GPU mode (on "
@@ -1739,14 +1941,78 @@ class ProductionRunner:
         _warn_fusion_autotuner(
             next(iter(state_now.devices())).platform, env_text("XLA_FLAGS")
         )
+        # The escaper path (escapers=): the split's internal row order (tree rows
+        # first; ``order[i]`` is caller row of internal row i, ``None`` the
+        # identity), its tree row count and the energy ledger. ``None``: off.
+        policy = self.escapers
+        n_all = int(state_now.shape[0])
+        split: Optional[dict] = None
+        if restart_from is not None and (split_in is None) != (policy is None):
+            raise ValueError(
+                "a run continues in its own escaper mode: "
+                + (
+                    "this one ran with escapers= (pass the runner the policy)"
+                    if policy is None
+                    else "this one ran without escapers (escapers=None)"
+                )
+            )
+        if policy is not None:
+            from jaccpot.escapers import split_state
+
+            split = {
+                "order": None,
+                "n_bound": n_all,
+                "ledger": 0.0,
+                "transfers": 0,
+            }
+            if restart_from is None:
+                given = state_now
+                state_now, masses_now, moved = split_state(
+                    state_now, masses_now, split, policy
+                )
+                if moved and owned and given is not state_now:
+                    # donate_input: the caller's buffer is consumed, as a segment
+                    # would have (no second full state through the run)
+                    given.delete()
+                del given
+                owned = owned or moved  # a permuted copy is the runner's own
+            else:
+                split.update(
+                    n_bound=int(split_in["n_bound"]),
+                    ledger=split_in["ledger"],
+                    transfers=int(split_in["transfers"]),
+                )
+                order_in = (
+                    split_in.get("order")
+                    if isinstance(restart_from, RunResult)
+                    else arrays.get("escaper_order")
+                )
+                if order_in is not None:
+                    # the order lives on the host; the gather's index only here
+                    split["order"] = np.asarray(order_in, np.int32)
+                    order_dev = jnp.asarray(split["order"])
+                    state_now = state_now[order_dev]
+                    masses_now = masses_now[order_dev]
+                    del order_dev
+                    owned = True
+
+        def live_now() -> Optional[int]:
+            # the segments' and the energy's split: None while every row is a
+            # tree row (the default programs)
+            if split is None or int(split["n_bound"]) == n_all:
+                return None
+            return int(split["n_bound"])
+
         if self.segment.domain_guard != "off":
             from jaccpot.domain import domain_guard
 
+            n_live = live_now()
             self._domain = domain_guard(
-                state_now,
+                state_now if n_live is None else state_now[:n_live, 0],
                 mode=self.segment.domain_guard,
                 leaf_size=int(self.settings.leaf_size),
                 cubic_bounds=bool(self.settings.cubic_bounds),
+                escapers=None if policy is None else float(policy.r_escape),
             )
         dt_arg, force_arg, external_arg = self._call_args(
             dt, force_params, external_params, state_now.dtype
@@ -1761,6 +2027,8 @@ class ProductionRunner:
                 dt_value=dt_value,
                 force_arg=force_arg,
                 external_arg=external_arg,
+                live_rows=live_now(),
+                order=None if split is None else split["order"],
             )
             del arrays
 
@@ -1778,8 +2046,50 @@ class ProductionRunner:
         # segment's): the caller's array, or a host copy when it is consumed
         start_state: Any = None
 
+        # the escaper path: step 0's split (for E0), this edge's transfer, and the
+        # potential a re-split evaluated at this edge (the row reuses it)
+        start_live: Optional[int] = None
+        edge_split: dict = {}
+
+        def ensure_e0() -> None:
+            # step 0's energy, once a provider exists (the first segment's)
+            nonlocal start_state
+            if not (energy_on and handle is not None and baselines is not None):
+                return
+            if start_state is not None and baselines.get("energy") is None:
+                start = self.potential_energy(
+                    jax.device_put(start_state, masses_now.sharding),
+                    masses_now,
+                    handle,
+                    external_params=external_arg,
+                    **({} if start_live is None else {"live_rows": start_live}),
+                )
+                if start["ok"]:
+                    w0 = (
+                        start["self"] + start["external"] + start.get("couple", 0.0)
+                    )
+                    baselines["potential"] = w0
+                    baselines["energy"] = float(baselines["kinetic"]) + w0
+                else:
+                    # no E0: every later drift is None -- say so (#488)
+                    warnings.warn(
+                        "ProductionRunner: the start state's potential "
+                        "overflowed its plan"
+                        + (
+                            ""
+                            if start.get("bits") is None
+                            else f" (overflow bits {int(start['bits']):#x})"
+                        )
+                        + f" after {int(start.get('replans') or 0)} energy "
+                        "re-plan(s): E0 is unknown and every energy_drift of "
+                        "this run is None",
+                        RuntimeWarning,
+                        stacklevel=3,
+                    )
+            start_state = None
+
         def diagnostics_at(step_now: int, state_in: Any, due: bool) -> Optional[dict]:
-            nonlocal baselines, start_state
+            nonlocal baselines
             if every == 0 or not due:
                 return None
             moments = _moments(state_in, masses_now)
@@ -1788,53 +2098,53 @@ class ProductionRunner:
             energy_due = every_energy > 0 and segment_done % every_energy == 0
             potential = None
             if energy_on and handle is not None:
-                if start_state is not None and baselines.get("energy") is None:
-                    start = self.potential_energy(
-                        jax.device_put(start_state, masses_now.sharding),
-                        masses_now,
-                        handle,
-                        external_params=external_arg,
-                    )
-                    if start["ok"]:
-                        w0 = start["self"] + start["external"]
-                        baselines["potential"] = w0
-                        baselines["energy"] = float(baselines["kinetic"]) + w0
-                    else:
-                        # no E0: every later drift is None -- say so (#488)
-                        warnings.warn(
-                            "ProductionRunner: the start state's potential "
-                            "overflowed its plan"
-                            + (
-                                ""
-                                if start.get("bits") is None
-                                else f" (overflow bits {int(start['bits']):#x})"
-                            )
-                            + f" after {int(start.get('replans') or 0)} energy "
-                            "re-plan(s): E0 is unknown and every energy_drift of "
-                            "this run is None",
-                            RuntimeWarning,
-                            stacklevel=2,
-                        )
-                start_state = None
+                ensure_e0()
                 if energy_due:
-                    potential = self.potential_energy(
-                        state_in, masses_now, handle, external_params=external_arg
-                    )
-            return _diagnostics_row(
+                    potential = edge_split.get("potential")
+                    if potential is None:
+                        live = live_now()
+                        potential = self.potential_energy(
+                            state_in,
+                            masses_now,
+                            handle,
+                            external_params=external_arg,
+                            **({} if live is None else {"live_rows": live}),
+                        )
+            row = _diagnostics_row(
                 moments, baselines, time_at(step_now), names, energy_due, potential
             )
+            if split is not None:
+                row.update(
+                    _escaper_fields(
+                        split, edge_split, row, baselines, n_all, potential, energy_on
+                    )
+                )
+            return row
 
         def edge_at(retries: int, wall_s: float, due: bool) -> SegmentEdge:
+            diagnostics = diagnostics_at(step, state_now, due)
+            edge_split.clear()
+            arrays = (
+                state_now,
+                masses_now,
+                getattr(handle, "self_acceleration", None),
+            )
+            if split is not None and split["order"] is not None and self.callbacks:
+                # the callbacks see the caller's rows: one gather, only when
+                # something looks
+                from jaccpot.escapers import caller_rows
+
+                arrays = caller_rows(split["order"], *arrays)
             return SegmentEdge(
                 step=step,
                 time=time_at(step),
                 segment=segment_done,
                 retries=retries,
                 wall_s=wall_s,
-                state=state_now,
-                masses=masses_now,
-                self_acceleration=getattr(handle, "self_acceleration", None),
-                diagnostics=diagnostics_at(step, state_now, due),
+                state=arrays[0],
+                masses=arrays[1],
+                self_acceleration=arrays[2],
+                diagnostics=diagnostics,
                 plan=_plan_record(self.engine, handle),
             )
 
@@ -1853,6 +2163,7 @@ class ProductionRunner:
                 baselines=baselines,
                 anchor=anchor,
                 external_params=external_arg,
+                escapers=None if split is None else dict(split),
             )
             restart = self._restart_due(segment_done)
             if restart is not None:
@@ -1873,6 +2184,7 @@ class ProductionRunner:
             if energy_on:
                 # a donated input: an asynchronous copy (pinned, on a GPU)
                 start_state = host_copy(state_now) if owned else state_now
+                start_live = live_now()
             stopped = at_edge(edge_at(0, 0.0, due=True))
         missing = max(0, int(num_steps) - step)
         lengths = () if stopped else segment_lengths(missing, self.segment.steps)
@@ -1913,6 +2225,7 @@ class ProductionRunner:
                     force_params=force_arg,
                     carry_total_acceleration=True,
                     scheme=self.scheme,
+                    **({} if live_now() is None else {"live_rows": live_now()}),
                 )
             except TreeDepthError as exc:
                 # the eager prepare's: say what the box is, with the outliers
@@ -1951,10 +2264,33 @@ class ProductionRunner:
             if recorder is not None:
                 # before the callbacks: the segment's plan is still installed
                 recorder.after_segment(int(steps), handle, retries)
+            if split is not None and segment_done % int(policy.every) == 0:
+                # the membership at this edge; a change re-orders the rows and
+                # records the ledger's jump (E0 first: it needs step 0's split)
+                if energy_on:
+                    ensure_e0()
+                from jaccpot.escapers import resplit
+
+                state_now, masses_now, handle, edge_split_now = resplit(
+                    self,
+                    state_now,
+                    masses_now,
+                    handle,
+                    split,
+                    policy,
+                    energy=energy_on,
+                    external_params=external_arg,
+                )
+                edge_split.update(edge_split_now)
             due = every > 0 and (segment_done % every == 0 or last)
             if at_edge(edge_at(retries, wall_s, due)):
                 stopped = True
                 break
+        if split is not None and split["order"] is not None:
+            # the result in the caller's rows (the handle stays internal)
+            from jaccpot.escapers import caller_rows
+
+            state_now, masses_now = caller_rows(split["order"], state_now, masses_now)
         return RunResult(
             state=state_now,
             masses=masses_now,
@@ -1973,6 +2309,7 @@ class ProductionRunner:
             time_anchor=anchor,
             # without a segment the state is still the one this call was given
             state_owned=owned or ran,
+            escapers=None if split is None else dict(split),
         )
 
     # ------------------------------------------------------------------
@@ -2055,6 +2392,12 @@ class ProductionRunner:
             raise ValueError(
                 "the gradient mode runs on one card (mesh=None): the multi-GPU "
                 "lane has no differentiable step"
+            )
+        if self.escapers is not None:
+            raise ValueError(
+                "the gradient mode runs without the escaper path (escapers=None): "
+                "its reverse replays one tree over every row, and a split's row "
+                "permutations and coupling have no reverse here"
             )
         if self.scheme is not None:
             raise ValueError(
@@ -2195,6 +2538,7 @@ class ProductionRunner:
         handle: Any,
         *,
         external_params: Any = None,
+        live_rows: Optional[int] = None,
     ) -> dict:
         """The potential energies at ``state``: ``1/2 sum m phi`` and ``sum m Phi_ext``.
 
@@ -2222,6 +2566,10 @@ class ProductionRunner:
             thresholds.
         external_params : Any
             The external potential's parameters, as the segments pass them.
+        live_rows : Optional[int]
+            The escaper split (``escapers=``): the first ``live_rows`` rows are the
+            tree (``W_self`` is theirs), the rest escapers on the monopole
+            coupling. ``None``: every row (the program as without it).
 
         Returns
         -------
@@ -2230,7 +2578,8 @@ class ProductionRunner:
             without ``external_potential_fn``), ``ok`` (the rebuild fitted its
             capacities; the energies are meaningless otherwise), ``replans`` (the
             energy-only re-plans this evaluation ran, below) and ``bits`` (the
-            failed rebuild's overflow bits, ``None`` when it fitted).
+            failed rebuild's overflow bits, ``None`` when it fitted). With
+            ``live_rows`` also ``couple`` (``W_c``) and ``kinetic_escapers``.
 
         Notes
         -----
@@ -2259,42 +2608,39 @@ class ProductionRunner:
             None if field is None else id(field),
             _level_registry_key(),
         )
+        if live_rows is not None:
+            # the split's program (another body; its row count is an argument)
+            key = key + ("escaper_split",)
         program = self._energy_programs.get(key)
         if program is None:
-            program = jax.jit(self._energy_body(prov, force_key))
+            program = jax.jit(
+                self._energy_body(prov, force_key, split=live_rows is not None)
+            )
             self._energy_programs[key] = program
         scale = handle.force_scale if prov.scale_carry else None
         # one placement for every call: step 0's state comes committed (a host copy
         # put back on the device), the segments' states do not, and jit compiles
         # one executable per commitment -- a second ~50 s compile at 25M and 1e8
         state = jax.device_put(state, masses.sharding)
-        args = (state, masses, scale, external_params)
+        args: tuple = (state, masses, scale, external_params)
+        if live_rows is not None:
+            import jax.numpy as jnp
+
+            args = args + (jnp.asarray(int(live_rows), jnp.int32),)
         grown = self._energy_grown.get(key)
         if grown is not None:
-            w_self, w_ext, ok = jax.device_get(grown[0](*args))
-            if bool(ok):
-                return {
-                    "self": float(w_self),
-                    "external": float(w_ext),
-                    "ok": True,
-                    "replans": int(grown[1]),
-                    "bits": None,
-                }
+            out = jax.device_get(grown[0](*args))
+            if bool(out[2]):
+                return _energy_result(out, int(grown[1]))
             del self._energy_grown[key]
         with _trace_state_kept(self.engine):
             out = program(*args)
-        w_self, w_ext, ok = jax.device_get(out)
-        if bool(ok):
-            return {
-                "self": float(w_self),
-                "external": float(w_ext),
-                "ok": True,
-                "replans": 0,
-                "bits": None,
-            }
+        out = jax.device_get(out)
+        if bool(out[2]):
+            return _energy_result(out, 0)
         return self._potential_energy_replanned(key, prov, force_key, args)
 
-    def _energy_body(self, prov: Any, force_key: Any) -> Callable:
+    def _energy_body(self, prov: Any, force_key: Any, split: bool = False) -> Callable:
         """The energy program's body on ``prov``: rebuild, potential, both sums.
 
         Parameters
@@ -2303,12 +2649,19 @@ class ProductionRunner:
             The ``FusedForceProvider`` whose template the rebuild materialises.
         force_key : Any
             The handle's force parameters as host floats, or ``None``.
+        split : bool
+            The escaper split's body (:func:`_split_energy_body`).
 
         Returns
         -------
         Callable
-            ``(state, masses, f_b, external_params) -> (W_self, W_ext, ok)``.
+            ``(state, masses, f_b, external_params) -> (W_self, W_ext, ok)``; with
+            ``split`` ``(..., n_b) -> (W_self, W_ext, ok, W_c, K_escapers)``.
         """
+        if split:
+            return _split_energy_body(
+                prov, force_key, self.external_potential_fn, float(self.engine.G)
+            )
         import jax.numpy as jnp
 
         from jaccpot.runtime.fused_topology import ForceParams
@@ -2389,33 +2742,52 @@ class ProductionRunner:
                     break
                 if replans == 0:
                     tree_first = bool(needs[NEEDS_FIELDS.index("tree_overflow")])
-                replanned = current.replanned(
-                    needs,
-                    state[:, 0, :],
-                    masses,
-                    walk_only=mode == "walk",
-                    caps_only=True,
-                )
+                if len(args) > 4:
+                    # the escaper split: re-plan the tree rows, in their box
+                    from jaccpot.escapers import eager_split_inputs
+                    from jaccpot.runtime.capacity_plan import eager_live_rows
+
+                    n_live = int(args[4])
+                    masses_tree, live_box = eager_split_inputs(
+                        state[:, 0, :],
+                        masses,
+                        n_live,
+                        cubic=bool(getattr(engine, "_tree_cubic_bounds", False)),
+                    )
+                    with eager_live_rows(n_live):
+                        replanned = current.replanned(
+                            needs,
+                            state[:, 0, :],
+                            masses_tree,
+                            walk_only=mode == "walk",
+                            caps_only=True,
+                            bounds=live_box,
+                        )
+                    del masses_tree, live_box
+                else:
+                    replanned = current.replanned(
+                        needs,
+                        state[:, 0, :],
+                        masses,
+                        walk_only=mode == "walk",
+                        caps_only=True,
+                    )
                 if replanned is None:
                     break
                 current = replanned[0]
                 del replanned
                 replans += 1
                 compiled = (
-                    jax.jit(self._energy_body(current, force_key))
+                    jax.jit(
+                        self._energy_body(current, force_key, split=len(args) > 4)
+                    )
                     .lower(*args)
                     .compile()
                 )
-                w_self, w_ext, ok = jax.device_get(compiled(*args))
-                if bool(ok):
+                out = jax.device_get(compiled(*args))
+                if bool(out[2]):
                     self._energy_grown[key] = (compiled, replans)
-                    return {
-                        "self": float(w_self),
-                        "external": float(w_ext),
-                        "ok": True,
-                        "replans": replans,
-                        "bits": None,
-                    }
+                    return _energy_result(out, replans)
         return {
             "self": float("nan"),
             "external": float("nan"),
@@ -2447,7 +2819,27 @@ class ProductionRunner:
             topology = prov.rebuild(state_in[:, 0], masses_in, force_scale=scale_in)
             return topology.needs(), topology.overflow_bits()
 
-        needs, bits = jax.device_get(jax.jit(needs_of)(*args[:3]))
+        def needs_of_split(
+            state_in: Any, masses_in: Any, scale_in: Any, live_in: Any
+        ) -> tuple:
+            from jaccpot.escapers import split_rebuild
+
+            topology = split_rebuild(
+                prov,
+                prov.like(),
+                state_in[:, 0],
+                masses_in,
+                live_in,
+                force_scale=scale_in,
+            )
+            return topology.needs(), topology.overflow_bits()
+
+        if len(args) > 4:
+            needs, bits = jax.device_get(
+                jax.jit(needs_of_split)(*args[:3], args[4])
+            )
+        else:
+            needs, bits = jax.device_get(jax.jit(needs_of)(*args[:3]))
         return np.asarray(needs).astype(np.int64), int(bits)
 
     # ------------------------------------------------------------------
@@ -2599,16 +2991,25 @@ class ProductionRunner:
                 "save_restart needs a run that has done a segment: the state at "
                 "step 0 is the run's input"
             )
-        arrays = {
-            "state": np.asarray(jax.device_get(current["state"])),
-            "masses": np.asarray(jax.device_get(current["masses"])),
-            "self_acceleration": np.asarray(jax.device_get(handle.self_acceleration)),
-        }
-        if handle.force_scale is not None:
-            arrays["force_scale"] = np.asarray(jax.device_get(handle.force_scale))
+        split = current.get("escapers")
+        if split is not None:
+            # the escaper path: every array in the CALLER's rows, and the order
+            from jaccpot.escapers import _write_split_arrays
+
+            arrays = _write_split_arrays(current, handle, split)
+        else:
+            arrays = {
+                "state": np.asarray(jax.device_get(current["state"])),
+                "masses": np.asarray(jax.device_get(current["masses"])),
+                "self_acceleration": np.asarray(
+                    jax.device_get(handle.self_acceleration)
+                ),
+            }
+            if handle.force_scale is not None:
+                arrays["force_scale"] = np.asarray(jax.device_get(handle.force_scale))
         total = handle.acceleration
         total_is_self = total is handle.self_acceleration
-        if total is not None and not total_is_self:
+        if split is None and total is not None and not total_is_self:
             arrays["acceleration"] = np.asarray(jax.device_get(total))
         field = self.external_acceleration_fn
         meta = {
@@ -2641,6 +3042,14 @@ class ProductionRunner:
         if self.scheme is not None:
             # only with one: the built-in's files are as they were
             meta["scheme"] = scheme_record(self.scheme)
+        if split is not None and self.escapers is not None:
+            # only with the escaper path: the split and the ledger
+            meta["escapers"] = {
+                **self.escapers.record(),
+                "n_bound": int(split["n_bound"]),
+                "ledger": split["ledger"],
+                "transfers": int(split["transfers"]),
+            }
         # UTF-8 bytes (a numpy str array would hold 4 bytes per character)
         arrays["meta"] = np.frombuffer(json.dumps(meta).encode("utf-8"), np.uint8)
         _atomic_savez(str(path), **arrays)
@@ -2658,6 +3067,8 @@ class ProductionRunner:
         dt_value: float,
         force_arg: Any,
         external_arg: Any,
+        live_rows: Optional[int] = None,
+        order: Any = None,
     ) -> tuple:
         """The handle a restart file continues from, rebuilt in this process.
 
@@ -2688,6 +3099,13 @@ class ProductionRunner:
             The force parameters the segments pass.
         external_arg : Any
             The field parameters the segments pass.
+        live_rows : Optional[int]
+            The escaper split's tree rows (``escapers=``): the prepare builds over
+            them, in their box. ``None``: every row.
+        order : Any
+            The escaper split's internal order (``state`` and ``masses`` already
+            follow it; the file's handle arrays are re-ordered by it), or
+            ``None``.
 
         Returns
         -------
@@ -2719,14 +3137,37 @@ class ProductionRunner:
         # caps-only (as the particle carry's own bootstrap): the template and the
         # trace-time state, no list and no downward pass -- the handle brings the
         # start force
-        provider, topology = FusedForceProvider.prepare(
-            self.solver,
-            state[:, 0],
-            masses,
-            leaf_size=int(self.settings.leaf_size),
-            max_order=int(self.settings.max_order),
-            caps_only=env_flag("JACCPOT_STRICT_CAPS_ONLY_PREPARE", True),
-        )
+        if live_rows is None:
+            provider, topology = FusedForceProvider.prepare(
+                self.solver,
+                state[:, 0],
+                masses,
+                leaf_size=int(self.settings.leaf_size),
+                max_order=int(self.settings.max_order),
+                caps_only=env_flag("JACCPOT_STRICT_CAPS_ONLY_PREPARE", True),
+            )
+        else:
+            # the escaper split: the tree rows, in their box (as the run's own)
+            from jaccpot.escapers import eager_split_inputs
+            from jaccpot.runtime.capacity_plan import eager_live_rows
+
+            masses_tree, live_box = eager_split_inputs(
+                state[:, 0],
+                masses,
+                int(live_rows),
+                cubic=bool(getattr(engine, "_tree_cubic_bounds", False)),
+            )
+            with eager_live_rows(int(live_rows)):
+                provider, topology = FusedForceProvider.prepare(
+                    self.solver,
+                    state[:, 0],
+                    masses_tree,
+                    leaf_size=int(self.settings.leaf_size),
+                    max_order=int(self.settings.max_order),
+                    bounds=live_box,
+                    caps_only=env_flag("JACCPOT_STRICT_CAPS_ONLY_PREPARE", True),
+                )
+            del masses_tree, live_box
         del topology
         # what the prepare re-measured at these positions goes back to the plan
         # the run traced its programs with
@@ -2779,12 +3220,25 @@ class ProductionRunner:
             mismatches.append("dt")
         if meta.get("scheme") != scheme_record(self.scheme):
             mismatches.append("scheme")
-        self_acceleration = jnp.asarray(arrays["self_acceleration"])
+        host_order = None if order is None else np.asarray(order)
+
+        def internal(name: str) -> Any:
+            # a file's handle array in the run's internal rows (the escaper split)
+            if name not in arrays:
+                return None
+            value = arrays[name]
+            return jnp.asarray(value if host_order is None else value[host_order])
+
+        # (an escaper run's file after a changed split holds no start force: the
+        # continuation evaluates it, as the uninterrupted run does)
+        self_acceleration = internal("self_acceleration")
         field = self.external_acceleration_fn
         external = meta["external"]
         external_key = external_field_key(field, external_arg)
         acceleration = None
-        if external["total_is_self"] and field is None:
+        if self_acceleration is None:
+            pass  # no start force at all: the continuation evaluates it
+        elif external["total_is_self"] and field is None:
             acceleration = self_acceleration
         elif (
             "acceleration" in arrays
@@ -2792,7 +3246,7 @@ class ProductionRunner:
             and external["field"] == _qualname(field)
             and external["params_sha256"] == external_key[1]
         ):
-            acceleration = jnp.asarray(arrays["acceleration"])
+            acceleration = internal("acceleration")
         else:
             # the start total of another field (or of none): the segment evaluates
             # this one's again, eagerly
@@ -2802,9 +3256,7 @@ class ProductionRunner:
             template=provider.template_or_raise(),
             self_acceleration=self_acceleration,
             num_particles=n,
-            force_scale=(
-                jnp.asarray(arrays["force_scale"]) if "force_scale" in arrays else None
-            ),
+            force_scale=internal("force_scale"),
             provider=provider,
             force_key=force_key,
             acceleration=acceleration,
@@ -2884,6 +3336,12 @@ class ProductionRunner:
             "device": [device.platform, str(device.device_kind)],
             "x64": bool(jax.config.jax_enable_x64),
             **self._static_fingerprint,
+            # only with the escaper path: the default fingerprint is as it was
+            **(
+                {}
+                if self.escapers is None
+                else {"escapers": _jsonable(self.escapers.record())}
+            ),
         }
 
 

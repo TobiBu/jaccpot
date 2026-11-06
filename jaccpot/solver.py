@@ -1943,6 +1943,7 @@ class FastMultipoleMethod:
         external_params: Any = None,
         carry_total_acceleration: bool = False,
         scheme: Any = None,
+        live_rows: Optional[int] = None,
     ) -> tuple[Array, Optional[Any], Optional[Array]]:
         """Strict V2 segmented runner with raw tensor API.
 
@@ -2049,6 +2050,12 @@ class FastMultipoleMethod:
             velocity Verlet. A :class:`jaccpot.scheme.SplitStepScheme` (nornax's
             ``LeapfrogKDK``) does the step's drift and kick around its one force
             evaluation; the force, verdict, retry and handle stay the lane's.
+        live_rows : Optional[int]
+            ``carry="particles"`` only. ``None`` (the default): every row is a tree
+            row. ``n_b``: the escaper split (:mod:`jaccpot.escapers`; what
+            ``ProductionRunner(escapers=...)`` passes) -- the first ``n_b`` rows are
+            the tree, the rest escapers on the tree rows' monopole (see the impl
+            docstring).
 
         Returns
         -------
@@ -2084,6 +2091,7 @@ class FastMultipoleMethod:
             external_params=external_params,
             carry_total_acceleration=bool(carry_total_acceleration),
             scheme=scheme,
+            live_rows=None if live_rows is None else int(live_rows),
         )
 
     def strict_fused_prepared_eval_fn(
