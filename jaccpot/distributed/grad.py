@@ -24,14 +24,17 @@ every device inside ``shard_map`` (:func:`mesh_differentiable_force_shard`):
    input row order as production adds it; padding rows zeroed; the gradient gate.
 
 The exchanges are never transposed: the seams' reverses send OUTPUT cotangents
-forward along the frozen layout (design §2). Those reverses are G2's
-(``pallas/m2l_real_csr_lanes_cross_vjp.py``) and G3's (``distributed/cross_vjp.py``);
-here both seams are parameters whose defaults (:func:`placeholder_far_seam`,
-:func:`placeholder_near_seam`) are the production launches forward and raise in
-reverse, so the forward is testable now -- bitwise
-``FusedMeshForce.shard``'s -- and G4 swaps the real seams in.
+forward along the frozen layout (design §2). The defaults are
+:func:`cross_far_seam` (seam A,
+:func:`~jaccpot.pallas.m2l_real_csr_lanes_cross_vjp.cross_far_m2l_cvjp`) and
+:func:`cross_near_seam` (seam B,
+:func:`~jaccpot.distributed.cross_vjp.cross_near_acceleration_direct_cvjp`); the
+forward is ``FusedMeshForce.shard``'s, bitwise. :func:`placeholder_far_seam` and
+:func:`placeholder_near_seam` (the production launches forward, a reverse that
+raises) stay for tests of the plumbing alone. :func:`make_mesh_grad_fn` wraps the
+per-device force in the mesh's ``shard_map`` for a loss outside it.
 
-Seam contracts (what G4 adapts G2's/G3's functions to):
+Seam contracts:
 
 * ``far_seam(plan: CrossGradPlan) -> m2l``: ``m2l`` is called in place of
   :func:`~jaccpot.pallas.m2l_real_csr_lanes.m2l_real_csr_lanes_pallas_cvjp`, with
@@ -64,9 +67,12 @@ from jaxtyping import Array
 __all__ = [
     "CrossGradPlan",
     "cross_verdict",
+    "make_mesh_grad_fn",
     "make_mesh_grad_hook",
     "mesh_differentiable_force_shard",
     "mesh_grad_statics",
+    "cross_far_seam",
+    "cross_near_seam",
     "placeholder_far_seam",
     "placeholder_near_seam",
 ]
@@ -574,6 +580,136 @@ def placeholder_near_seam(
 
 
 # --------------------------------------------------------------------------
+# The real seams (G4): G2's cross M2L reverse and G3's cross near reverse, bound
+# to the plan's frozen layout.
+# --------------------------------------------------------------------------
+
+
+def cross_far_seam(plan: CrossGradPlan) -> Callable[..., Array]:
+    """Seam A: the merged M2L launch whose reverse completes the cross cotangents.
+
+    Binds :func:`~jaccpot.pallas.m2l_real_csr_lanes_cross_vjp.cross_far_m2l_cvjp`
+    to the plan's far layout (``send_node``, ``alive``, ``send_sizes``, the import
+    capacity and the mesh axis): the returned callable takes
+    ``m2l_real_csr_lanes_pallas_cvjp``'s 13 positional arguments, as
+    ``_downward_prep`` calls it on the merged ``[local ; imported]`` CSR. Its
+    forward is the production launch, bitwise; its reverse sends the local
+    cotangents of the exported nodes forward along the far exchange and runs the
+    symmetric sort-free reverse over the local rows (exact on a symmetric merged
+    list: the caller's gate).
+
+    Parameters
+    ----------
+    plan : CrossGradPlan
+        The device's frozen cross layout.
+
+    Returns
+    -------
+    Callable[..., Array]
+        The bound seam.
+    """
+    from jaccpot.pallas.m2l_real_csr_lanes_cross_vjp import cross_far_m2l_cvjp
+
+    def m2l(
+        multipoles: Array,
+        centers: Array,
+        sources: Array,
+        row_offsets: Array,
+        active_pair_count: Optional[Array],
+        order: int,
+        k_lanes: int,
+        interpret: bool,
+        backend: str,
+        num_warps: int,
+        n_targets: Optional[int] = None,
+        presorted: bool = False,
+        symmetric: bool = False,
+    ) -> Array:
+        # the merged list: `_l2l` clears `symmetric` once cross pairs are in; the
+        # local half's symmetry is the gradient plan's verdict (gated)
+        del symmetric
+        if n_targets is None or int(n_targets) != plan.n_local or not presorted:
+            raise ValueError(
+                "cross_far_seam: the merged launch must target the plan's "
+                f"{plan.n_local} local rows on a target-sorted CSR; got "
+                f"n_targets={n_targets}, presorted={presorted}"
+            )
+        return cross_far_m2l_cvjp(
+            multipoles,
+            centers,
+            sources,
+            row_offsets,
+            active_pair_count,
+            plan.send_node,
+            plan.alive,
+            plan.send_sizes,
+            int(order),
+            int(k_lanes),
+            bool(interpret),
+            str(backend),
+            int(num_warps),
+            int(plan.n_local),
+            int(plan.recv_node_cap),
+            str(plan.axis_name),
+        )
+
+    return m2l
+
+
+def cross_near_seam(
+    plan: CrossGradPlan,
+    positions_sorted: Array,
+    masses_sorted: Array,
+    *,
+    leaf_ranges: Array,
+    particle_indices: Array,
+    num_internal: int,
+    leaf_width: int,
+    softening_sq: Array,
+    G: Array,
+    softening_kernel: Optional[str],
+    interpret: bool,
+    with_force_scale: bool = False,
+) -> Any:
+    """Seam B: the cross near term whose reverse completes the imported sinks' cotangents.
+
+    :func:`~jaccpot.distributed.cross_vjp.cross_near_acceleration_direct_cvjp` on
+    the plan's near imports and pairs; arguments as :func:`placeholder_near_seam`.
+    Forward: the production term, bitwise. Reverse: the cotangents of the sinks a
+    peer imported travel forward along the near exchange, then the direct
+    reverse over the local target leaves (no self term); ``softening_sq`` and
+    ``G`` get this device's partial cotangents (the ``shard_map`` transpose sums
+    replicated inputs' cotangents over the mesh).
+
+    Returns
+    -------
+    Any
+        ``(n, 3)`` in input row order (and the ``(n,)`` ``f_b`` share, whose
+        cotangent is dropped).
+    """
+    from jaccpot.distributed.cross_vjp import cross_near_acceleration_direct_cvjp
+
+    return cross_near_acceleration_direct_cvjp(
+        plan.near_sink(),
+        positions_sorted,
+        masses_sorted,
+        leaf_ranges,
+        particle_indices,
+        int(num_internal),
+        src=plan.src,
+        live_q=plan.live_q,
+        part_sizes=plan.part_sizes,
+        axis_name=str(plan.axis_name),
+        leaf_width=int(leaf_width),
+        softening_sq=softening_sq,
+        G=G,
+        interpret=bool(interpret),
+        softening_kernel=softening_kernel,
+        with_force_scale=bool(with_force_scale),
+    )
+
+
+# --------------------------------------------------------------------------
 # The hook, the statics, the per-device force.
 # --------------------------------------------------------------------------
 
@@ -779,8 +915,8 @@ def mesh_differentiable_force_shard(
     axis_name: str,
     force_scale: Optional[Array] = None,
     params: Any = None,
-    far_seam: Callable[[CrossGradPlan], Callable[..., Array]] = placeholder_far_seam,
-    near_seam: Callable[..., Any] = placeholder_near_seam,
+    far_seam: Callable[[CrossGradPlan], Callable[..., Array]] = cross_far_seam,
+    near_seam: Callable[..., Any] = cross_near_seam,
 ) -> tuple[Array, ...]:
     """One device's self-gravity, differentiable in ``positions`` and ``masses``.
 
@@ -818,9 +954,9 @@ def mesh_differentiable_force_shard(
         ``ForceParams`` / ``StepParams`` for the local evaluation and the cross
         near term (G4's MG9); ``None``: the engine's.
     far_seam : Callable
-        Seam A's factory (module docstring); default :func:`placeholder_far_seam`.
+        Seam A's factory (module docstring); default :func:`cross_far_seam`.
     near_seam : Callable
-        Seam B (module docstring); default :func:`placeholder_near_seam`.
+        Seam B (module docstring); default :func:`cross_near_seam`.
 
     Returns
     -------
@@ -934,3 +1070,67 @@ def mesh_differentiable_force_shard(
         f_b = stop(jnp.where(live_rows, f_b, jnp.zeros((), f_b.dtype)))
         return acc, bits, needs, f_b
     return acc, bits, needs
+
+
+# --------------------------------------------------------------------------
+# The user-facing program (G4).
+# --------------------------------------------------------------------------
+
+
+def make_mesh_grad_fn(force: Any) -> Callable[..., tuple[Array, ...]]:
+    """The mesh force as one differentiable function of mesh-sharded arrays.
+
+    Wraps :meth:`~jaccpot.distributed.template_force.FusedMeshForce.differentiable_shard`
+    in the force's ``shard_map`` (``check_vma=False``), so a scalar loss built on its
+    output OUTSIDE the ``shard_map`` differentiates with plain ``jax.grad`` in the
+    positions, the masses and -- passed as a
+    :class:`~jaccpot.runtime.fused_topology.ForceParams` of arrays -- ``G`` and the
+    softening squared (replicated: their cotangents are summed over the mesh by the
+    ``shard_map`` transpose). Trace and call it as the force's own programs:
+    under ``force.context()``, with ``force.before_trace()`` before each new trace,
+    after ``force.prepare(...)`` and ``force.with_grad_plan(...)``.
+
+    Parameters
+    ----------
+    force : Any
+        A prepared :class:`~jaccpot.distributed.template_force.FusedMeshForce` with
+        its gradient statics.
+
+    Returns
+    -------
+    Callable[..., tuple[Array, ...]]
+        ``f(positions, masses, counts, ids, params=None, force_scale=None) ->
+        (acceleration, bits)`` (and ``f_b``, stopped, with ``force_scale``):
+        ``(ndev * cap, 3)`` accelerations, zero on padding rows, NaN gradient when
+        a device's lists are not ones the reverses read (``bits`` says why);
+        ``bits`` ``(ndev,)``.
+    """
+    from jax.sharding import PartitionSpec as P
+
+    spec = P(force.axis_name)
+
+    def f(
+        positions: Array,
+        masses: Array,
+        counts: Array,
+        ids: Array,
+        params: Any = None,
+        force_scale: Optional[Array] = None,
+    ) -> tuple[Array, ...]:
+        extra = () if force_scale is None else (force_scale,)
+
+        def body(x: Array, m: Array, n: Array, i: Array, p: Any, *fb: Array) -> Any:
+            out = force.differentiable_shard(
+                x, m, jnp.minimum(n[0], x.shape[0]), i, *fb, params=p
+            )
+            return (out[0], out[1].reshape(1), *out[3:])
+
+        return jax.shard_map(
+            body,
+            mesh=force.mesh,
+            in_specs=(spec, spec, spec, spec, P(), *((spec,) * len(extra))),
+            out_specs=(spec, spec, *((spec,) * len(extra))),
+            check_vma=False,
+        )(positions, masses, counts, ids, params, *extra)
+
+    return f

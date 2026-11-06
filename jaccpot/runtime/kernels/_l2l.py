@@ -895,6 +895,13 @@ def _prepare_solidfmm_downward_sweep(
             stage_t0,
             locals_updated,
         )
+        if cross_reverse is not None:
+            # The gradient's cascade and L2P differentiate the LOCAL centres: their
+            # custom_vjps return cotangents shaped like the local tree, and the
+            # imported rows (read by the merged M2L only) take theirs through the
+            # seam (zero: their owners account for them). The same values -- the
+            # forward is unchanged; production (cross_reverse=None) keeps the merge.
+            centers = centers[:n_local_nodes]
         if detail_diag_mode == "m2l_only":
             return _detail_downward_data(locals_updated)
 

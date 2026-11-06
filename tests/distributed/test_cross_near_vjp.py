@@ -71,7 +71,7 @@ from jaccpot.pallas.nearfield_leafpair_csr_direct_vjp import (
 )
 from jaccpot.softening import pair_factors, softening_params_from_sq, support_factor
 
-pytestmark = pytest.mark.slow
+pytestmark = [pytest.mark.slow, pytest.mark.distributed_grad]
 
 AXIS = "gpus"
 W = 4  # leaf width
