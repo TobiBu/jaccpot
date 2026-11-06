@@ -158,3 +158,23 @@ class TestLanePlatformScope:
         solver = _solver(route=True, use_pallas=True)
         with lane_platform_scope(solver):
             assert env_flag("JACCPOT_NEARFIELD_LEAFPAIR_CSR", True) is False
+
+
+@pytest.mark.skipif(jax.default_backend() != "cpu", reason="the CPU route")
+def test_the_providers_rectangle_guard_reads_the_route_outside_its_entry_points():
+    """A caller's own verdict (Odisseo's ``E_pot`` calls ``capacity_ok`` after the
+    prepare) must see the route's CSR lane: with ``use_pallas=True`` on the route the
+    rectangle is not a correctness condition, as inside the prepare."""
+    from jaccpot.runtime.fused_provider import FusedForceProvider
+
+    def guard(route, use_pallas):
+        solver = _solver(route=route, use_pallas=use_pallas)
+        return FusedForceProvider(
+            solver, leaf_size=16, max_order=4
+        ).rectangle_guard_active
+
+    for key in CPU_ROUTE_PALLAS_ENV:
+        assert key not in os.environ
+    assert guard(True, True) is False
+    assert guard(True, False) is True
+    assert guard(False, True) is True

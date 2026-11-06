@@ -853,9 +853,14 @@ class FusedForceProvider:
         """
         from jaccpot.nearfield._fast_lane import _nearfield_csr_lane_active
 
-        return not _nearfield_csr_lane_active(
-            bool(getattr(self.engine, "use_pallas", False))
-        )
+        from ._lane_platform import lane_platform_scope
+
+        # the CPU route's interpret-mode CSR switches (a property: not an entry
+        # point the decorator scopes, and read by callers' own verdicts)
+        with lane_platform_scope(self.engine):
+            return not _nearfield_csr_lane_active(
+                bool(getattr(self.engine, "use_pallas", False))
+            )
 
     @property
     def theta_value(self) -> float:
@@ -1257,6 +1262,7 @@ class FusedForceProvider:
             force_params=force,
         )
 
+    @on_lane_platform
     def capacity_ok(self, topology: FusedTopology) -> Array:
         """The step's capacity verdict, as the fused scan folds it into its carry.
 
