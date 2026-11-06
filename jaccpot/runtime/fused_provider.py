@@ -575,14 +575,17 @@ class FusedForceProvider:
         """Re-plan from what a failed segment needed and re-prepare at its start.
 
         The segment retry. The WALK: the unnamed flat-walk caps grow to cover
-        ``needs`` (``engine._replan_walk_caps_from_needs``), and the peak wavefront
+        ``needs`` (``engine._replan_walk_caps_from_needs``; a far list the walk
+        filled exactly grows by at least one pair), and the peak wavefront
         the segment needed is kept so the retraced walk's queue covers it. The
         TREE (cell leaves): the leaf capacity, the level-loop depth bound and the
         level loops' batch width grow to what the segment's trees needed
         (``engine._replan_tree_from_needs``; the width is registered for the shape
-        the re-prepare builds). Either or both; then the lane is prepared again at
-        the segment's START. A grown leaf capacity is a new template shape, so
-        the re-run's programs have new keys and compile.
+        the re-prepare builds). Either or both -- or, when neither overflowed, on
+        the pure-JAX near field the rectangle layout's static target-block cap
+        doubles (``engine._replan_rectangle_blocks``) --; then the lane is
+        prepared again at the segment's START. A grown leaf capacity is a new
+        template shape, so the re-run's programs have new keys and compile.
 
         Parameters
         ----------
@@ -608,9 +611,10 @@ class FusedForceProvider:
         -------
         Optional[tuple[FusedForceProvider, FusedTopology]]
             The provider and topology for the re-run, or ``None`` when nothing can
-            be re-planned (neither a walk flag nor a tree overflow a bound can
-            fix, a named cap overflowed -- then not even the tree --, not the flat
-            walk): the caller raises.
+            be re-planned (neither a walk flag, a far list filled exactly, nor a
+            tree overflow a bound can fix, and on the pure-JAX near field the
+            rectangle layout's cap at its last rung; a named cap overflowed --
+            then not even the tree --; not the flat walk): the caller raises.
         """
         from ._level_shapes import widen_registered_levels
         from .fused_topology import NEEDS_FIELDS
@@ -622,7 +626,15 @@ class FusedForceProvider:
         # both: a segment can outgrow the walk caps and the tree at once
         walk = engine._replan_walk_caps_from_needs(needs)
         tree = False if walk_only else engine._replan_tree_from_needs(needs)
-        if not (walk or tree):
+        # the pure-JAX near field's rectangle layout, which no need records: when
+        # neither the walk nor the tree overflowed, its rows are what failed
+        # (`OVERFLOW_RECTANGLE`; the CSR lane never reads it)
+        rectangle = (
+            not (walk or tree)
+            and self.rectangle_guard_active
+            and engine._replan_rectangle_blocks()
+        )
+        if not (walk or tree or rectangle):
             return None
         replanned_peak = int(
             (engine._strict_fused_validated_caps or {}).get("peak_wavefront", 0)

@@ -92,6 +92,29 @@ def _unaliased(tree: Any) -> Any:
     return jax.tree_util.tree_map(_once, tree)
 
 
+def _far_list_full(needs: dict, validated: dict) -> bool:
+    """Whether a segment's walk filled the far list exactly, without a flag.
+
+    Parameters
+    ----------
+    needs : dict
+        ``capacity_guard.WALK_NEEDS_FIELDS`` -> the segment's running maximum.
+    validated : dict
+        The engine's ``_strict_fused_validated_caps``.
+
+    Returns
+    -------
+    bool
+        No far overflow, and the far pairs needed (directed) reach the validated
+        compact far-pair capacity: the verdict's structural check
+        (``far_count >= width``) failed on a list that held every pair.
+    """
+    cap = int(validated.get("compact_far_pair_capacity") or 0)
+    return bool(
+        not needs["far_overflow"] and cap > 0 and int(needs["far_needed"]) >= cap
+    )
+
+
 class StrictRunMixin(_EngineBase):
     def _strict_far_pairs_ride_outside_the_scan(self, prepared: Any) -> bool:
         """Whether ``strict_run_v2`` keeps the state's far list out of the scan.
@@ -142,8 +165,9 @@ class StrictRunMixin(_EngineBase):
         -------
         bool
             Whether anything was re-planned. ``False`` -- the caller raises -- when
-            no walk flag fired (the failure was some other capacity), when a list
-            that overflowed was NAMED by the caller (a deliberate bound, never
+            no walk flag fired and the far list was not filled exactly (the failure
+            was some other capacity), when a list that overflowed (or a far list
+            that filled) was NAMED by the caller (a deliberate bound, never
             widened), or when the lane is not the flat walk.
 
         Raises
@@ -166,7 +190,17 @@ class StrictRunMixin(_EngineBase):
         validated = dict(getattr(self, "_strict_fused_validated_caps", None) or {})
         if not validated.get("flat_walk"):
             return False
-        if not (n["far_overflow"] or n["near_overflow"] or n["queue_overflow"]):
+        # a far list the walk filled EXACTLY: no walk flag fires (every pair fitted),
+        # but the verdict reads a full far buffer as saturated (an overflow
+        # saturates the count to the buffer's length, so the two look alike:
+        # `capacity_guard.fused_state_capacity_ok`), and the segment failed. It
+        # needs one more slot -- before, it was re-planned to the same width and
+        # the run raised (N = 512 collapsing cube, leaf 256, far list 64 of 64,
+        # FUP 2026-11-06)
+        far_full = _far_list_full(n, validated)
+        if not (
+            n["far_overflow"] or n["near_overflow"] or n["queue_overflow"] or far_full
+        ):
             return False
         if self._walk_overflowed_a_named_cap(needs):
             return False
@@ -203,6 +237,16 @@ class StrictRunMixin(_EngineBase):
             )
             if ovf and lower:
                 grown = max(grown, min(2 * cap, limit))
+            if kind == "far" and far_full and grown <= needed:
+                # the headroom rounded back to the full width (or the limit): one
+                # pair more, the width even
+                if needed + 2 > limit:
+                    raise RuntimeError(
+                        flat_walk_list_limit_message(
+                            kind, f"fills {needed} directed entries", limit=limit
+                        )
+                    )
+                grown = needed + 2
             validated[key] = int(grown)
         peak = max(int(validated.get("peak_wavefront") or 0), n["peak_wavefront"])
         if n["queue_overflow"]:
@@ -237,9 +281,50 @@ class StrictRunMixin(_EngineBase):
         n = dict(zip(WALK_NEEDS_FIELDS, (int(v) for v in needs)))
         validated = getattr(self, "_strict_fused_validated_caps", None) or {}
         return bool(
-            (n["far_overflow"] and validated.get("far_named"))
+            (
+                (n["far_overflow"] or _far_list_full(n, validated))
+                and validated.get("far_named")
+            )
             or (n["near_overflow"] and validated.get("near_edge_named"))
         )
+
+    def _replan_rectangle_blocks(self) -> bool:
+        """Double the rectangle near-field layout's static target-block cap.
+
+        The pure-JAX near field (``use_pallas=False``: the fused lane's CPU
+        route, pre-Ampere cards) reads the rectangle layout: per target leaf at
+        most ``max_blocks_per_leaf`` blocks of neighbour rows, sized at the eager
+        prepare from the START's densest row (``_eager_static_target_block_cap``,
+        kept on the engine and only ever grown). A segment whose rows outgrow it
+        fails the verdict (``OVERFLOW_RECTANGLE``) with no walk or tree flag, and
+        a re-prepare at the same start sized it the same again: the run raised
+        (N = 512 collapsing cube, leaf 64, rows of 71 against 64; FUP,
+        2026-11-06). The needs carry no row length, so the cap doubles, the
+        retries continuing while each re-run gets further
+        (:meth:`_segment_retry_next`), up to the ladder's last rung.
+
+        Returns
+        -------
+        bool
+            Whether the cap grew (``False`` when none was resolved yet, or it is at
+            the ladder's last rung).
+        """
+        from jaccpot.runtime._large_n_env import _large_n_env_config_for_fmm
+        from jaccpot.runtime._large_n_pipeline import _STATIC_TARGET_BLOCKS_CAP_ATTR
+
+        cached = int(getattr(self, _STATIC_TARGET_BLOCKS_CAP_ATTR, 0) or 0)
+        if cached <= 0:
+            return False
+        options = tuple(
+            _large_n_env_config_for_fmm(self).get(
+                "static_target_blocks_cap_options", ()
+            )
+        )
+        ceiling = max((int(v) for v in options), default=2 * cached)
+        if cached >= ceiling:
+            return False
+        setattr(self, _STATIC_TARGET_BLOCKS_CAP_ATTR, min(2 * cached, ceiling))
+        return True
 
     def _replan_tree_from_needs(self, needs: np.ndarray) -> bool:
         """Grow the cell-leaf tree's bounds to what a failed segment's trees needed.
