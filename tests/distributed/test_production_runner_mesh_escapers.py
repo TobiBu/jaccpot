@@ -260,6 +260,41 @@ def test_nobody_escaping_is_the_run_without_escapers():
         assert plan == b.plan
 
 
+def _trap(state_rows, params):
+    """A weak harmonic trap toward the origin (module level: one object)."""
+    return -params["k"] * state_rows[:, 0]
+
+
+def _trap_potential(state_rows, params):
+    """Its potential per unit mass."""
+    return 0.5 * params["k"] * jnp.sum(state_rows[:, 0] ** 2, axis=1)
+
+
+def test_the_external_field_acts_on_the_escapers():
+    """With an external field on every row (the tail too) and its potential in the
+    energy (``W_ext`` of the escapers included), the ledgered energy stays within
+    the no-split control's noise."""
+    state, masses = _system()
+    params = {"k": 0.02}
+
+    def run(escapers):
+        runner = _direct_runner(escapers)
+        runner.external_acceleration_fn = _trap
+        runner.external_potential_fn = _trap_potential
+        return runner.run(
+            state, masses, dt=DT, num_steps=STEPS * SEGMENTS, external_params=params
+        )
+
+    res, control = run(EscaperPolicy(R_ESCAPE, R_RETURN)), run(None)
+    rows = [e.diagnostics for e in res.edges]
+    assert rows[-1]["n_escapers"] >= 4 and res.escapers["transfers"] > 1
+    worst = max(abs(r["energy_ledgered_drift"]) for r in rows)
+    raw = max(abs(r["energy_drift"]) for r in rows)
+    noise = max(abs(e.diagnostics["energy_drift"]) for e in control.edges)
+    assert worst < max(5.0 * noise, 3e-6), (worst, noise)
+    assert raw > 10.0 * worst
+
+
 def test_a_tail_that_outgrows_its_capacity_is_grown(direct_run, monkeypatch):
     if direct_run["migrate"]:
         pytest.skip("one layout is enough")
