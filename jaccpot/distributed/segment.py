@@ -96,6 +96,7 @@ decomposition and the repartition's per-device body.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -534,6 +535,93 @@ def _total_acceleration(
         value = field_fn(state_rows) if params is None else field_fn(state_rows, params)
         acc = acc + jnp.asarray(value, state_rows.dtype)
     return jnp.where(live_rows[:, None], acc, jnp.zeros((), acc.dtype))
+
+
+def _tail_drifted(tail_state: Array, tail_acc: Array, dt: Array) -> Array:
+    """The escaper tail's drift, the bound rows' association (one device).
+
+    Parameters
+    ----------
+    tail_state : Array
+        ``(cap_e, 2, 3)``.
+    tail_acc : Array
+        ``(cap_e, 3)`` its total acceleration.
+    dt : Array
+        The step.
+
+    Returns
+    -------
+    Array
+        ``(cap_e, 2, 3)`` at the drifted positions.
+    """
+    position = tail_state[:, 0] + tail_state[:, 1] * dt + 0.5 * tail_acc * dt**2
+    return tail_state.at[:, 0].set(position)
+
+
+def _with_coupling(
+    acc_self: Array,
+    positions: Array,
+    masses: Array,
+    live_rows: Array,
+    tail_state: Array,
+    tail_masses: Array,
+    tail_count: Array,
+    field_fn: Optional[Callable[..., Array]],
+    params: Any,
+    G: float,
+    axis_name: str,
+) -> tuple:
+    """The escaper coupling after the tree force (one device, inside ``shard_map``).
+
+    ``M_b`` and ``X_b`` over the mesh from the bound rows' positions, the
+    escapers' monopole acceleration and the bound rows' uniform pull
+    (:mod:`jaccpot.distributed.escapers`). Ordered after the tree force by a
+    barrier, as the single card's (``strict_run_v2(live_rows=)``): scheduled
+    before it, its rows would sit in the arena through the force's peak.
+
+    Parameters
+    ----------
+    acc_self : Array
+        ``(cap, 3)`` the bound rows' self-gravity.
+    positions : Array
+        ``(cap, 3)`` their positions.
+    masses : Array
+        ``(cap,)``.
+    live_rows : Array
+        ``(cap,)`` boolean.
+    tail_state : Array
+        ``(cap_e, 2, 3)`` this device's escapers.
+    tail_masses : Array
+        ``(cap_e,)``.
+    tail_count : Array
+        ``(1,)`` escapers on this device.
+    field_fn : Optional[Callable[..., Array]]
+        The external field.
+    params : Any
+        Its parameters.
+    G : float
+        The gravitational constant.
+    axis_name : str
+        The mesh axis.
+
+    Returns
+    -------
+    tuple
+        ``(acc_self + a_u, tail total acceleration)``; the first in the state's
+        dtype (the field is added to it by the caller, as without escapers).
+    """
+    from jaccpot.distributed.escapers import bound_frame_shard, coupling_shard
+
+    acc_self, positions = jax.lax.optimization_barrier((acc_self, positions))
+    cap_e = int(tail_state.shape[0])
+    tail_live = jnp.arange(cap_e) < jnp.minimum(tail_count[0], cap_e)
+    m_b, x_b = bound_frame_shard(positions, masses, live_rows, axis_name)
+    a_u, a_e, _ = coupling_shard(
+        m_b, x_b, tail_state[:, 0], tail_masses, tail_live, G, axis_name
+    )
+    dtype = positions.dtype
+    acc = jnp.asarray(acc_self, dtype) + a_u.astype(dtype)[None, :]
+    return acc, _total_acceleration(field_fn, a_e, tail_state, params, tail_live)
 
 
 def _direct_potential_shard(
@@ -1002,6 +1090,11 @@ class MeshSegmentRunner:
                     jnp.asarray(np.asarray(splitters, np.uint64)),
                     NamedSharding(mesh, P()),
                 )
+        #: the escaper tail (``ProductionRunner(mesh=..., escapers=...)``;
+        #: :mod:`jaccpot.distributed.escapers`): ``None``, or the escapers and
+        #: the gravitational constant of their coupling (:meth:`attach_escapers`)
+        self.tail: Any = None
+        self.coupling_G: Optional[float] = None
         self.force.prepare(state.state[:, 0], state.masses, state.count)
         if getattr(self.force, "needs_cross_sizing", False):
             # cross_caps="auto": the start force at ``state`` measures what every
@@ -1113,6 +1206,39 @@ class MeshSegmentRunner:
         )
 
     # ------------------------------------------------------------------
+    # The escaper tail (MESC).
+    # ------------------------------------------------------------------
+
+    def attach_escapers(self, tail: Any, G: float) -> None:
+        """Run the escapers of ``tail`` with the bound rows (opt-in, MESC).
+
+        While the tail holds an escaper, the start and segment programs carry it
+        (:mod:`jaccpot.distributed.escapers`: the monopole coupling after the tree
+        force, two small all-gathers per step); while it is empty they are the
+        default programs, unchanged.
+
+        Parameters
+        ----------
+        tail : Any
+            The :class:`~jaccpot.distributed.escapers.EscaperTail`.
+        G : float
+            The gravitational constant of the coupling (the force's own).
+        """
+        self.tail = tail
+        self.coupling_G = float(G)
+
+    @property
+    def tail_on(self) -> bool:
+        """Whether the programs carry the escaper tail (it holds an escaper).
+
+        Returns
+        -------
+        bool
+            ``False`` without a tail or with an empty one.
+        """
+        return self.tail is not None and int(self.tail.total) > 0
+
+    # ------------------------------------------------------------------
     # The programs.
     # ------------------------------------------------------------------
 
@@ -1156,22 +1282,31 @@ class MeshSegmentRunner:
             self.donate,
             *self._migration_key(kind),
         )
+        # the escaper tail: its programs only while it holds an escaper (the key
+        # of every other program is as it was)
+        tail = kind != "measure" and self.tail_on
+        if tail:
+            key = key + ("escapers", int(self.tail.cap), self.coupling_G)
         cache = _programs_of(self.force.cache_owner)
         program = cache.get(key)
         if program is not None:
             return program, False
         if kind == "segment" and self.migrate:
-            program = self._build_migrating_segment(int(steps))
+            program = self._build_migrating_segment(int(steps), tail=tail)
         elif kind == "segment":
-            program = self._build_segment(int(steps))
+            program = self._build_segment(int(steps), tail=tail)
         else:
             # "measure": the start force without the external field (the cross
             # needs do not depend on it, and its parameters are not known yet)
-            program = self._build_start(int(steps), with_field=kind == "start")
+            program = self._build_start(
+                int(steps), with_field=kind == "start", tail=tail
+            )
         cache[key] = program
         return program, True
 
-    def _build_start(self, steps: int, *, with_field: bool = True) -> Callable:
+    def _build_start(
+        self, steps: int, *, with_field: bool = True, tail: bool = False
+    ) -> Callable:
         """The start force: the total acceleration at the current positions.
 
         Parameters
@@ -1180,6 +1315,8 @@ class MeshSegmentRunner:
             Unused (the key's slot).
         with_field : bool
             Add the external field (``False``: the cross sizing's measurement).
+        tail : bool
+            Carry the escaper tail (:meth:`attach_escapers`).
 
         Returns
         -------
@@ -1188,7 +1325,9 @@ class MeshSegmentRunner:
             needs)``; the acceleration flat, the rest replicated. Under the
             criterion (:attr:`scale_carry`) ``(state, masses, count, ids, f_b,
             params) -> (acceleration, f_b, ok, bits, needs)``: the force's
-            thresholds from the given ``f_b``, and the force's own.
+            thresholds from the given ``f_b``, and the force's own. With the
+            tail, ``(tail_state, tail_masses, tail_count)`` before ``params`` and
+            the tail's acceleration after ``needs``.
         """
         from jaccpot.runtime.fused_topology import overflow_ok
 
@@ -1197,6 +1336,7 @@ class MeshSegmentRunner:
         # cache, and a closure over ``self`` would keep its state's buffers alive
         axis, force = self.axis_name, self.force
         field_fn = self.external_acceleration_fn if with_field else None
+        coupling_G = self.coupling_G
 
         def start_force(
             state: Array,
@@ -1205,6 +1345,7 @@ class MeshSegmentRunner:
             ids: Array,
             params: Any,
             f_b: Optional[Array],
+            tail_in: tuple = (),
         ) -> tuple:
             cap = int(state.shape[0])
             live = jnp.minimum(count[0], cap)
@@ -1217,6 +1358,21 @@ class MeshSegmentRunner:
                 **({} if f_b is None else {"force_scale": f_b}),
             )
             acc_self, bits, needs = out[:3]
+            tail_out: tuple = ()
+            if tail_in:
+                assert coupling_G is not None
+                acc_self, tail_acc = _with_coupling(
+                    acc_self,
+                    state[:, 0, :],
+                    masses,
+                    live_rows,
+                    *tail_in,
+                    field_fn,
+                    params,
+                    coupling_G,
+                    axis,
+                )
+                tail_out = (tail_acc,)
             acc = _total_acceleration(field_fn, acc_self, state, params, live_rows)
             # a count above the shard's capacity cannot be real particles
             ok = overflow_ok(bits) & (count[0] <= cap)
@@ -1224,19 +1380,32 @@ class MeshSegmentRunner:
                 ok, bits, needs, jnp.int32(0), axis_name=axis
             )
             if f_b is None:
-                return acc, ok, bits, needs
-            return acc, out[3], ok, bits, needs
+                return (acc, ok, bits, needs) + tail_out
+            return (acc, out[3], ok, bits, needs) + tail_out
 
         spec = P(axis)
-        if not self.scale_carry:
+        if tail:
+            nfb = 1 if self.scale_carry else 0
+
+            def body(*args: Any) -> tuple:  # type: ignore[misc]
+                state, masses, count, ids = args[:4]
+                f_b = args[4] if nfb else None
+                tail_in = tuple(args[4 + nfb : 7 + nfb])
+                return start_force(
+                    state, masses, count, ids, args[-1], f_b, tail_in
+                )
+
+            in_specs: tuple = (spec,) * (7 + nfb) + (P(),)
+            out_specs: tuple = (spec,) * (1 + nfb) + (P(), P(), P(), spec)
+        elif not self.scale_carry:
 
             def body(
                 state: Array, masses: Array, count: Array, ids: Array, params: Any
             ) -> tuple:
                 return start_force(state, masses, count, ids, params, None)
 
-            in_specs: tuple = (spec, spec, spec, spec, P())
-            out_specs: tuple = (spec, P(), P(), P())
+            in_specs = (spec, spec, spec, spec, P())
+            out_specs = (spec, P(), P(), P())
         else:
 
             def body(  # type: ignore[misc]
@@ -1261,13 +1430,17 @@ class MeshSegmentRunner:
             )
         )
 
-    def _build_segment(self, steps: int) -> Callable:
+    def _build_segment(self, steps: int, *, tail: bool = False) -> Callable:
         """``steps`` velocity-Verlet steps as one program, state and acceleration donated.
 
         Parameters
         ----------
         steps : int
             Steps of the scan (static).
+        tail : bool
+            Carry the escaper tail (:meth:`attach_escapers`): ``(tail_state,
+            tail_acceleration, tail_masses, tail_count)`` after ``dt`` (the first
+            two donated), the new tail state and acceleration after ``done``.
 
         Returns
         -------
@@ -1290,6 +1463,8 @@ class MeshSegmentRunner:
         )
         needs_size = int(force.needs_size)
         scale_carry = self.scale_carry
+        coupling_G = self.coupling_G
+        nfb = 1 if scale_carry else 0
 
         def segment(
             state0: Array,
@@ -1300,7 +1475,12 @@ class MeshSegmentRunner:
             ids: Array,
             dt: Array,
             params: Any,
+            tail_rows: tuple = (),
+            tail_carry: tuple = (),
         ) -> tuple:
+            # the escaper tail (``tail``): its masses and counts are constant
+            # through the segment (``tail_rows``), its state and acceleration ride
+            # the carry (``tail_carry``)
             cap = int(state0.shape[0])
             live = jnp.minimum(count[0], cap)
             live_rows = jnp.arange(cap) < live
@@ -1320,6 +1500,29 @@ class MeshSegmentRunner:
                     **({"force_scale": carry[6]} if scale_carry else {}),
                 )
                 acc_self, bits_new, needs_new = out[:3]
+                tail_next: tuple = ()
+                if tail_rows:
+                    assert coupling_G is not None
+                    tail_now, tail_acc_now = carry[6 + nfb :]
+                    tail_position = _tail_drifted(tail_now, tail_acc_now, dt)
+                    acc_self, tail_acc_new = _with_coupling(
+                        acc_self,
+                        state_position[:, 0, :],
+                        masses,
+                        live_rows,
+                        tail_position,
+                        *tail_rows,
+                        field_fn,
+                        params,
+                        coupling_G,
+                        axis,
+                    )
+                    tail_next = (
+                        _velocity_verlet_kick_drifted(
+                            tail_position, tail_acc_now, tail_acc_new, dt
+                        ),
+                        tail_acc_new,
+                    )
                 acc_new = _total_acceleration(
                     field_fn, acc_self, state_position, params, live_rows
                 )
@@ -1343,6 +1546,7 @@ class MeshSegmentRunner:
                     jnp.where(ok, jnp.maximum(needs, needs_new), needs),
                     done + ok_new.astype(jnp.int32),
                     *out[3:],
+                    *tail_next,
                 ), None
 
             init = (
@@ -1353,15 +1557,47 @@ class MeshSegmentRunner:
                 jnp.zeros((needs_size,), jnp.int32),
                 jnp.int32(0),
                 *(() if fb0 is None else (fb0,)),
+                *tail_carry,
             )
             carry_f, _ = jax.lax.scan(step, init, None, length=int(steps))
             state_f, acc_f, ok, bits, needs, done = carry_f[:6]
-            return (state_f, acc_f, *carry_f[6:]) + _mesh_verdict(
-                ok, bits, needs, done, axis_name=axis
+            if not tail_rows:
+                return (state_f, acc_f, *carry_f[6:]) + _mesh_verdict(
+                    ok, bits, needs, done, axis_name=axis
+                )
+            return (
+                (state_f, acc_f, *carry_f[6 : 6 + nfb])
+                + _mesh_verdict(ok, bits, needs, done, axis_name=axis)
+                + tuple(carry_f[6 + nfb :])
             )
 
         spec = P(axis)
-        if not scale_carry:
+        if tail:
+
+            def body(*args: Any) -> tuple:  # type: ignore[misc]
+                # (state, acc, [f_b,] masses, count, ids, dt, tail_state,
+                # tail_acc, tail_masses, tail_count, params)
+                state0, acc0 = args[:2]
+                fb0 = args[2] if nfb else None
+                masses, count, ids, dt = args[2 + nfb : 6 + nfb]
+                t_state, t_acc, t_masses, t_count = args[6 + nfb : 10 + nfb]
+                return segment(
+                    state0,
+                    acc0,
+                    fb0,
+                    masses,
+                    count,
+                    ids,
+                    dt,
+                    args[-1],
+                    (t_masses, t_count),
+                    (t_state, t_acc),
+                )
+
+            in_specs: tuple = (spec,) * (5 + nfb) + (P(),) + (spec,) * 4 + (P(),)
+            out_specs: tuple = (spec,) * (2 + nfb) + (P(),) * 4 + (spec, spec)
+            donate: tuple = tuple(range(2 + nfb)) + (6 + nfb, 7 + nfb)
+        elif not scale_carry:
 
             def body(
                 state0: Array,
@@ -1374,9 +1610,9 @@ class MeshSegmentRunner:
             ) -> tuple:
                 return segment(state0, acc0, None, masses, count, ids, dt, params)
 
-            in_specs: tuple = (spec, spec, spec, spec, spec, P(), P())
-            out_specs: tuple = (spec, spec, P(), P(), P(), P())
-            donate: tuple = (0, 1)
+            in_specs = (spec, spec, spec, spec, spec, P(), P())
+            out_specs = (spec, spec, P(), P(), P(), P())
+            donate = (0, 1)
         else:
 
             def body(  # type: ignore[misc]
@@ -1423,7 +1659,7 @@ class MeshSegmentRunner:
             return ()
         return ("migrate", int(self.migration_cap or 0), self._migration_cubic)
 
-    def _build_migrating_segment(self, steps: int) -> Callable:
+    def _build_migrating_segment(self, steps: int, *, tail: bool = False) -> Callable:
         """:meth:`_build_segment` with the migration between each drift and force.
 
         The step: the drift, the migration to the fixed cuts
@@ -1439,6 +1675,11 @@ class MeshSegmentRunner:
         ----------
         steps : int
             Steps of the scan (static).
+        tail : bool
+            Carry the escaper tail (:meth:`attach_escapers`; it never migrates):
+            ``(tail_state, tail_acceleration, tail_masses, tail_count)`` after
+            ``dt`` (the first two donated), the new tail state and acceleration
+            after ``migrated``.
 
         Returns
         -------
@@ -1462,6 +1703,8 @@ class MeshSegmentRunner:
         scale_carry = self.scale_carry
         mcap, cubic = int(self.migration_cap or 0), self._migration_cubic
         zero_bits = jnp.uint32(0)
+        coupling_G = self.coupling_G
+        nfb = 1 if scale_carry else 0
 
         def segment(
             state0: Array,
@@ -1473,7 +1716,10 @@ class MeshSegmentRunner:
             splitters: Array,
             dt: Array,
             params: Any,
+            tail_rows: tuple = (),
+            tail_carry: tuple = (),
         ) -> tuple:
+            # the escaper tail as in _build_segment (it never migrates)
             cap = int(state0.shape[0])
 
             def step(carry: tuple, _: Any) -> tuple:
@@ -1510,6 +1756,29 @@ class MeshSegmentRunner:
                     **({"force_scale": fb_now} if scale_carry else {}),
                 )
                 acc_self, bits_new, needs_new = out[:3]
+                tail_next: tuple = ()
+                if tail_rows:
+                    assert coupling_G is not None
+                    tail_now, tail_acc_now = carry[11 + nfb :]
+                    tail_position = _tail_drifted(tail_now, tail_acc_now, dt)
+                    acc_self, tail_acc_new = _with_coupling(
+                        acc_self,
+                        state_position[:, 0, :],
+                        masses,
+                        live_rows,
+                        tail_position,
+                        *tail_rows,
+                        field_fn,
+                        params,
+                        coupling_G,
+                        axis,
+                    )
+                    tail_next = (
+                        _velocity_verlet_kick_drifted(
+                            tail_position, tail_acc_now, tail_acc_new, dt
+                        ),
+                        tail_acc_new,
+                    )
                 acc_new = _total_acceleration(
                     field_fn, acc_self, state_position, params, live_rows
                 )
@@ -1535,6 +1804,7 @@ class MeshSegmentRunner:
                     jnp.where(ok, jnp.maximum(need_m, info["need"]), need_m),
                     moved_m + jnp.where(ok_mig, info["moved"], 0),
                     *out[3:],
+                    *tail_next,
                 ), None
 
             init = (
@@ -1550,18 +1820,61 @@ class MeshSegmentRunner:
                 jnp.int32(0),
                 jnp.int32(0),
                 *(() if fb0 is None else (fb0,)),
+                *tail_carry,
             )
             carry_f, _ = jax.lax.scan(step, init, None, length=int(steps))
             state_f, acc_f, masses_f, ids_f, count_f = carry_f[:5]
             ok, bits, needs, done, need_m, moved_m = carry_f[5:11]
+            if not tail_rows:
+                return (
+                    (state_f, acc_f, *carry_f[11:], masses_f, ids_f, count_f)
+                    + _mesh_verdict(ok, bits, needs, done, axis_name=axis)
+                    + (need_m, moved_m)
+                )
             return (
-                (state_f, acc_f, *carry_f[11:], masses_f, ids_f, count_f)
+                (state_f, acc_f, *carry_f[11 : 11 + nfb], masses_f, ids_f, count_f)
                 + _mesh_verdict(ok, bits, needs, done, axis_name=axis)
                 + (need_m, moved_m)
+                + tuple(carry_f[11 + nfb :])
             )
 
         spec = P(axis)
         rows = 5 if not scale_carry else 6
+        if tail:
+
+            def body(*args: Any) -> tuple:  # type: ignore[misc]
+                # (state, acc, [f_b,] masses, ids, count, splitters, dt,
+                # tail_state, tail_acc, tail_masses, tail_count, params)
+                state0, acc0 = args[:2]
+                fb0 = args[2] if nfb else None
+                masses0, ids0, count0, splitters, dt = args[2 + nfb : 7 + nfb]
+                t_state, t_acc, t_masses, t_count = args[7 + nfb : 11 + nfb]
+                return segment(
+                    state0,
+                    acc0,
+                    fb0,
+                    masses0,
+                    ids0,
+                    count0,
+                    splitters,
+                    dt,
+                    args[-1],
+                    (t_masses, t_count),
+                    (t_state, t_acc),
+                )
+
+            return jax.jit(
+                jax.shard_map(
+                    body,
+                    mesh=self.mesh,
+                    in_specs=(spec,) * rows + (P(), P()) + (spec,) * 4 + (P(),),
+                    out_specs=(spec,) * rows + (P(),) * 6 + (spec, spec),
+                    check_vma=False,
+                ),
+                donate_argnums=(
+                    tuple(range(rows)) + (rows + 2, rows + 3) if self.donate else ()
+                ),
+            )
         if not scale_carry:
 
             def body(
@@ -2290,6 +2603,10 @@ class MeshSegmentRunner:
         state = self.state
         key = external_field_key(self.external_acceleration_fn, external_params)
         start = state.acceleration is None or key != self._acceleration_key
+        # the escaper tail (attach_escapers): carried while it holds an escaper
+        tail = self.tail if self.tail_on else None
+        if tail is not None and tail.acceleration is None:
+            start = True
         if k == 0 and not start:
             return SegmentReport(segment=n, steps=0, start_force=False)
         if k > 0 and self.migrate and self.migration_cap is None:
@@ -2330,6 +2647,13 @@ class MeshSegmentRunner:
                 rows_host = tuple(
                     mp_host_copy(a) for a in (state.masses, state.ids, state.count)
                 )
+        tail_host: Any = None
+        if tail is not None and k > 0 and self.donate and retry_enabled:
+            # the segment consumes the tail's start state too
+            tail_host = mp_host_copy(tail.state)
+        tail_state = None if tail is None else tail.state
+        tail_acc = None if tail is None else tail.acceleration
+        tail_new: tuple = ()
         state_new = state.state
         rows_new = (state.masses, state.ids, state.count)
         acc_new: Optional[Array] = None
@@ -2351,7 +2675,15 @@ class MeshSegmentRunner:
                     state.count,
                     state.ids,
                     *scale_now,
+                    *(
+                        ()
+                        if tail is None
+                        else (tail_state, tail.masses, tail.count)
+                    ),
                 )
+                if tail is not None:
+                    tail_acc = outputs[-1]
+                    outputs = outputs[:-1]
                 acceleration = outputs[0]
                 # the start force's own f_b: the segment's first thresholds
                 scale_now = tuple(outputs[1:-3])
@@ -2360,6 +2692,8 @@ class MeshSegmentRunner:
                 done_h = 0
                 if k == 0 and bool(ok_h):
                     acc_new, scale_new = acceleration, scale_now
+                    if tail is not None:
+                        tail_new = (tail_state, tail_acc)
                     break
             if k > 0 and (not start or bool(ok_h)) and self.migrate:
                 outputs = self._call(
@@ -2374,7 +2708,15 @@ class MeshSegmentRunner:
                     state.count,
                     self.splitters,
                     jnp.asarray(dt, state.state.dtype),
+                    *(
+                        ()
+                        if tail is None
+                        else (tail_state, tail_acc, tail.masses, tail.count)
+                    ),
                 )
+                if tail is not None:
+                    tail_new = tuple(outputs[-2:])
+                    outputs = outputs[:-2]
                 state_new, acc_new = outputs[:2]
                 scale_new = tuple(outputs[2:-9])
                 rows_new = tuple(outputs[-9:-6])
@@ -2398,7 +2740,15 @@ class MeshSegmentRunner:
                     state.count,
                     state.ids,
                     jnp.asarray(dt, state.state.dtype),
+                    *(
+                        ()
+                        if tail is None
+                        else (tail_state, tail_acc, tail.masses, tail.count)
+                    ),
                 )
+                if tail is not None:
+                    tail_new = tuple(outputs[-2:])
+                    outputs = outputs[:-2]
                 state_new, acc_new = outputs[:2]
                 scale_new = tuple(outputs[2:-4])
                 # the segment's one host sync
@@ -2460,6 +2810,10 @@ class MeshSegmentRunner:
             acceleration = acc_new = None
             scale_new = ()
             state_new = state.state
+            tail_new, tail_acc = (), None
+            if consumed and tail is not None:
+                assert tail_host is not None
+                tail_state = put_host_copy(tail_host, tail.masses.sharding)
             if consumed:
                 assert start_host is not None
                 sharding = state.masses.sharding
@@ -2507,6 +2861,10 @@ class MeshSegmentRunner:
             acceleration=acc_new,
             force_scale=scale_new[0] if scale_new else None,
         )
+        if tail is not None:
+            self.tail = dataclasses.replace(
+                tail, state=tail_new[0], acceleration=tail_new[1]
+            )
         self._acceleration_key = key
         if k > 0:
             self.segment_index = n
@@ -2601,6 +2959,8 @@ class MeshSegmentRunner:
             ``positions``, ``velocities``, ``masses`` and (once computed)
             ``acceleration`` and, under the criterion, ``force_scale`` as ``(N,
             ...)`` arrays indexed by global id, plus ``owner`` (device per id).
+            With an escaper tail (:meth:`attach_escapers`) its rows are included
+            (their ``force_scale`` zero: escapers have no thresholds).
 
         Raises
         ------
@@ -2614,11 +2974,6 @@ class MeshSegmentRunner:
             [np.arange(d * cap, d * cap + int(count[d])) for d in range(self.ndev)]
         )
         live_ids = host_value(s.ids)[rows]
-        n = int(count.sum())
-        if live_ids.min() < 0 or len(np.unique(live_ids)) != n or live_ids.max() >= n:
-            raise ValueError(
-                "particle identity broken: ids are not exactly 0..N-1 once"
-            )
         packed = host_value(s.state)[rows]
         arrays = {
             "positions": packed[:, 0],
@@ -2629,13 +2984,47 @@ class MeshSegmentRunner:
             arrays["acceleration"] = host_value(s.acceleration)[rows]
         if s.force_scale is not None:
             arrays["force_scale"] = host_value(s.force_scale)[rows]
+        owners = rows // cap
+        tail = self.tail
+        if tail is not None and int(tail.total) > 0:
+            t_count = host_value(tail.count)
+            t_rows = np.concatenate(
+                [
+                    np.arange(d * tail.cap, d * tail.cap + int(t_count[d]))
+                    for d in range(self.ndev)
+                ]
+            )
+            t_state = host_value(tail.state)[t_rows]
+            extra = {
+                "positions": t_state[:, 0],
+                "velocities": t_state[:, 1],
+                "masses": host_value(tail.masses)[t_rows],
+            }
+            if "acceleration" in arrays:
+                extra["acceleration"] = (
+                    np.full_like(t_state[:, 0], np.nan)
+                    if tail.acceleration is None
+                    else host_value(tail.acceleration)[t_rows]
+                )
+            if "force_scale" in arrays:
+                extra["force_scale"] = np.zeros(
+                    t_rows.shape, arrays["force_scale"].dtype
+                )
+            arrays = {k: np.concatenate([v, extra[k]]) for k, v in arrays.items()}
+            live_ids = np.concatenate([live_ids, host_value(tail.ids)[t_rows]])
+            owners = np.concatenate([owners, t_rows // tail.cap])
+        n = int(live_ids.shape[0])
+        if live_ids.min() < 0 or len(np.unique(live_ids)) != n or live_ids.max() >= n:
+            raise ValueError(
+                "particle identity broken: ids are not exactly 0..N-1 once"
+            )
         out = {}
         for name, arr in arrays.items():
             full = np.empty((n,) + arr.shape[1:], arr.dtype)
             full[live_ids] = arr
             out[name] = full
         owner = np.empty(n, np.int32)
-        owner[live_ids] = rows // cap
+        owner[live_ids] = owners
         out["owner"] = owner
         return out
 

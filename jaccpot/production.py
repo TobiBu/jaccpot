@@ -390,9 +390,15 @@ class MeshSegmentEdge(SegmentEdge):
     layout : Any
         The :class:`~jaccpot.distributed.segment.MeshState` at the edge (``None``
         once kept in :attr:`RunResult.edges`).
+    escapers : Any
+        The escaper tail (``ProductionRunner(mesh=..., escapers=...)``;
+        :class:`~jaccpot.distributed.escapers.EscaperTail`), whose rows
+        :meth:`state_host` and :meth:`gather` include; ``None`` without the
+        escaper path (or once kept in :attr:`RunResult.edges`).
     """
 
     layout: Any = None
+    escapers: Any = None
 
     def state_host(self) -> np.ndarray:
         """The state by global id, as a host array (one gather of the state and ids).
@@ -436,7 +442,7 @@ class MeshSegmentEdge(SegmentEdge):
 
         if self.layout is None:
             raise RuntimeError(_CONSUMED_EDGE)
-        return gather_by_id(self.layout, names)
+        return gather_by_id(self.layout, names, tail=self.escapers)
 
 
 @dataclass
@@ -1695,13 +1701,17 @@ class ProductionRunner:
         snapshots, restart files and the result see the CALLER's row order; the
         in-scan ``step_callback`` and the external field see the internal one
         (tree rows first: a per-particle field works unchanged, a field with
-        per-row parameters does not). One card only, not in the gradient mode.
+        per-row parameters does not). Not in the gradient mode. On the mesh
+        (``mesh=``; wave 3, MESC; :mod:`jaccpot.distributed.escapers`) the
+        escapers live in a tail of their own next to the bound rows' layout, so
+        the decomposition, cuts, boxes and capacities are the bound rows'; the
+        same semantics, ledger and diagnostics, gathered by id.
 
     Raises
     ------
     ValueError
         If ``settings.carry`` is not ``"particles"``, or with ``mesh`` and a
-        ``step_callback``, a ``scheme`` or ``escapers``.
+        ``step_callback`` or a ``scheme``.
     TypeError
         If ``escapers`` is not an :class:`~jaccpot.escapers.EscaperPolicy`.
 
@@ -1787,14 +1797,6 @@ class ProductionRunner:
                 raise ValueError(
                     "the multi-GPU mode runs the built-in KDK only (its scheme seam "
                     "is the multi-node plan's I2); pass scheme=None"
-                )
-            if escapers is not None:
-                raise ValueError(
-                    "the escaper path runs on one card (mesh=None): on the mesh the "
-                    "escapers would need their own rows outside the domain "
-                    "decomposition (the cuts and the migration are equal-count over "
-                    "every row), the coupling's centre of mass as one more "
-                    "all-reduce per step, and a split-aware restart; not built"
                 )
             self.mesh = mesh if isinstance(mesh, MeshRunConfig) else MeshRunConfig(mesh)
             self._mesh_backend = MeshBackend(self)
