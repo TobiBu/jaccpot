@@ -682,3 +682,51 @@ tails unclipped through the normal runner path (`jaccpot/escapers.py`, `jaccpot/
 - **`EscaperRunner` removed** (one home for the logic: the runner). It was unreleased (only on `mn/wave2`).
 
 ### Gates
+
+1. **CPU synthetic** (`tests/integration/strict/test_escapers.py`; N = 1024 Plummer clipped at 3, 8 fliers at 6-12x
+   the escape speed just inside `r_escape` 5, one particle at 5.3 falling in past `r_return` 4.5; CSR interpret,
+   leaf 16, p4, theta 0.6, dt 1e-3, 6 x 10 steps, energy every edge; numbers from `mn-scratch/esc/exp/gate1.py`):
+   escapers 1, 1, 2, 4, 9, 9, 8 (transfers at four edges, the returner back at the last).
+
+   | MAC | max \|`energy_ledgered_drift`\| | no-split control \|dE/E0\| | raw \|dE/E0\| | largest jump / \|E0\| | max momentum drift (control) |
+   |---|---|---|---|---|---|
+   | `dehnen` | 1.47e-5 | 1.56e-5 | 5.2e-5 | 5.3e-5 | 4.3e-9 (7.8e-9) |
+   | `dehnen_error` | 1.7e-7 | 2.3e-7 | 5.9e-5 | 5.3e-5 | 7.6e-9 (7.3e-9) |
+
+   The ledgered energy sits at the control's own noise; without the ledger the jumps dominate. One split scan
+   program and one energy program across every split (the row count is traced). A restart written mid-run and a
+   chained run (`restart_from=RunResult`) equal the run in one go bitwise, ledger included; the callbacks and the
+   result see the caller's rows. Tests: 9 in shard `integration-strict-esc` (new; one worker per MAC).
+2. **Nobody escaping == escapers off, bitwise** (state and every diagnostics field the off run has): by
+   construction (the default programs run while `n_b == N`), and also for the split program itself:
+   `strict_run_v2(live_rows=N)` against `live_rows=None`, 2 x 10 steps, state and self-acceleration bitwise under
+   `dehnen` and `dehnen_error` (`exp/forced_split.py`).
+3. **GPU, 2.2e6 unclipped Sgr** (A2's downsample: all 182,859 tail particles plus a stride-49 bulk; preset galaxy,
+   softening 1.5e-3, dt 1e-3, `r_escape` 80; card 4, shared host, functional only):
+   - geometric theta 0.7, 2 x 5 steps: escapers 182,832 -> 182,834, `energy_ledgered_drift` -5.0e-7, momentum
+     drift 1.7e-10, retries 0 (A2's prototype: 182,828 -> 182,833, within 5.6e-7; the runner's start re-checks the
+     membership from the tree rows' own centre, hence the few more at step 0);
+   - `dehnen_error` (the preset's MAC), 4 x 5 steps: 182,832 -> 182,837, |ledgered drift| <= 5.8e-7, momentum
+     drift 3.8e-10, retries 0.
+4. **GPU, the FULL 1e8 unclipped Sgr** (100,000,001 rows, 45.7 Mpc box; the plain prepare raises `TreeDepthError`
+   at 68 levels, A2) through `ProductionRunner(escapers=EscaperPolicy(80))`, geometric theta 0.7, 3 x 5 steps,
+   `donate_input`, energy every edge, one A100 40 GB (card 4), `XLA_PYTHON_CLIENT_PREALLOCATE=true`, fraction 0.95:
+   runs, no retry; escapers 182,878 -> 182,889; `energy_ledgered_drift` <= 2.7e-7; momentum drift 2.9e-10.
+
+   | 1e8, same card and environment | peak | B / particle |
+   |---|---|---|
+   | escapers OFF, every particle beyond 80 pulled onto r = 80 (same N) | 20.09 GiB | 215.7 |
+   | escapers ON, unclipped (first wiring, cacb7823) | 22.28 GiB | 239.2 |
+   | + coupling after the tree force (barrier) and the order on the host (3c28bdec) | 21.44 GiB | 230.2 |
+   | + the old split's buffers freed at a re-split (7d196bd8, the tip's code) | **21.07 GiB** | **226.2** |
+
+   The remaining +10.5 B/p (+4.9 %) is not attributed (candidates: the tree masses' `where` and the live mask in
+   the step, the split energy program). The trajectory and diagnostics are identical across the three escaper
+   rows. With `PREALLOCATE=false` (fraction 0.75 or 0.95) BOTH arms failed to place one 16-17 GiB block (the
+   escaper arm in the start program, the clipped baseline in the scan): A1's BFC placement sensitivity at 1e8,
+   not the split.
+5. **CI.** New shard `integration-strict-esc` (`test_shards.py`, `ci.yml`, 25 min cap); `test_escapers.py` left
+   `integration-strict-a2`, whose run with it took 27.9 min at `-n 2` on a loaded host (now 4.7 min alone).
+6. **HoreKa** (prepared, not run): `bench/slurm/escaper_timing.sbatch` + `bench/escaper_timing.py`: step time,
+   per-edge cost and peak memory at 1e8, escapers on / off (clipped) / on-but-nobody-escapes, both MACs, and the
+   energy every 10th edge.
