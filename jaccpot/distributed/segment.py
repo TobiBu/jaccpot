@@ -1336,7 +1336,7 @@ class MeshSegmentRunner:
         # cache, and a closure over ``self`` would keep its state's buffers alive
         axis, force = self.axis_name, self.force
         field_fn = self.external_acceleration_fn if with_field else None
-        coupling_G = self.coupling_G
+        coupling_G = self.coupling_G if tail else None
 
         def start_force(
             state: Array,
@@ -1461,7 +1461,7 @@ class MeshSegmentRunner:
         )
         needs_size = int(force.needs_size)
         scale_carry = self.scale_carry
-        coupling_G = self.coupling_G
+        coupling_G = self.coupling_G if tail else None
         nfb = 1 if scale_carry else 0
 
         def segment(
@@ -1701,7 +1701,7 @@ class MeshSegmentRunner:
         scale_carry = self.scale_carry
         mcap, cubic = int(self.migration_cap or 0), self._migration_cubic
         zero_bits = jnp.uint32(0)
-        coupling_G = self.coupling_G
+        coupling_G = self.coupling_G if tail else None
         nfb = 1 if scale_carry else 0
 
         def segment(
