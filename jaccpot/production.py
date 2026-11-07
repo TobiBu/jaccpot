@@ -85,7 +85,7 @@ import numpy as np
 from yggdrax import TreeDepthError
 
 from jaccpot.escapers import EscaperPolicy
-from jaccpot.scheme import check_scheme, scheme_record
+from jaccpot.scheme import check_mesh_scheme, check_scheme, scheme_record
 
 __all__ = [
     "DIAGNOSTICS",
@@ -1676,9 +1676,12 @@ class ProductionRunner:
         :class:`jaccpot.scheme.SplitStepScheme` -- ``nornax.schemes.LeapfrogKDK``
         is the KDK, bitwise to the built-in -- does each step's drift and kick
         around its one force evaluation inside the segment scan; segments,
-        retries, restarts and diagnostics stay the runner's. One card only (the
-        multi-GPU mode takes one in I2), and not in the gradient mode. Anything
-        else is a ``TypeError`` (:func:`jaccpot.scheme.check_scheme`).
+        retries, restarts and diagnostics stay the runner's. In the multi-GPU
+        mode (I2) it runs on each device's rows inside the segment's
+        ``shard_map``: a rowwise scheme as it is, any other through its mesh
+        form (:class:`jaccpot.scheme.ShardedSplitStepScheme`) or refused
+        (:func:`jaccpot.scheme.check_mesh_scheme`). Not in the gradient mode.
+        Anything else is a ``TypeError`` (:func:`jaccpot.scheme.check_scheme`).
     escapers : Optional[EscaperPolicy]
         ``None`` (the default): every particle is in the tree, every program as
         without it. A :class:`jaccpot.escapers.EscaperPolicy`: the ESCAPER PATH
@@ -1701,7 +1704,8 @@ class ProductionRunner:
     ------
     ValueError
         If ``settings.carry`` is not ``"particles"``, or with ``mesh`` and a
-        ``step_callback``, a ``scheme`` or ``escapers``.
+        ``step_callback``, ``escapers`` or a scheme that is neither rowwise nor
+        has a mesh form.
     TypeError
         If ``escapers`` is not an :class:`~jaccpot.escapers.EscaperPolicy`.
 
@@ -1787,11 +1791,9 @@ class ProductionRunner:
                     "segment runner's scan streams nothing); use a callback at the "
                     "segment edges"
                 )
-            if scheme is not None:
-                raise ValueError(
-                    "the multi-GPU mode runs the built-in KDK only (its scheme seam "
-                    "is the multi-node plan's I2); pass scheme=None"
-                )
+            # I2: the scheme runs on each device's rows; one whose step reads
+            # other rows must have a mesh form
+            check_mesh_scheme(scheme)
             if escapers is not None:
                 raise ValueError(
                     "the escaper path runs on one card (mesh=None): on the mesh the "
