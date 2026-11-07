@@ -26,6 +26,12 @@ be ``None`` or equal them. The external field and potential see one device's
 ``(cap, 2, 3)`` rows -- the single card's ``field(state, params)`` contract
 restricted to rows, so a per-particle field works unchanged.
 
+**The integration scheme** (``ProductionRunner(scheme=...)``, multi-node plan I2)
+goes to the segment runner, which calls its ``open_step`` / ``close_step`` on each
+device's rows inside the segment (:func:`jaccpot.scheme.check_mesh_scheme`: rowwise,
+or with a mesh form); ``None`` keeps the built-in programs. The restart file records
+it as the single card's does.
+
 **Diagnostics.** The moments are the single card's fp64 reductions over the flat
 sharded arrays: a padding row has zero mass and zero velocity, so every moment is
 exact without a mask. The energy is ``K + W_self + W_ext`` from
@@ -717,6 +723,7 @@ class MeshBackend:
             migrate=bool(self.config.migrate),
             migration_cap=self.config.migration_cap if cap is None else int(cap),
             splitters=migration.get("splitters"),
+            scheme=self.runner.scheme,
         )
 
     def _cap(self, num_particles: int) -> int:
@@ -1424,6 +1431,7 @@ class MeshBackend:
             _template_shapes,
         )
         from jaccpot.runtime.strict_carry import external_field_key
+        from jaccpot.scheme import scheme_record
 
         refuse_in_multiprocess("save_restart", _MULTIPROCESS_RESTART)
         runner = self.runner
@@ -1522,6 +1530,9 @@ class MeshBackend:
                 "tail_grown": int(split.get("tail_grown", 0)),
                 "recuts": int(split.get("recuts", 0)),
             }
+        if runner.scheme is not None:
+            # only with a scheme: built-in files stay byte for byte (as one card)
+            meta["scheme"] = scheme_record(runner.scheme)
         # UTF-8 bytes, as the single card's
         arrays["meta"] = np.frombuffer(json.dumps(meta).encode("utf-8"), np.uint8)
         _atomic_savez(str(path), **arrays)
@@ -1576,6 +1587,7 @@ class MeshBackend:
         """
         from jaccpot.production import _key_digest, _qualname
         from jaccpot.runtime.strict_carry import external_field_key
+        from jaccpot.scheme import scheme_record
 
         saved = meta.get("mesh")
         if saved is None:
@@ -1593,6 +1605,9 @@ class MeshBackend:
         ]
         if dt_value != float(meta["counters"]["dt"]):
             mismatches.append("dt")
+        if meta.get("scheme") != scheme_record(runner.scheme):
+            # another scheme continues correctly, but not bitwise
+            mismatches.append("scheme")
         field = runner.external_acceleration_fn
         external = meta["external"]
         key = external_field_key(field, external_arg)

@@ -157,6 +157,30 @@ def harmonic_potential(state_rows, params):
     return 0.5 * params["k"] * jnp.sum(d * d, axis=1)
 
 
+class KDK:
+    """``nornax.schemes.LeapfrogKDK``'s expressions (I2: ``M2_SCHEME=kdk``)."""
+
+    rowwise = True
+
+    def key(self):
+        return ("test.KDK", 1)
+
+    def open_step(self, state, acceleration, dt):
+        return state.at[:, 0].set(
+            state[:, 0] + state[:, 1] * dt + 0.5 * acceleration * dt**2
+        )
+
+    def close_step(self, state_open, acceleration, acceleration_new, dt):
+        return state_open.at[:, 1].set(
+            state_open[:, 1] + 0.5 * (acceleration + acceleration_new) * dt
+        )
+
+
+def _scheme():
+    """``M2_SCHEME``: ``kdk`` runs the runner with :class:`KDK` (I2), else none."""
+    return KDK() if os.environ.get("M2_SCHEME") == "kdk" else None
+
+
 def direct_runner(n: int) -> dict:
     """``ProductionRunner(mesh=...)`` with ``DirectMeshForce`` (N = 256, float64).
 
@@ -183,6 +207,7 @@ def direct_runner(n: int) -> dict:
             segment=SegmentConfig(steps=2, diagnostics_every_energy=1, **segment),
             external_acceleration_fn=harmonic,
             external_potential_fn=harmonic_potential,
+            scheme=_scheme(),
             mesh=MeshRunConfig(
                 mesh,
                 cap=int(np.ceil(1.6 * num / n)),
@@ -424,6 +449,7 @@ def fused_runner(n: int) -> dict:
         solver,
         settings=settings,
         segment=SegmentConfig(steps=2, diagnostics_every_energy=1),
+        scheme=_scheme(),
         mesh=MeshRunConfig(
             mesh,
             cap=int(num / n * 1.3),

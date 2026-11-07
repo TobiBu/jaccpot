@@ -111,6 +111,7 @@ from jaccpot.distributed.fused import AXIS_NAME, reduce_flag_across_mesh
 from jaccpot.distributed.multiprocess import host_copy as mp_host_copy
 from jaccpot.distributed.multiprocess import host_value, mesh_sum, put_host_copy
 from jaccpot.runtime.dtypes import require_x64
+from jaccpot.scheme import scheme_close_shard, scheme_open_shard
 
 __all__ = [
     "DirectMeshForce",
@@ -1013,6 +1014,13 @@ class MeshSegmentRunner:
     splitters : Any
         ``migrate=True``: the cuts of ``state``'s ownership, ``(ndev - 1,)``
         ``uint64`` (a restart's); ``None`` repartitions here to choose them.
+    scheme : Any
+        The integration scheme (multi-node plan I2): ``None`` (the default) is
+        the built-in velocity-Verlet expressions, program for program; a
+        :class:`jaccpot.scheme.SplitStepScheme` (``nornax.schemes.LeapfrogKDK``)
+        replaces the drift and the kick of every segment step on each device's
+        rows (:func:`jaccpot.scheme.check_mesh_scheme`: rowwise, or with a mesh
+        form). Its ``key()`` joins the segment programs' compile keys.
 
     Raises
     ------
@@ -1035,8 +1043,10 @@ class MeshSegmentRunner:
         migrate: bool = False,
         migration_cap: Any = "auto",
         splitters: Any = None,
+        scheme: Any = None,
     ) -> None:
         from jaccpot.distributed.rollout import _mesh_devices
+        from jaccpot.scheme import check_mesh_scheme
 
         require_x64("MeshSegmentRunner")
         self.mesh = mesh
@@ -1047,6 +1057,8 @@ class MeshSegmentRunner:
             raise ValueError(f"{rows} rows do not split over {self.ndev} devices")
         self.cap = rows // self.ndev
         self.force = force
+        #: the integration scheme (``None``: the built-in KDK expressions)
+        self.scheme = check_mesh_scheme(scheme)
         #: mac_type='dehnen_error': f_b rides the carry (the force says so)
         self.scale_carry = bool(getattr(force, "scale_carry", False))
         self.external_acceleration_fn = external_acceleration_fn
@@ -1122,6 +1134,7 @@ class MeshSegmentRunner:
         axis_name: str = AXIS_NAME,
         migrate: bool = False,
         migration_cap: Any = "auto",
+        scheme: Any = None,
     ) -> "MeshSegmentRunner":
         """A runner on the fused lane's force (the template route).
 
@@ -1165,6 +1178,8 @@ class MeshSegmentRunner:
             As in the constructor.
         migration_cap : Any
             As in the constructor.
+        scheme : Any
+            As in the constructor.
 
         Returns
         -------
@@ -1203,6 +1218,7 @@ class MeshSegmentRunner:
             axis_name=axis_name,
             migrate=migrate,
             migration_cap=migration_cap,
+            scheme=scheme,
         )
 
     # ------------------------------------------------------------------
@@ -1223,7 +1239,20 @@ class MeshSegmentRunner:
             The :class:`~jaccpot.distributed.escapers.EscaperTail`.
         G : float
             The gravitational constant of the coupling (the force's own).
+
+        Raises
+        ------
+        ValueError
+            With a ``scheme``: the tail's rows are stepped by the built-in KDK
+            (``_tail_drifted`` and its kick), not by the scheme (I2; routing them
+            through it is a follow-up).
         """
+        if self.scheme is not None:
+            raise ValueError(
+                "the escaper tail is stepped by the built-in KDK; a runner with a "
+                "scheme runs without escapers (routing the tail through the scheme "
+                "is not built)"
+            )
         self.tail = tail
         self.coupling_G = float(G)
 
@@ -1281,6 +1310,11 @@ class MeshSegmentRunner:
             tuple((tuple(np.shape(x)), str(jnp.result_type(x))) for x in leaves),
             self.donate,
             *self._migration_key(kind),
+            *(
+                ()
+                if self.scheme is None or kind != "segment"
+                else (("scheme", self.scheme.key()),)
+            ),
         )
         # the escaper tail: its programs only while it holds an escaper (the key
         # of every other program is as it was)
@@ -1463,6 +1497,7 @@ class MeshSegmentRunner:
         scale_carry = self.scale_carry
         coupling_G = self.coupling_G if tail else None
         nfb = 1 if scale_carry else 0
+        scheme = self.scheme
 
         def segment(
             state0: Array,
@@ -1486,10 +1521,15 @@ class MeshSegmentRunner:
             def step(carry: tuple, _: Any) -> tuple:
                 state_now, acc_now, ok, bits, needs, done = carry[:6]
                 # strict_run_v2's `_advance`: drift, force, kick of the drifted state
-                position_new = (
-                    state_now[:, 0] + state_now[:, 1] * dt + 0.5 * acc_now * dt**2
-                )
-                state_position = state_now.at[:, 0].set(position_new)
+                if scheme is None:
+                    position_new = (
+                        state_now[:, 0] + state_now[:, 1] * dt + 0.5 * acc_now * dt**2
+                    )
+                    state_position = state_now.at[:, 0].set(position_new)
+                else:
+                    state_position = scheme_open_shard(
+                        scheme, state_now, acc_now, dt, live_rows, axis
+                    )
                 out = force.shard(
                     state_position[:, 0, :],
                     masses,
@@ -1524,9 +1564,14 @@ class MeshSegmentRunner:
                 acc_new = _total_acceleration(
                     field_fn, acc_self, state_position, params, live_rows
                 )
-                state_new = _velocity_verlet_kick_drifted(
-                    state_position, acc_now, acc_new, dt
-                )
+                if scheme is None:
+                    state_new = _velocity_verlet_kick_drifted(
+                        state_position, acc_now, acc_new, dt
+                    )
+                else:
+                    state_new = scheme_close_shard(
+                        scheme, state_position, acc_now, acc_new, dt, live_rows, axis
+                    )
                 # Fold only what a step entered ON the trajectory needed. After the
                 # first failure the forces come from truncated or misaligned lists,
                 # the states leave the trajectory, and what their trees and walks
@@ -1703,6 +1748,7 @@ class MeshSegmentRunner:
         zero_bits = jnp.uint32(0)
         coupling_G = self.coupling_G if tail else None
         nfb = 1 if scale_carry else 0
+        scheme = self.scheme
 
         def segment(
             state0: Array,
@@ -1724,10 +1770,21 @@ class MeshSegmentRunner:
                 state_now, acc_now, masses, ids, count = carry[:5]
                 ok, bits, needs, done, need_m, moved_m = carry[5:11]
                 fb_now = carry[11] if scale_carry else None
-                position_new = (
-                    state_now[:, 0] + state_now[:, 1] * dt + 0.5 * acc_now * dt**2
-                )
-                state_position = state_now.at[:, 0].set(position_new)
+                if scheme is None:
+                    position_new = (
+                        state_now[:, 0] + state_now[:, 1] * dt + 0.5 * acc_now * dt**2
+                    )
+                    state_position = state_now.at[:, 0].set(position_new)
+                else:
+                    # the rows this device owned at the step's start
+                    state_position = scheme_open_shard(
+                        scheme,
+                        state_now,
+                        acc_now,
+                        dt,
+                        jnp.arange(cap) < jnp.minimum(count[0], cap),
+                        axis,
+                    )
                 state_position, acc_now, masses, ids, count, fb_now, info = (
                     migrate_shard(
                         state_position,
@@ -1780,9 +1837,14 @@ class MeshSegmentRunner:
                 acc_new = _total_acceleration(
                     field_fn, acc_self, state_position, params, live_rows
                 )
-                state_new = _velocity_verlet_kick_drifted(
-                    state_position, acc_now, acc_new, dt
-                )
+                if scheme is None:
+                    state_new = _velocity_verlet_kick_drifted(
+                        state_position, acc_now, acc_new, dt
+                    )
+                else:
+                    state_new = scheme_close_shard(
+                        scheme, state_position, acc_now, acc_new, dt, live_rows, axis
+                    )
                 # fold only what a step entered ON the trajectory needed (see
                 # _build_segment); a declined migration ends the trajectory before
                 # its force

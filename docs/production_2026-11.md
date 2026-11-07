@@ -883,3 +883,52 @@ bound rows' headroom on escapers. A separate tail touches none of them; the boun
   all sat in the last id chunk, so on one device's tail). Harmless at these sizes; a rebalance of the tail would only
   matter at ~1e6+ escapers per device.
 - Multi-process restart files remain refused (M3); the gradient mode and `scheme=` are refused on the mesh as before.
+
+## I2 — the multi-GPU runner takes nornax's scheme; a sharded force-model protocol (wave 4, 2026-11-07)
+
+The multi-node plan's I2 (decision U1: nornax owns the integration schemes, jaccpot the force, decomposition and
+orchestration). Branch `i2/sharded-scheme` in jaccpot, nornax and Odisseo (from main 4ace6562, nornax main
+9003651, Odisseo `jaccpot-integration` c43f4a0).
+
+### What was built
+1. **jaccpot: the scheme on the mesh.** `ProductionRunner(..., mesh=MeshRunConfig(...), scheme=...)` no longer
+   refuses a scheme. `MeshSegmentRunner(scheme=)` (and `MeshSegmentRunner.fused(scheme=)`) calls the scheme's
+   `open_step` / `close_step` on each device's `(cap, 2, 3)` rows inside the segment's `shard_map`, in the plain
+   and the migrating segment (the opening half sees the rows owned at the step's start, the closing half the rows
+   owned after the migration). `scheme=None` takes the old inline expressions, so the default programs are the
+   same; `("scheme", key)` joins the segment programs' compile key only when a scheme is set. The mesh restart
+   file records `meta["scheme"]` only with a scheme; a restore under another scheme lists `"scheme"` in the
+   mismatches.
+2. **jaccpot: schemes that read other rows.** `jaccpot.scheme.ShardedSplitStepScheme` is a scheme's MESH FORM:
+   `open_step_shard` / `close_step_shard` with `live_rows` and `axis_name`, reducing through collectives whose
+   result is independent of the transport's order (`nornax.sharded.mesh_sum`). `check_mesh_scheme`: rowwise
+   passes, a mesh form passes (and is used, rowwise or not), anything else is a `ValueError` at construction.
+3. **nornax: the protocol** (`nornax/sharded.py`). `ShardedForceModel.shard_accelerations(positions, masses,
+   ids, live_rows, *, carry=None, args=None) -> (acc, carry)` inside `shard_map` (optional `context()`,
+   `shard_potential`); `mesh_sum` / `mesh_moments` (all-gather folded in mesh order); `gather_by_id`,
+   `decompose_rows`, `is_writer` (by-id I/O, writers on process 0); `ShardedDirectSumGravity` (the toy: sources
+   all-gathered and summed in id order); `sharded_split_step_rollout` (the reference driver);
+   `nornax.conformance.check_sharded_force_model` (protocol, shape, padding rows exactly zero, layout
+   independence by id, momentum, an oracle, the `mesh_sum` order, the scheme's rollout on the mesh vs one device).
+   Nothing in nornax imports jaccpot.
+4. **jaccpot implements it:** `jaccpot.distributed.sharded_force.ShardedMeshForce` wraps a prepared
+   `FusedMeshForce` / `DirectMeshForce` (per-device carry: the OR of the overflow bits, the max of the walk needs,
+   `f_b` under `dehnen_error`, `initial_carry()` from the prepare's seed). The runner itself does not go through
+   it (its segment programs call the force directly and stay main's); nornax's drivers and kit do.
+5. **Odisseo:** the `fmm_mesh_runner` lane takes `config.fmm_scheme` as the single-card runner lane does
+   (`runner_scheme`; part of the kept runner's key).
+
+### Gates (CPU unless noted; forced host devices)
+| gate | result |
+|---|---|
+| 1, direct force (`test_production_runner_mesh_scheme.py`, 4 forced devices) | 8 passed: KDK scheme == `scheme=None` bitwise by id (state, every edge's state, gathers, diagnostics) on 2 and 4 devices, repartition and migrate; chained run, restart file (arrays byte-equal to the built-in's file, meta records the scheme) continued bitwise; a retried segment; mesh-form scheme keeps the momentum to 1e-14 and a non-rowwise one without it is refused; `ShardedMeshForce` == the runner's self-gravity |
+| 1, fused force (`test_production_runner_mesh_scheme_fused.py`, 2 forced devices) | 3 passed, bitwise by id incl. `f_b`: geometric MAC with a cross-capacity retry (retries [1,0,0]); geometric MAC, migration, `migration_cap=1` (a buffer retry); `dehnen_error`, migration, 2+2 chained |
+| 2, N processes x 1 device == 1 process x N devices, with the scheme (`test_multiprocess_runtime.py`) | passed: direct runner at 2 and 4 processes (and without the scheme), fused `dehnen` migrating with a cross retry at 2; the KDK arrays also equal the no-scheme arrays (0 differing, both layouts, 2 and 4) |
+| default path: `provider_hlo_identity compare w3-main-cpu i2-tip-cpu` | **PASS 36/36** |
+| default path: mesh programs with `scheme=None`, lowered text main vs tip (2 forced devices; source locations stripped) | IDENTICAL: direct (12 modules), direct migrating (18), fused geometric migrating (597), fused `dehnen_error` migrating (1169) |
+| I1 pins (`integration-strict-scheme`, CI args) | 9 passed (its refusal test now checks the non-rowwise refusal on the mesh: the mesh refusal is gone); the single-card runner code is untouched |
+| 4, nornax `tests/unit/test_sharded.py` | 8 passed (JAX 0.11.2); with `test_conformance.py` 25 passed on JAX 0.10.2. Kit on 2 and 4 devices: layout 0.0, rollout 2 vs 1 device 1.2e-18, 4 vs 1 2.4e-18 |
+| 4, nornax `tests/integration/test_jaccpot_sharded.py` (jaccpot's `ShardedMeshForce(DirectMeshForce)`) | 2 passed: every check (oracle 4.4e-16, rollout 0.0) at 2 and 4 devices; the runner with `LeapfrogKDK` == built-in, 0 differing |
+| 5, Odisseo mesh-lane files at 2 forced devices | 38 passed (new: `fmm_scheme="nornax_kdk"` on the mesh lane == the built-in lane bitwise); suite `-m 'not slow'` 274 passed, 6 skipped, 2 xfailed |
+| 3, GPU (functional; 2 A100s by autocvd, one process; shared host, no timings) | N = 262,144 Plummer (a = 1), galaxy-preset solver, fused mesh force, migration on, 10 x 10 steps at dt 1e-3, energy every edge, PRODUCTION flags (no `--xla_gpu_deterministic_ops`): `dehnen_error` and `dehnen` each: A-vs-A control 0 differing, `LeapfrogKDK` vs both built-in arms 0 differing (state, acceleration, `f_b`, diagnostics), 0 retries, energy drift -3.2e-7 / -2.5e-7 |
+| 6, CI | new gated shard/job `distributed-segment-scheme`; `jaccpot/scheme.py` joins `GATED_PATHS`; `test_shards.py check` rc 0; top-level `tests/unit` guards with `JACCPOT_RUNTIME_TYPECHECK=1` rc 0; nornax solver-tests job lists `test_jaccpot_sharded.py` (skips until its jaccpot pin has I2) |

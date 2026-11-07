@@ -530,9 +530,48 @@ multi-stage schemes are not split steps.
   scheme permuted rows; a scheme that is not rowwise keeps the input order.
 - A restart file records the scheme (`meta["scheme"]`, only when there is one);
   continuing it under another scheme warns `"scheme"` in the mismatches.
-- Refused: the multi-GPU mode (`mesh=`; its seam is I2), the gradient mode (it
-  differentiates the built-in; nornax's `leapfrog_kdk_rollout` over
-  `FusedProviderForce` is the differentiable route), and `strict_run_v2(carry="state")`.
+- Refused: the gradient mode (it differentiates the built-in; nornax's
+  `leapfrog_kdk_rollout` over `FusedProviderForce` is the differentiable route), and
+  `strict_run_v2(carry="state")`.
+
+### On the mesh (multi-node plan I2)
+
+`ProductionRunner(..., mesh=MeshRunConfig(...), scheme=LeapfrogKDK())` runs the
+scheme in the multi-GPU mode too, in both runtimes (one process driving N devices; N
+processes with one device each). Each segment step calls `open_step` / `close_step`
+inside the segment's `shard_map`, on ONE device's `(cap, 2, 3)` rows, padding rows
+included (zero mass, zero velocity, zero acceleration), with or without the
+migration to fixed cuts (the opening half sees the rows the device owned at the
+step's start, the closing half the rows it owns after the migration).
+
+- A `rowwise` scheme (the KDK) runs per shard unchanged and is the built-in mesh
+  runner BITWISE: state, edges, gathers, diagnostics and restart files by id, with
+  repartitions, migration, segment retries, chained runs and restarts, on the direct
+  and the fused force, both MACs (`tests/distributed/test_production_runner_mesh_scheme.py`,
+  `..._scheme_fused.py`; `test_multiprocess_runtime.py`'s scheme cases: 2 and 4
+  processes == one process).
+- A scheme whose step reads other rows (a centre of mass, a global timestep) is not
+  rowwise and must declare a MESH FORM: `jaccpot.scheme.ShardedSplitStepScheme`,
+  i.e. `open_step_shard(state, acceleration, dt, *, live_rows, axis_name)` and
+  `close_step_shard(state_open, acceleration, acceleration_new, dt, *, live_rows,
+  axis_name)`, reducing with collectives whose result does not depend on the
+  transport's reduction order (`nornax.sharded.mesh_sum`: an `all_gather` folded in
+  mesh order). A scheme with a mesh form uses it whether or not it is rowwise. A
+  non-rowwise scheme without one is refused when the runner is built
+  (`jaccpot.scheme.check_mesh_scheme`); on one card it runs as before.
+- `scheme=None` keeps the mesh programs: their lowered text is main's (the
+  segment, start, potential and repartition programs, migrating or not, direct and
+  fused force, both MACs; source locations aside).
+- A scheme together with `escapers=` is refused on the mesh: the escaper tail's rows
+  are stepped by the built-in KDK (routing them through the scheme is a follow-up).
+  One card takes both.
+- The mesh restart file records the scheme as the single card's does; a restore
+  under another scheme lists `"scheme"` in the mismatches and is not bitwise.
+- The force behind nornax's protocol: `jaccpot.distributed.sharded_force.ShardedMeshForce`
+  wraps a prepared mesh force (`FusedMeshForce`, `DirectMeshForce`) as a
+  `nornax.sharded.ShardedForceModel` (per-device carry: the overflow bits, the walk
+  needs and, under `dehnen_error`, `f_b`). The runner does not use it (its programs
+  call the force directly); nornax's drivers and its sharded conformance kit do.
 
 ## Gradient mode (S9 session 2)
 

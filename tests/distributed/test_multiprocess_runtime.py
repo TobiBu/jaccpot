@@ -72,12 +72,17 @@ def test_helpers_are_the_single_process_values(n, tmp_path):
     _assert_same(sp, mp, sp_json, mp_json)
 
 
+@pytest.mark.parametrize("scheme", [None, "kdk"])
 @pytest.mark.parametrize("n", [2, 4])
-def test_direct_force_runner_is_the_single_process_run(n, tmp_path):
+def test_direct_force_runner_is_the_single_process_run(n, scheme, tmp_path):
     """The runner's mesh mode with the direct force: state, acceleration and owner
     by id, every edge's diagnostics (energy, moments) and plan record, every
-    segment report -- equal; restart files refused under several processes."""
-    sp, mp, sp_json, mp_json = _run("direct_runner", n, tmp_path, timeout=900.0)
+    segment report -- equal; restart files refused under several processes. With
+    a scheme too (I2: ``M2_SCHEME=kdk``, the KDK's expressions as a scheme)."""
+    env = None if scheme is None else {"M2_SCHEME": scheme}
+    sp, mp, sp_json, mp_json = _run(
+        "direct_runner", n, tmp_path / str(scheme), env=env, timeout=900.0
+    )
     assert sp_json["restart_refused"] == "one process"
     assert mp_json["restart_refused"] == "refused", mp_json["restart_refused"]
     # the energy is reported at every edge (the mesh-order fold is under test)
@@ -112,6 +117,12 @@ FUSED_CASES = [
         marks=_MANUAL,
     ),
     pytest.param(_TREE_REPLAN, 2, id="dehnen_error-migrate-treereplan-2"),
+    # I2: the runner with a scheme (the KDK's expressions), migrating, re-planned
+    pytest.param(
+        {"M2_MAC": "dehnen", "M2_MIGRATE": "1", "M2_SCHEME": "kdk"},
+        2,
+        id="dehnen-migrate-scheme-2",
+    ),
     # on four devices the A3 start overflows a leaf capacity of 44 already at the
     # prepare (one process or four), so the criterion's 4-process case is the
     # cube with the undersized cross capacity
