@@ -208,3 +208,34 @@ def test_slurm_bound_device_ids(monkeypatch, visible, local_ids, want):
     assert mp.slurm_bound_device_ids() == want
     monkeypatch.delenv("SLURM_LOCALID")
     assert mp.slurm_bound_device_ids() is None  # not a SLURM step
+
+
+ESCAPER_CASES = [
+    pytest.param({}, 2, id="direct-2"),
+    pytest.param({}, 4, id="direct-4"),
+    # the fused lane: minutes of compile a process
+    *(
+        pytest.param(
+            {"MESC_FORCE": "fused", "MESC_MAC": mac},
+            2,
+            id=f"fused-{mac}-2",
+            marks=_MANUAL,
+        )
+        for mac in ("dehnen", "dehnen_error")
+    ),
+]
+
+
+@pytest.mark.parametrize("env,n", ESCAPER_CASES)
+def test_escaper_runner_is_the_single_process_run(env, n, tmp_path):
+    """The escaper path on the mesh (MESC), escapers leaving and returning at
+    several edges, the run continued in memory: state, acceleration and owner by
+    id, the tail's layout, the split and ledger, every edge's diagnostics --
+    equal."""
+    sp, mp, sp_json, mp_json = _run(
+        "escaper_runner", n, tmp_path, env=env, timeout=3600.0 if env else 900.0
+    )
+    counts = [e["diagnostics"]["n_escapers"] for e in mp_json["edges"]]
+    assert counts[0] == 1 and max(counts) > 1, counts
+    assert mp_json["split"]["transfers"] > 1
+    _assert_same(sp, mp, sp_json, mp_json)
