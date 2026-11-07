@@ -1497,7 +1497,7 @@ class MeshSegmentRunner:
         scale_carry = self.scale_carry
         coupling_G = self.coupling_G if tail else None
         nfb = 1 if scale_carry else 0
-        scheme = self.scheme
+        scheme = getattr(self, "scheme", None)  # a stand-in runner has none
 
         def segment(
             state0: Array,
@@ -1748,7 +1748,7 @@ class MeshSegmentRunner:
         zero_bits = jnp.uint32(0)
         coupling_G = self.coupling_G if tail else None
         nfb = 1 if scale_carry else 0
-        scheme = self.scheme
+        scheme = getattr(self, "scheme", None)  # a stand-in runner has none
 
         def segment(
             state0: Array,
