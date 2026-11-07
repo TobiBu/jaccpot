@@ -22,7 +22,8 @@ force with and without the cross hook (the local-only force), and
 The CPU end-to-end pattern and toy size of ``test_mesh_potential.py`` (its ``mac``
 fixture: the large-N profile reached on CPU, the all-gather exchange, the Pallas
 kernels interpreted; N = 2048 uniform cube, leaf 64, p4, eps 1e-2), with a float64
-working dtype. Marker ``distributed_segment``.
+working dtype. Marker ``distributed_segment``, in a job of its own
+(``test-distributed-segment-momentum``: ~5 min of calls on a loaded host).
 
     XLA_FLAGS=--xla_force_host_platform_device_count=2 JAX_PLATFORMS=cpu \\
         JAX_ENABLE_X64=1 pytest tests/distributed/test_mesh_cross_momentum.py -q
