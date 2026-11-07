@@ -737,3 +737,128 @@ tails unclipped through the normal runner path (`jaccpot/escapers.py`, `jaccpot/
 6. **HoreKa** (prepared, not run): `bench/slurm/escaper_timing.sbatch` + `bench/escaper_timing.py`: step time,
    per-edge cost and peak memory at 1e8, escapers on / off (clipped) / on-but-nobody-escapes, both MACs, and the
    energy every 10th edge.
+
+## M1 — symmetric cross-domain forces (#173): no gap, no new transport (wave 4, 2026-11-07)
+
+**Question** (#173, plan M1): does the fused mesh lane lose momentum conservation at domain boundaries? Each cross pair
+has one end on each device. If the two devices evaluate their halves independently, `sum m a` might only cancel to the
+force error. The proposed fix was to evaluate each pair once on an owner device and send the reaction back.
+
+**Answer: the cross terms already cancel to round-off, at the one-card level.** No reaction-return transport was built
+(the brief's Step 0 stop rule). Library code is unchanged; this session adds a test, a CI shard, a HoreKa job and
+docs.
+
+### Why (read in `jaccpot/distributed/cross.py`)
+
+- **The pair set is the same at both ends.** Every device walks the gathered two-sided summary trees from the same
+  seed, `(min(me, d), max(me, d))`, reading only the gathered floats (`_symmetric_walk`). Both ends of every cross pair
+  therefore derive the identical pair set (WP-G G0.1 confirmed it).
+- **Each end evaluates its own half from bitwise-identical shipped data** (`_symmetric_exchange`):
+  - far: the peer's multipole and centre go through M2L into my node's local expansion;
+  - near: the peer's leaf particles go through the cross near term.
+- **One card does exactly the same with its own pairs.** Its directed lists hold each canonical pair once per
+  direction (`_directed_csr_from_canonical`), with the same M2L and near kernels. A cross pair therefore cancels in
+  `sum m a` as well as a local pair does.
+- **Measured: in fp64 the lane conserves momentum to round-off on one card and on the mesh alike** (the table below).
+  The floor is set by summation, not by the expansion. This is presumably because the two directed M2Ls of a pair about
+  the cells' expansion centres are antisymmetric in the total force they exert; that was not derived here.
+
+### Step 0 (measured before building)
+
+Harness: `mn-scratch/m1/exp/step0.py`. The `ProductionRunner` mesh mode (migration on), then at a probe the force with
+and without the cross hook on the same state. The residual is `|sum m a| / sum m |a|` of the total, of the local part
+and of the cross part alone (normalised by its own `sum m |a|`). Accuracy is against an fp64 direct sum.
+
+**Configuration:** Plummer (half the mass, a = 0.3) + exponential disc (R_d 1, z_d 0.1), seed 0; leaf 64, p4,
+theta 0.8, eps 1e-2 (ferrers3); `dehnen_error` at eps 1e-4; dt 1e-3; forced CPU devices with the interpret-mode lane.
+
+**fp64, N = 8192, one force:**
+
+| devices | total | local part | cross part alone | cross share of sum m\|a\| | rel-L2 / p99 / max vs direct |
+|---|---|---|---|---|---|
+| 1 | 3.7e-17 | 3.7e-17 | - | 0 | 4.02e-3 / 6.30e-2 / 0.266 |
+| 2 | 1.9e-17 | 2.2e-17 | 2.6e-17 | 0.57 | 4.02e-3 / 6.30e-2 / 0.266 |
+| 4 | 3.0e-17 | 3.2e-17 | 7.9e-18 | 0.77 | 4.02e-3 / 6.30e-2 / 0.266 |
+
+The cross part is a large share, not a token one. At 4 devices each device has 6.5-7.3k cross far pairs against
+1.8-3.0k local far pairs, and 2.2-2.7k cross near pairs against 1.6-2.7k local near pairs. That is a larger cross share
+than production (1e8 on 4-8 cards: ~1e7 per card, cut surfaces a small fraction of the volume), so the toy runs are the
+harder test. fp32 at 4 devices: total 1.0e-8, cross part alone 1.0e-8, local part 2.4e-9, which is fp32 round-off (one
+A100 card: 1.1e-8).
+
+**GPU, functional** (2.6e5, fp32 working dtype, fp64 state, 1000 steps, 10 x 100; cards via autocvd on the shared host;
+M2G's production flags):
+
+| MAC | cards | per-step total at 100 / 1000 | cross part alone (share) | momentum_drift at 1000 | rel-L2 vs direct (4096 probes) |
+|---|---|---|---|---|---|
+| `dehnen` | 1 (card 5) | 1.1e-8 / 7.6e-9 | - | 2.8e-10 | 2.50e-3 |
+| `dehnen` | 2 (5,6) | 7.9e-9 / 5.9e-9 | 4.0e-9 / 2.0e-9 (part of total) | 6.2e-10 | 2.50e-3 |
+| `dehnen` | 3 (2,5,6) | 2.7e-9 / 3.2e-9 | 2.2e-9 / 7.8e-9 (0.72 / 0.69) | 4.8e-10 | 2.53e-3 |
+| `dehnen_error` | 1 (card 0) | 4.1e-9 / 1.3e-9 | - | 3.22e-10 | 3.34e-4 |
+| `dehnen_error` | 2 (2,5) | 5.1e-9 / 2.5e-9 | 5.0e-9 / 4.5e-9 (0.59 / 0.57) | 3.19e-10 | 3.34e-4 |
+| `dehnen_error` | 3 (0,2,5) | 1.8e-9 / 3.4e-9 | 2.5e-9 / 5.9e-9 (0.72 / 0.69) | 4.65e-10 | 3.35e-4 |
+
+The drifts are a random walk of the per-step fp32 residual (~sqrt(1000) x dt x 1e-8 = 3e-10) on every card count. The
+force accuracy (p99 and max too) is the one card's.
+
+**1000-step drift matrix (CPU, N = 2048, the plan's gate wording):** M1_MATRIX_TABLE
+
+### What this session added
+
+- `tests/distributed/test_mesh_cross_momentum.py`: fp64, 2 forced devices, N = 2048 cube, both MACs. It asserts:
+  - total and cross-part residual < 1e-13 (measured: `dehnen` 1.7e-17 / 4.1e-17, `dehnen_error` 6.5e-17 / 1.2e-16);
+  - cross share > 0.1 (measured 0.52);
+  - each device's cross part non-zero;
+  - control: dropping the cross far pairs on ONE device gives 0.15.
+
+  It runs in a CI job of its own, `distributed-segment-momentum` (20 min cap, ~5 min of calls). With the test inside it,
+  the `distributed-segment` job took 1789 s of its 40 min on this host.
+- `bench/mesh_cross_momentum.py` + `bench/slurm/m1/` (HoreKa, prepared, not run): the same split and `momentum_drift`
+  at 1e7-1e8, galaxy preset, 1 GPU (yardstick), 4 GPUs (one node) and 8 GPUs (two nodes) as N processes x 1 GPU, 200
+  steps. M2G's jobs record `momentum_drift` but not the split.
+- `docs/production.md`, mesh section: "Momentum across devices".
+
+### Gates
+
+1. Momentum: the matrix above. Every device count is in its 1-device class, fp64 and fp32, both MACs.
+2. Force accuracy: identical to one card (fp64 8192 at 1/2/4 devices; GPU 2.6e5 at 1/2/3 cards).
+3. Bitwise:
+   - the 1-device mesh == one card, and N processes == 1 process x N devices: library code unchanged
+     (`git diff 4ace6562 -- jaccpot/` is empty), so the existing pins hold (`test_a2_one_device_segment_is_the_single_card_particle_carry`
+     in `distributed-segment`, run here: 12 passed; the multiprocess shard as on main);
+   - identity: `provider_hlo_identity compare w3-main-cpu m1-tip-cpu` **PASS 36/36**. The mesh programs are unchanged
+     by construction (no library diff).
+4. GPU functional: the table above (2 and 3 cards, 1000 steps, 2.6e5).
+5. CI:
+   - `test_shards.py check` rc 0 (3064 covered);
+   - `distributed-segment` 12 passed (CI args, 2 devices);
+   - top-level `tests/unit/test_*.py` with `JACCPOT_RUNTIME_TYPECHECK=1`: 480 passed, 31 skipped;
+   - pre-commit clean;
+   - yggdrax untouched.
+6. HoreKa: `bench/slurm/m1/` (above).
+
+### What M6 (block steps on the mesh) needs from the cross layout
+
+The canonical-owner design is NOT a prerequisite for M6.
+
+- **Momentum is no reason for it.** Under individual timesteps, a pair whose two ends sit on different rungs is
+  kicked at different times. Momentum then cancels to round-off only across pairs whose ends are kicked together, on
+  one card as on the mesh. An owner-evaluated reaction changes that only if the scheme kicks both ends of a pair
+  together (a mutual block kick, as `jaccpot/mutual/` writes both halves in one kernel). If B2/M6 adopt such a scheme,
+  the owner orientation is already available (last bullet); if they keep the target-centric KDK of the fused lane, the
+  present both-ends evaluation is equivalent.
+- **What M6 does need:**
+  1. **An activity column in the published summary rows** (one more float per row of `_summary_rows`): each device's
+     active nodes at the substep. Because the gathered table is identical everywhere, both ends of a pair still agree,
+     with no extra message, on which pairs are live (target active) and on which rows a sender must ship (the peer's
+     node in the pair is active). This is the active-only exchange: `_rows_by_peer` filtered by the peer's activity bit.
+  2. **Per-level (per-substep-class) cross capacities.** The pair and row counts follow the active fraction, so one
+     capacity set per level, or one sized for the deepest active set plus a re-plan.
+  3. **Source state at the substep.** Inactive particles' predicted positions, or B2's HOLD of the multipoles at the
+     last synchronisation, must be what the summary and the shipped multipoles carry. Otherwise the two ends' pair sets
+     would differ (both must read the same floats).
+  4. The `(target, source)` order of the pair lists (`_in_pair_order`) stays, so an active subset's sums are a function
+     of the pair set (bitwise restarts).
+- **The canonical-pair data M6 can reuse is the walk result itself** (`res.far_a/far_b`, `near_a/near_b`, in the
+  gathered index space). A one-owner orientation would follow from `a < b` on the global `[ndev x S]` index (device,
+  then summary index), which the walk already emits. Nothing has to be stored now.

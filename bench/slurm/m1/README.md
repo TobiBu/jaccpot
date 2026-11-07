@@ -23,14 +23,16 @@ Results: `$H0_ROOT/m1/<run id>/<job>/SUMMARY.md` and every arm's `result.json`. 
 
 ## The jobs
 
-| job | nodes x tasks | arms (each 10 x 100 steps, dt 1e-3, migration on) | `--time` |
+| job | nodes x tasks | arms (each 2 x 100 steps, dt 1e-3, migration on) | `--time` |
 | --- | --- | --- | --- |
-| `node1` | 1 x 4, exclusive | `one_<mac>`: 1 GPU, 1e7 (the one-card yardstick); `mp4_<mac>_1e7`: 4 x 1 GPU at 2.5e6/GPU, both MACs; `mp4_dehnen_error_1e8`: 2.5e7/GPU | 3:00 |
-| `node2` | 2 x 4, exclusive | `mp8_<mac>_1e7`: 8 x 1 GPU at 1.25e6/GPU, both MACs; `mp8_dehnen_error_1e8`: 1.25e7/GPU | 2:30 |
+| `node1` | 1 x 4, exclusive | `one_<mac>`: 1 GPU, 1e7 (the one-card yardstick); `mp4_<mac>_1e7`: 4 x 1 GPU at 2.5e6/GPU, both MACs; `mp4_dehnen_error_1e8`: 2.5e7/GPU | 2:00 |
+| `node2` | 2 x 4, exclusive | `mp8_<mac>_1e7`: 8 x 1 GPU at 1.25e6/GPU, both MACs; `mp8_dehnen_error_1e8`: 1.25e7/GPU | 1:30 |
 
 Per arm (`bench/mesh_cross_momentum.py`): `momentum_drift` at every edge, and at the start and the end the force with
 and without the cross hook on the same state: `|sum m a| / sum m |a|` of the total, of the local part, of the cross
 part alone, and the cross part's share of `sum m |a|` (every number a mesh-order fold of per-device fp64 rows).
+Why a job of its own: `bench/slurm/m2g/` (`multiprocess_gate.py`) records `momentum_drift` at every edge but not the
+per-step local/cross split, which needs the force evaluated twice (with and without the cross hook) on the same state.
 Walls per edge and peak bytes are recorded too (dedicated nodes: they count), but nothing here compares an option.
 
 **What to look for:** the cross part's residual at the local part's level and the total at the `one_<mac>` level
