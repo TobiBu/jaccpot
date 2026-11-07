@@ -28,8 +28,9 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
-import os
 from typing import Any, Callable, Iterator, Optional
+
+from jaccpot._env import env_snapshot
 
 __all__ = ["eager_cached", "eager_jit_cache"]
 
@@ -62,7 +63,8 @@ def eager_jit_cache(cache: dict) -> Iterator[dict]:
 
 def _environment() -> tuple:
     # the functions read JACCPOT_* switches when they trace: part of the key
-    return tuple(sorted((k, v) for k, v in os.environ.items() if k[:8] == "JACCPOT_"))
+    # (with the context's `_env.scoped_env_defaults`, which those reads see too)
+    return tuple(env_snapshot(("JACCPOT_",)).items())
 
 
 def eager_cached(

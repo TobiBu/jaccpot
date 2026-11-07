@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import json
 import math
@@ -1604,6 +1605,35 @@ def _escaper_fields(
     return fields
 
 
+def _on_lane_platform(method: Callable) -> Callable:
+    """Run a runner method in its engine's fused-lane platform scope.
+
+    :func:`jaccpot.runtime._lane_platform.lane_platform_scope`: on the fused
+    lane's CPU route with ``use_pallas=True``, the near field's interpret-mode CSR
+    switches as context-local defaults; a no-op otherwise. Imported at call time
+    (this module imports nothing heavy at import time).
+
+    Parameters
+    ----------
+    method : Callable
+        A :class:`ProductionRunner` method.
+
+    Returns
+    -------
+    Callable
+        The wrapped method.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        from jaccpot.runtime._lane_platform import lane_platform_scope
+
+        with lane_platform_scope(self.engine):
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class ProductionRunner:
     """A long fused-lane run: ``strict_run_v2(carry="particles")`` segments on a host loop.
 
@@ -1807,6 +1837,7 @@ class ProductionRunner:
     # The loop.
     # ------------------------------------------------------------------
 
+    @_on_lane_platform
     def run(
         self,
         state: Any = None,
@@ -2320,6 +2351,7 @@ class ProductionRunner:
     # The gradient mode (S9 session 2).
     # ------------------------------------------------------------------
 
+    @_on_lane_platform
     def gradient_plan(
         self,
         state: Any = None,
@@ -2445,6 +2477,7 @@ class ProductionRunner:
             vars(engine).pop("_strict_particle_last_start", None)
         return recorder.plan(forward)
 
+    @_on_lane_platform
     def value_and_grad(
         self,
         loss: Callable[..., Any],
@@ -2535,6 +2568,7 @@ class ProductionRunner:
     # The energy.
     # ------------------------------------------------------------------
 
+    @_on_lane_platform
     def potential_energy(
         self,
         state: Any,
@@ -2949,6 +2983,7 @@ class ProductionRunner:
     # Restart files.
     # ------------------------------------------------------------------
 
+    @_on_lane_platform
     def save_restart(self, path: Union[str, "os.PathLike"]) -> str:
         """Write the run's position at its last edge to ``path`` (one ``.npz``).
 

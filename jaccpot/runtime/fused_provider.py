@@ -62,6 +62,7 @@ from beartype.typing import Callable, Tuple
 from jaxtyping import Array
 
 from ..softening import support_factor
+from ._lane_platform import on_lane_platform, on_lane_platform_of_solver
 from ._large_n_pipeline import evaluate_large_n_potential, evaluate_large_n_state
 from ._large_n_types import LargeNPreparedState
 from .fused_topology import (
@@ -351,6 +352,7 @@ class FusedForceProvider:
     # ----------------------------------------------------------------------
 
     @classmethod
+    @on_lane_platform_of_solver
     def prepare(
         cls,
         solver: Any,
@@ -485,9 +487,18 @@ class FusedForceProvider:
                 **({} if bounds is None else {"bounds": bounds}),
             )
         if not isinstance(prepared, LargeNPreparedState):
+            hint = ""
+            if jax.default_backend() == "cpu" and not bool(
+                getattr(engine, "cpu_fused_lane", False)
+            ):
+                hint = (
+                    ": the lane declines a CPU backend unless the solver takes its "
+                    "CPU route, FMMAdvancedConfig(runtime=RuntimePolicyConfig("
+                    "cpu_fused_lane=True)) (jaccpot.runtime._lane_platform)"
+                )
             raise RuntimeError(
                 "the fused lane's prepare returned a "
-                f"{type(prepared).__name__}, not a LargeNPreparedState"
+                f"{type(prepared).__name__}, not a LargeNPreparedState" + hint
             )
         engine._record_large_n_eval_shape_diagnostics(prepared)
         provider = cls.freeze_template(
@@ -550,6 +561,7 @@ class FusedForceProvider:
             template=template,
         )
 
+    @on_lane_platform
     def replanned(
         self,
         needs: Any,
@@ -563,14 +575,17 @@ class FusedForceProvider:
         """Re-plan from what a failed segment needed and re-prepare at its start.
 
         The segment retry. The WALK: the unnamed flat-walk caps grow to cover
-        ``needs`` (``engine._replan_walk_caps_from_needs``), and the peak wavefront
+        ``needs`` (``engine._replan_walk_caps_from_needs``; a far list the walk
+        filled exactly grows by at least one pair), and the peak wavefront
         the segment needed is kept so the retraced walk's queue covers it. The
         TREE (cell leaves): the leaf capacity, the level-loop depth bound and the
         level loops' batch width grow to what the segment's trees needed
         (``engine._replan_tree_from_needs``; the width is registered for the shape
-        the re-prepare builds). Either or both; then the lane is prepared again at
-        the segment's START. A grown leaf capacity is a new template shape, so
-        the re-run's programs have new keys and compile.
+        the re-prepare builds). Either or both -- or, when neither overflowed, on
+        the pure-JAX near field the rectangle layout's static target-block cap
+        doubles (``engine._replan_rectangle_blocks``) --; then the lane is
+        prepared again at the segment's START. A grown leaf capacity is a new
+        template shape, so the re-run's programs have new keys and compile.
 
         Parameters
         ----------
@@ -596,9 +611,10 @@ class FusedForceProvider:
         -------
         Optional[tuple[FusedForceProvider, FusedTopology]]
             The provider and topology for the re-run, or ``None`` when nothing can
-            be re-planned (neither a walk flag nor a tree overflow a bound can
-            fix, a named cap overflowed -- then not even the tree --, not the flat
-            walk): the caller raises.
+            be re-planned (neither a walk flag, a far list filled exactly, nor a
+            tree overflow a bound can fix, and on the pure-JAX near field the
+            rectangle layout's cap at its last rung; a named cap overflowed --
+            then not even the tree --; not the flat walk): the caller raises.
         """
         from ._level_shapes import widen_registered_levels
         from .fused_topology import NEEDS_FIELDS
@@ -610,7 +626,15 @@ class FusedForceProvider:
         # both: a segment can outgrow the walk caps and the tree at once
         walk = engine._replan_walk_caps_from_needs(needs)
         tree = False if walk_only else engine._replan_tree_from_needs(needs)
-        if not (walk or tree):
+        # the pure-JAX near field's rectangle layout, which no need records: when
+        # neither the walk nor the tree overflowed, its rows are what failed
+        # (`OVERFLOW_RECTANGLE`; the CSR lane never reads it)
+        rectangle = (
+            not (walk or tree)
+            and self.rectangle_guard_active
+            and engine._replan_rectangle_blocks()
+        )
+        if not (walk or tree or rectangle):
             return None
         replanned_peak = int(
             (engine._strict_fused_validated_caps or {}).get("peak_wavefront", 0)
@@ -829,9 +853,14 @@ class FusedForceProvider:
         """
         from jaccpot.nearfield._fast_lane import _nearfield_csr_lane_active
 
-        return not _nearfield_csr_lane_active(
-            bool(getattr(self.engine, "use_pallas", False))
-        )
+        from ._lane_platform import lane_platform_scope
+
+        # the CPU route's interpret-mode CSR switches (a property: not an entry
+        # point the decorator scopes, and read by callers' own verdicts)
+        with lane_platform_scope(self.engine):
+            return not _nearfield_csr_lane_active(
+                bool(getattr(self.engine, "use_pallas", False))
+            )
 
     @property
     def theta_value(self) -> float:
@@ -946,6 +975,7 @@ class FusedForceProvider:
         """
         return materialize_template(self.template_or_raise())
 
+    @on_lane_platform
     def rebuild(
         self,
         positions: Array,
@@ -1108,6 +1138,7 @@ class FusedForceProvider:
         engine._last_refresh_tree_needs = None
         return topo
 
+    @on_lane_platform
     def accelerations(
         self,
         topology: FusedTopology,
@@ -1175,6 +1206,7 @@ class FusedForceProvider:
             **extra,
         )
 
+    @on_lane_platform
     def potential(
         self,
         topology: FusedTopology,
@@ -1230,6 +1262,7 @@ class FusedForceProvider:
             force_params=force,
         )
 
+    @on_lane_platform
     def capacity_ok(self, topology: FusedTopology) -> Array:
         """The step's capacity verdict, as the fused scan folds it into its carry.
 
@@ -1272,6 +1305,7 @@ class FusedForceProvider:
                 ok = ok & ~jnp.asarray(topology.tree_overflow, jnp.bool_)
         return ok
 
+    @on_lane_platform
     def step(
         self,
         positions: Array,
@@ -1318,6 +1352,7 @@ class FusedForceProvider:
     # Differentiable: the gradient plan and the differentiable step (S9).
     # ----------------------------------------------------------------------
 
+    @on_lane_platform
     def with_grad_plan(self, topology: FusedTopology) -> "FusedForceProvider":
         """This provider with the gradient plan's static fields frozen.
 
@@ -1371,6 +1406,7 @@ class FusedForceProvider:
         )
         return provider
 
+    @on_lane_platform
     def grad_plan(self, topology: FusedTopology) -> tuple["LargeNGradPlan", Array]:
         """The gradient plan of a traced topology, and its lists' symmetry verdict.
 
@@ -1421,6 +1457,7 @@ class FusedForceProvider:
             )
         return self.grad_statics
 
+    @on_lane_platform
     def differentiable_accelerations(
         self,
         topology: FusedTopology,
@@ -1494,6 +1531,7 @@ class FusedForceProvider:
                 return_force_scale=bool(force_scale),
             )
 
+    @on_lane_platform
     def differentiable_step(
         self,
         positions: Array,
