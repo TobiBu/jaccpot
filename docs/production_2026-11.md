@@ -1162,7 +1162,7 @@ No library file changed: the default paths are untouched. A3's files were not to
 | 3. check passes / fails | baseline = Plummer N = 1024, 4 t_dyn. The re-run: CHECK PASS (bitwise on CPU). `--perturb dt=4` (same end time): FAIL, `energy.max_abs_dE` 2.67e-2 vs 5.07e-5 and `force.p99_end` 1.5x. `--perturb theta=0.95`: FAIL, `force.rel_l2_end` 1.87e-2 vs 8.73e-5 and energy 7x. N 1000 vs 1024: FAIL, "not comparable" | CPU route, `dehnen_error` 1e-4, fp32, K = 256 |
 | 4. HoreKa suite | `bash -n` on every script; `submit.sh --dry-run`: 21 arrays (14 one-card, 7 node) + ics + summary; every rung's command line parses (`bench/tests`); `--local-smoke`: every rung at tiny N on the CPU (node tier on 4 forced devices): see below | |
 | 5. CI | `test_shards.py check` rc 0 (3199 tests covered); new files under `JACCPOT_RUNTIME_TYPECHECK=1`: unit 13 passed (1.36 GB peak RSS, 35 s), forced 2 devices 3 passed (1.77 GB, 23 s), 2 processes 1 passed (1.58 GB per process, 40 s); top-level `tests/unit` guards pass | CPU |
-| identity | `provider_hlo_identity compare w5-main-cpu a4-tip-cpu`: see below | |
+| identity | `provider_hlo_identity compare w5-main-cpu a4-tip-cpu`: PASS 36/36 identical (recorded at 997fcd3d; later commits touch `bench/`, `docs/`, CI lists only) | CPU |
 
 **The reference's cost.** It makes two passes over the `N * K` pairs, about 3x an fp64 direct sum on them. It is a
 verification step, not a per-edge diagnostic. The runs score it at the first edge with a force, every

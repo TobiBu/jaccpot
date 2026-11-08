@@ -50,7 +50,7 @@ scaling in N above ~1e6):
 
 | ladder | 1 card: rungs (wall) | node: rungs (wall) |
 | --- | --- | --- |
-| `plummer_n` / `hernquist_n` / `nfw_n` | 1e5, 1e6, 1e7, 6400 steps each (2 h) | Plummer 1e7, 4e7 (2 h) |
+| `plummer_n` / `hernquist_n` / `nfw_n` | 1e5, 1e6, 1e7; 100 t_dyn = 6400 steps (Plummer), ~32k (Hernquist, NFW: the softening-scale dt cap) (2 h) | Plummer 1e7, 4e7 (2 h) |
 | `plummer_dt` | 1e6 at t_dyn/32, /64, /128 (2 h) | - |
 | `plummer_mac` | 1e6: theta 0.5 / 0.7 / 0.8, tol 1e-3 / 1e-4 / 3e-5 (2 h) | - |
 | `plummer_precision` | 1e6: fp32, fp64state, fp64, anchored (3 h) | - |
