@@ -416,7 +416,18 @@ def cmd_run(a: argparse.Namespace) -> int:
         r50 = float(np.interp(0.5, np.cumsum(mass[order]) / mass.sum(), r[order]))
         t_dyn = math.sqrt(r50**3 / float(mass.sum()))
         if a.dt is None:
-            run["dt"] = float(run["dt_per_tdyn"]) * t_dyn
+            # t_dyn / 64, capped by the softening scale's own time: dt_eta sqrt(eps / a(eps))
+            # with a(eps) = G M(<eps) / eps^2 of the profile (the Hernquist cusp needs it:
+            # at t_dyn / 64 alone its energy drifted 1.9e-2 over 100 t_dyn at N = 8192)
+            from bench.accuracy.ics import PROFILES
+
+            eps = float(run["softening"])
+            prof_mass = PROFILES[problem.ic.split(":", 1)[1]]()[1]
+            a_eps = float(prof_mass(np.array([eps]))[0]) / eps**2
+            run["dt"] = min(
+                float(run["dt_per_tdyn"]) * t_dyn,
+                float(run["dt_eta"]) * math.sqrt(eps / a_eps),
+            )
         if a.t_end is None:
             run["t_end"] = float(run["n_tdyn"]) * t_dyn
     else:
