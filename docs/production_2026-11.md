@@ -801,7 +801,26 @@ M2G's production flags):
 The drifts are a random walk of the per-step fp32 residual (~sqrt(1000) x dt x 1e-8 = 3e-10) on every card count. The
 force accuracy (p99 and max too) is the one card's.
 
-**1000-step drift matrix (CPU, N = 2048, the plan's gate wording):** M1_MATRIX_TABLE
+**1000-step drift matrix (CPU, N = 2048, the plan's gate wording).** 1000 steps (10 x 100), Plummer + disc, the
+configuration above, forced CPU devices on a shared host (`mn-scratch/m1/exp/runs/`). Every device count sits in its
+1-device class: fp64 drifts below 1e-16, fp32 at the fp32 floor. The accuracy is the one device's or better (4 devices:
+other trees, slightly lower rel-L2).
+
+| MAC | dtype | devices | max momentum_drift (1000 steps) | per-step total @100 / @1000 | cross part alone @1000 (share) | rel-L2 / p99 / max @1000 |
+|---|---|---|---|---|---|---|
+| `dehnen` | fp64 | 1 | 9.00e-17 | 6.3e-17 / 4.8e-17 | - | 3.27e-03 / 6.62e-02 / 2.39e-01 |
+| `dehnen` | fp64 | 2 | 3.60e-17 | 3.1e-17 / 3.0e-17 | 2.7e-17 (0.52) | 3.31e-03 / 6.43e-02 / 2.39e-01 |
+| `dehnen` | fp64 | 4 | 2.76e-17 | 3.1e-17 / 4.2e-17 | 8.4e-18 (0.70) | 2.89e-03 / 6.32e-02 / 2.40e-01 |
+| `dehnen` | fp32 | 1 | 6.60e-09 | 1.2e-08 / 1.8e-08 | - | 3.27e-03 / 6.62e-02 / 2.39e-01 |
+| `dehnen` | fp32 | 2 | 5.74e-09 | 9.7e-09 / 8.6e-09 | 6.8e-09 (0.52) | 3.31e-03 / 6.42e-02 / 2.39e-01 |
+| `dehnen` | fp32 | 4 | 5.05e-09 | 4.3e-09 / 4.2e-09 | 1.9e-09 (0.70) | 2.89e-03 / 6.32e-02 / 2.40e-01 |
+| `dehnen_error` | fp64 | 1 | 5.01e-17 | 1.2e-17 / 4.3e-17 | - | 1.27e-05 / 2.35e-04 / 1.20e-03 |
+| `dehnen_error` | fp64 | 2 | 7.73e-17 | 1.7e-17 / 4.3e-17 | 8.8e-17 (0.52) | 1.27e-05 / 2.32e-04 / 1.20e-03 |
+| `dehnen_error` | fp64 | 4 | 3.55e-17 | 4.1e-17 / 2.1e-17 | 3.1e-17 (0.70) | 9.93e-06 / 1.96e-04 / 9.31e-04 |
+| `dehnen_error` | fp32 | 1 | 1.25e-10 | 3.3e-09 / 2.6e-09 | - | 1.26e-05 / 2.28e-04 / 1.20e-03 |
+| `dehnen_error` | fp32 | 2 | 1.96e-10 | 2.1e-09 / 1.5e-09 | 2.1e-09 (0.52) | 1.26e-05 / 2.28e-04 / 1.21e-03 |
+| `dehnen_error` | fp32 | 4 | 2.26e-10 | 2.3e-09 / 2.4e-09 | 1.5e-09 (0.70) | 9.94e-06 / 1.96e-04 / 9.31e-04 |
+
 
 ### What this session added
 
