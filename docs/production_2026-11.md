@@ -738,6 +738,201 @@ tails unclipped through the normal runner path (`jaccpot/escapers.py`, `jaccpot/
    per-edge cost and peak memory at 1e8, escapers on / off (clipped) / on-but-nobody-escapes, both MACs, and the
    energy every 10th edge.
 
+## MESC — escapers in the runner's mesh mode (wave 3, 2026-11-06)
+
+`ProductionRunner(solver, ..., mesh=MeshRunConfig(...), escapers=EscaperPolicy(...))` runs in both mesh runtimes (one
+process x N devices, N processes x 1 device) with ESC's semantics: the same policy, Hamiltonian, ledger, diagnostics
+and row-order contract. Opt-in (user decision 2026-11-06: no preset turns it on; for merger ICs like Sgr); escapers
+do not attract each other; the re-split edge cost is accepted. Code: `jaccpot/distributed/escapers.py` (new),
+`jaccpot/distributed/segment.py` (the tail in the start/segment programs), `jaccpot/distributed/mesh_runner.py`
+(the orchestration), `jaccpot/production.py` (the refusal removed; `MeshSegmentEdge.escapers`).
+
+### The layout: a tail of their own (and why)
+
+The bound rows are an ordinary `MeshState`: the decomposition, the cuts, the global and Morton boxes, the cross walk,
+the migration, the repartition and every capacity see them only. The escapers live in an `EscaperTail` -- flat
+`(ndev * cap_e, ...)` arrays sharded `P(axis)` like the layout, `count[d]` leading rows per device, a capacity of
+their own (`tail_capacity`: 1.5x the largest device's count, >= 64 rows, a multiple of 64). They need no tree and no
+neighbours, so the tail is never sorted, cut or migrated: a particle stays on the device it escaped from, a returner
+re-enters that device's bound rows, and every move at an edge is device-local (no exchange).
+
+The alternative the brief named -- escaper rows beyond each device's live cut in the same arrays -- would put a second
+live block behind the padding of a layout whose invariant ("`count[d]` live rows lead, the rest is padding") the
+force (`num_valid`), the migration, the repartition, the gathers and the restart files all read, and would spend the
+bound rows' headroom on escapers. A separate tail touches none of them; the bound path's programs are unchanged.
+
+### Per step, per edge
+
+- **The step** (inside the segment's `jit(shard_map(scan))`): the tail drifts and kicks with the bound rows (the same
+  velocity-Verlet association). After the tree force -- ordered by an `optimization_barrier`, as on one card -- the
+  bound rows' `[sum m, sum m x]` (fp64 per device) are all-gathered and folded in mesh order (`M_b`, `X_b`); the
+  escapers get `a_e = -G M_b (x - X_b)/r^3`, and their total pull (a 3-vector) is all-gathered and folded again
+  (every bound row's `a_u`). All-gathers and a fold, not `psum`: the bits do not depend on the runtime's all-reduce
+  order (one process or several, gloo or NCCL). The external field acts on both.
+- **The edge** (every `every`-th): one small program counts, per device, bound rows beyond `r_escape` and escapers
+  within `r_return` (the single card's test in the state's dtype). On a change: the potential before, the tail grown
+  if a device's escapers outgrow `cap_e` (a new capacity compiles the tail programs again: `tail_grown`), one
+  device-local program that compacts both (stable order; layout padding on the first live row; a returner's f_b =
+  its coupling's magnitude), the potential after (the ledger's jump). The carried accelerations are dropped (the next
+  segment's start force evaluates the new split).
+- **The re-cut under `migrate=True`** (found by the 4-device gate): the bound box changes with the split (a far row
+  leaves it, a returner widens it), and the migration's fixed cuts are Morton codes of the OLD box -- in the new box
+  they cut anywhere; the next step's migration overflowed a shard (`OVERFLOW_SHARD`, 4 devices). After a changed
+  split the runner re-cuts with a full repartition in the new box, as at the start (`RunResult.escapers["recuts"]`).
+  The default path is untouched (no split, no re-cut).
+- **While the tail is empty** the segments run the DEFAULT programs: escapers on but nobody escaping is the run
+  without them, bitwise. Once someone escaped, ONE start and ONE segment program carry the tail for every split.
+- **The initial split** (host): the membership of the initial state with the sums of each device's initial id
+  chunk folded in mesh order (the same bits from one host or from each process's chunk); nobody beyond `r_escape`:
+  the default decomposition and an empty tail; else each device's chunk WITHOUT its escapers is laid out as
+  `decompose` lays a chunk and the same Morton repartition runs over the bound rows only; the chunk's escapers are
+  its tail.
+- **Output** by id over both (`RunResult.state`, `MeshSegmentEdge.state_host()`/`gather()`, `SnapshotWriter`,
+  restart files: `escaper_ids` is the tail's layout, `meta["escapers"]` the policy, split, ledger, `tail_cap`,
+  `tail_grown`, `recuts`). `edge.plan["escapers"]` has the tail's `cap` and per-device `counts`.
+- **Not supported:** the gradient mode (the mesh refuses it anyway) and `scheme=` (the mesh's built-in KDK only, I2).
+
+### Gates
+
+1. **CPU, ESC's synthetic system** (N = 1024 Plummer + 8 fliers + a returner, CSR interpret, leaf 16, p4, theta 0.6,
+   dt 1e-3, 6 x 10 steps, energy every edge; ESC's single-card solver and settings on the mesh; fused mesh force,
+   migration on; `mn-scratch/mesc/exp/gate1.py`). Escapers per edge on the mesh: **1, 1, 2, 4, 9, 9, 8 -- the single
+   card's** (transfers 1, 2, 5, 1 at four edges), both MACs, 2 and 4 devices.
+
+   | MAC, devices | max \|ledgered drift\| | mesh no-split control \|dE/E0\| | raw \|dE/E0\| | max momentum drift (control) | restart / chained == once |
+   |---|---|---|---|---|---|
+   | `dehnen`, 2 | 1.4e-5 | 5.3e-5 | 1.0e-4 | 8.0e-9 (1.1e-8) | bitwise / bitwise |
+   | `dehnen_error`, 2 | 1.2e-7 | 3.0e-7 | 5.9e-5 | 8.5e-9 (7.9e-9) | bitwise / bitwise |
+   | `dehnen`, 4 | 2.5e-5 | 5.7e-5 | 1.1e-4 | 7.8e-9 (5.5e-9) | bitwise / bitwise |
+   | `dehnen_error`, 4 | 1.4e-7 | 3.0e-7 | 5.9e-5 | 8.2e-9 (8.5e-9) | bitwise / bitwise (fresh solver) |
+
+   Trajectories against the single card's escaper run (`dehnen`, 2 devices), with the mesh-vs-single-card difference
+   WITHOUT escapers as the yardstick: bound rows max |dx| 9.2e-6 (yardstick 1.09e-5), rms 1.35e-6 (1.55e-6); fliers
+   and the returner 2.2e-6 (2.7e-6). 4 devices: 9.2e-6 (1.08e-5), fliers 2.2e-6 (1.4e-6; both ~2 fp32 ulps at r ~ 8:
+   the escapers' `X_b` is a mesh-order fold, one sum on the card). `dehnen_error`: bound rows 1.3e-7 (1.3e-7) on 2 and
+   4 devices, fliers bitwise. The single-card references reproduce ESC's record (1.47e-5 vs 1.56e-5; 1.7e-7 vs
+   2.3e-7). At 4 devices under `dehnen_error` the second segment was re-planned twice (capacities) with the tail on:
+   the retry restores the tail from its host copy (also tested bitwise with a one-row migration buffer). A chained run
+   on the SAME solver then starts from the re-planned capacities (they live on the engine) and is not bitwise; on a
+   fresh solver, as a chained production run would be, it is.
+
+   Compiles: ONE escaper start and ONE escaper segment program for every split (the tail's counts are traced), shared
+   by the run, its restart and its chained continuation (the engine's program cache). Tests
+   (`tests/distributed/test_production_runner_mesh_escapers.py`, 2 forced devices, direct force migrating and not,
+   plus the fused force under both MACs): counts, ledger, one program, id order, restart and chained bitwise,
+   nobody escaping == off bitwise (state, acceleration, diagnostics, plan), a tail grown past its capacity, a
+   retried segment (a one-row migration buffer) bitwise the run whose buffer fitted -- the tail restored from its
+   host copy --, an external field on the escapers (ledgered energy at the control's noise).
+2. **CPU, N processes x 1 device == 1 process x N devices, bitwise, escapers crossing** (gloo;
+   `tests/distributed/test_multiprocess_runtime.py::test_escaper_runner_is_the_single_process_run`, direct force,
+   migration, 3 segments continued in memory to 6): state, acceleration, owner, the tail's layout, the split and
+   ledger, every edge's diagnostics -- equal at 2 and 4 processes. (The fused-force cases are manual.)
+3. **GPU, 2.2e6 unclipped Sgr on 2 A100s** (A2's downsample: the 182,859 tail particles plus a stride-49 bulk;
+   preset galaxy, softening 1.5e-3, dt 1e-3, `r_escape` 80, energy every edge; cards 5,6 via autocvd, shared host,
+   functional only; production flags incl. M2G's ragged-exchange set; `mn-scratch/mesc/sgr/`):
+
+   | arm | escapers | \|ledgered drift\| | momentum drift | 1 proc x 2 GPUs vs 2 procs x 1 GPU | peak per card (sp / mp) |
+   |---|---|---|---|---|---|
+   | geometric theta 0.7, 2 x 5 steps | 182,832 -> 182,834 | 5.7e-7 | 1.7e-10 | bitwise (state, every diagnostic) | 0.728 / 0.737 GiB |
+   | `dehnen_error`, 4 x 5 steps | 182,832 -> 182,837 | <= 6.5e-7 | 3.8e-10 | state bitwise; step 0's `W_self` 1.1e-13 rel (below) | 0.833 / 0.826 GiB |
+   | control: escapers off, r > 80 pulled onto 80 (same N), geometric | -- | (raw 4.9e-7) | 1.6e-10 | bitwise | 0.807 / 0.807 GiB |
+
+   ESC's single card on the same IC: 182,832 -> 182,834, -5.0e-7, 1.7e-10 (geometric); 182,832 -> 182,837, <= 5.8e-7,
+   3.8e-10 (`dehnen_error`): the same counts and conservation. No retries; 2-3 re-cuts per run. With escapers the
+   peak per card is LOWER than the clipped control's (the 182,859 far particles leave the tree; the tail is ~16 MB).
+   The `dehnen_error` arms differ only in the step-0 potential's last bits (the bound rows' existing mesh potential
+   program; M2G's run-to-run 1-ulp non-reproducibility of `dehnen_error` under the production flags, accepted
+   2026-11-05), hence the energies after it.
+   **The FULL 1e8 unclipped Sgr on the same two cards** (100,000,001 rows, a 45.7 Mpc box; one process x 2 GPUs,
+   ~5e7 rows per card; geometric theta 0.7, 3 x 5 steps, `XLA_PYTHON_CLIENT_PREALLOCATE=false`, fraction 0.95): runs,
+   no retry, 3 re-cuts; escapers 182,878 -> 182,889 (ESC's single card: the same), ledgered drift <= 2.7e-7 (the
+   clipped control's raw drift 2.8e-7), momentum drift 3.3e-10. Peak per card:
+
+   | 1e8 on 2 A100s, same cards and environment | peak per card | B / particle per card |
+   |---|---|---|
+   | escapers OFF, every particle beyond 80 pulled onto r = 80 (same N) | 21.41 GiB | 459.9 |
+   | escapers ON, unclipped (`EscaperPolicy(80)`; tail `cap_e` 191,616) | 21.45 GiB | 460.7 (+0.17 %) |
+
+   The escapers add +0.8 B/p per card (+0.17 %, not attributed further; the tail itself is ~0.2 B/p). The ~460 B/p
+   per card at 5e7 rows is the mesh mode's own at this size (both arms), not the escapers'.
+4. **The default paths.** `provider_hlo_identity compare w2-integ-cpu mesc-tip-cpu` (98f6aa00; also at bc82f156):
+   **PASS 36/36** (the tool has no mesh programs). The mesh programs with `escapers=None` -- the start, segment and potential
+   programs of the direct force (`dehnen`) and the fused force (`dehnen`, `dehnen_error`), migrating and not, 18
+   programs lowered at 2 forced CPU devices -- have the SAME lowered text on `esc/stacked` a4bfea96 and on this branch
+   (`mn-scratch/mesc/exp/mesh_hlo_dump.py`; empty diff). ESC's tests (`integration-strict-esc`) pass unchanged.
+5. **CI** (CI's arguments, each job's forced device count and typecheck; a loaded 64-core host): new shard
+   `distributed-segment-escapers` (job `test-distributed-segment-escapers`, 2 forced devices, `-n 1`, 40 min cap,
+   gated like the other segment jobs): 15 passed, 1 skipped, 12.3 min. `distributed-segment-runner` 5,
+   `distributed-segment-migration` 2, `distributed-segment-criterion` 4, `distributed-segment` 10 (one stand-in test
+   needed `coupling_G` read only for the tail programs, fixed; rerun at the tip with the escaper shard: 10 and 15), `distributed-tier` 96 (+7 skipped),
+   `distributed-criterion` 8, `distributed-multiprocess` 14 (+11 skipped; the new escaper cases add ~1 min),
+   `unit` (typecheck 1) 1330 (+158 skipped), `integration-strict-esc` 11, `integration-strict-runner` 44; the
+   top-level `tests/unit` guards 23; `test_shards.py check` rc 0 (2863 covered).
+6. **HoreKa** (prepared, not run): `bench/slurm/mesc/` + `bench/mesh_escaper_timing.py`: the FULL unclipped 1e8 Sgr
+   as 4 processes x 1 GPU (one node) and 8 x 1 (two nodes) with escapers against the clipped control, both MACs, 6 x
+   10 steps, energy every edge, plus the escaper row with the energy every 10th edge: step time, edge time (the
+   ledger energies and the re-cut), peak per card. Stage the IC to `$H0_ROOT/data/` first (README).
+
+### Open
+
+- **The re-cut's cost.** At 1e8 Sgr a few particles cross at EVERY edge, so every edge pays a full repartition on top
+  of the two ledger energies. If HoreKa's `edge_s` shows it matters: skip the re-cut when the bound box is bitwise
+  unchanged (the old cuts are then still exact Morton ranges), or check membership every `k` edges
+  (`EscaperPolicy(every=k)`).
+- **Tail placement.** Escapers stay on the device they escaped from (the downsampled Sgr's 182,832 initial escapers
+  all sat in the last id chunk, so on one device's tail). Harmless at these sizes; a rebalance of the tail would only
+  matter at ~1e6+ escapers per device.
+- Multi-process restart files remain refused (M3); the gradient mode and `scheme=` are refused on the mesh as before.
+
+## I2 — the multi-GPU runner takes nornax's scheme; a sharded force-model protocol (wave 4, 2026-11-07)
+
+The multi-node plan's I2 (decision U1: nornax owns the integration schemes, jaccpot the force, decomposition and
+orchestration). Branch `i2/sharded-scheme` in jaccpot, nornax and Odisseo (from main 4ace6562, nornax main
+9003651, Odisseo `jaccpot-integration` c43f4a0).
+
+### What was built
+1. **jaccpot: the scheme on the mesh.** `ProductionRunner(..., mesh=MeshRunConfig(...), scheme=...)` no longer
+   refuses a scheme. `MeshSegmentRunner(scheme=)` (and `MeshSegmentRunner.fused(scheme=)`) calls the scheme's
+   `open_step` / `close_step` on each device's `(cap, 2, 3)` rows inside the segment's `shard_map`, in the plain
+   and the migrating segment (the opening half sees the rows owned at the step's start, the closing half the rows
+   owned after the migration). `scheme=None` takes the old inline expressions, so the default programs are the
+   same; `("scheme", key)` joins the segment programs' compile key only when a scheme is set. The mesh restart
+   file records `meta["scheme"]` only with a scheme; a restore under another scheme lists `"scheme"` in the
+   mismatches.
+2. **jaccpot: schemes that read other rows.** `jaccpot.scheme.ShardedSplitStepScheme` is a scheme's MESH FORM:
+   `open_step_shard` / `close_step_shard` with `live_rows` and `axis_name`, reducing through collectives whose
+   result is independent of the transport's order (`nornax.sharded.mesh_sum`). `check_mesh_scheme`: rowwise
+   passes, a mesh form passes (and is used, rowwise or not), anything else is a `ValueError` at construction.
+3. **nornax: the protocol** (`nornax/sharded.py`). `ShardedForceModel.shard_accelerations(positions, masses,
+   ids, live_rows, *, carry=None, args=None) -> (acc, carry)` inside `shard_map` (optional `context()`,
+   `shard_potential`); `mesh_sum` / `mesh_moments` (all-gather folded in mesh order); `gather_by_id`,
+   `decompose_rows`, `is_writer` (by-id I/O, writers on process 0); `ShardedDirectSumGravity` (the toy: sources
+   all-gathered and summed in id order); `sharded_split_step_rollout` (the reference driver);
+   `nornax.conformance.check_sharded_force_model` (protocol, shape, padding rows exactly zero, layout
+   independence by id, momentum, an oracle, the `mesh_sum` order, the scheme's rollout on the mesh vs one device).
+   Nothing in nornax imports jaccpot.
+4. **jaccpot implements it:** `jaccpot.distributed.sharded_force.ShardedMeshForce` wraps a prepared
+   `FusedMeshForce` / `DirectMeshForce` (per-device carry: the OR of the overflow bits, the max of the walk needs,
+   `f_b` under `dehnen_error`, `initial_carry()` from the prepare's seed). The runner itself does not go through
+   it (its segment programs call the force directly and stay main's); nornax's drivers and kit do.
+5. **Odisseo:** the `fmm_mesh_runner` lane takes `config.fmm_scheme` as the single-card runner lane does
+   (`runner_scheme`; part of the kept runner's key).
+
+### Gates (CPU unless noted; forced host devices)
+| gate | result |
+|---|---|
+| 1, direct force (`test_production_runner_mesh_scheme.py`, 4 forced devices) | 8 passed: KDK scheme == `scheme=None` bitwise by id (state, every edge's state, gathers, diagnostics) on 2 and 4 devices, repartition and migrate; chained run, restart file (arrays byte-equal to the built-in's file, meta records the scheme) continued bitwise; a retried segment; mesh-form scheme keeps the momentum to 1e-14 and a non-rowwise one without it is refused; `ShardedMeshForce` == the runner's self-gravity |
+| 1, fused force (`test_production_runner_mesh_scheme_fused.py`, 2 forced devices) | 3 passed, bitwise by id incl. `f_b`: geometric MAC with a cross-capacity retry (retries [1,0,0]); geometric MAC, migration, `migration_cap=1` (a buffer retry); `dehnen_error`, migration, 2+2 chained |
+| 2, N processes x 1 device == 1 process x N devices, with the scheme (`test_multiprocess_runtime.py`) | passed: direct runner at 2 and 4 processes (and without the scheme), fused `dehnen` migrating with a cross retry at 2; the KDK arrays also equal the no-scheme arrays (0 differing, both layouts, 2 and 4) |
+| default path: `provider_hlo_identity compare w3-main-cpu i2-tip-cpu` | **PASS 36/36** |
+| default path: mesh programs with `scheme=None`, lowered text main vs tip (2 forced devices; source locations stripped) | IDENTICAL: direct (12 modules), direct migrating (18), fused geometric migrating (597), fused `dehnen_error` migrating (1169) |
+| I1 pins (`integration-strict-scheme`, CI args) | 9 passed (its refusal test now checks the non-rowwise refusal on the mesh: the mesh refusal is gone); the single-card runner code is untouched |
+| 4, nornax `tests/unit/test_sharded.py` | 8 passed (JAX 0.11.2); with `test_conformance.py` 25 passed on JAX 0.10.2. Kit on 2 and 4 devices: layout 0.0, rollout 2 vs 1 device 1.2e-18, 4 vs 1 2.4e-18 |
+| 4, nornax `tests/integration/test_jaccpot_sharded.py` (jaccpot's `ShardedMeshForce(DirectMeshForce)`) | 2 passed: every check (oracle 4.4e-16, rollout 0.0) at 2 and 4 devices; the runner with `LeapfrogKDK` == built-in, 0 differing |
+| 5, Odisseo mesh-lane files at 2 forced devices | 38 passed (new: `fmm_scheme="nornax_kdk"` on the mesh lane == the built-in lane bitwise); suite `-m 'not slow'` 274 passed, 6 skipped, 2 xfailed |
+| 3, GPU (functional; 2 A100s by autocvd, one process; shared host, no timings) | N = 262,144 Plummer (a = 1), galaxy-preset solver, fused mesh force, migration on, 10 x 10 steps at dt 1e-3, energy every edge, PRODUCTION flags (no `--xla_gpu_deterministic_ops`): `dehnen_error` and `dehnen` each: A-vs-A control 0 differing, `LeapfrogKDK` vs both built-in arms 0 differing (state, acceleration, `f_b`, diagnostics), 0 retries, energy drift -3.2e-7 / -2.5e-7 |
+| 6, CI | new gated shard/job `distributed-segment-scheme`; `jaccpot/scheme.py` joins `GATED_PATHS`; `test_shards.py check` rc 0; top-level `tests/unit` guards with `JACCPOT_RUNTIME_TYPECHECK=1` rc 0; nornax solver-tests job lists `test_jaccpot_sharded.py` (skips until its jaccpot pin has I2) |
+
 ## M1 — symmetric cross-domain forces (#173): no gap, no new transport (wave 4, 2026-11-07)
 
 **Question** (#173, plan M1): does the fused mesh lane lose momentum conservation at domain boundaries? Each cross pair

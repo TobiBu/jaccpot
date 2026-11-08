@@ -174,7 +174,8 @@ def test_a_restart_records_the_scheme(tmp_path):
 
 
 def test_a_scheme_is_refused_where_there_is_no_seam():
-    """The multi-GPU mode (I2), the gradient mode, the state carry, a non-scheme."""
+    """A non-rowwise scheme on the multi-GPU mode (I2), the gradient mode, the state
+    carry, a non-scheme."""
     state, masses = _system()
     with pytest.raises(TypeError, match="SplitStepScheme"):
         ProductionRunner(_solver(), settings=SETTINGS, scheme=object())
@@ -186,9 +187,18 @@ def test_a_scheme_is_refused_where_there_is_no_seam():
 
     with pytest.raises(TypeError, match="hashable"):
         ProductionRunner(_solver(), settings=SETTINGS, scheme=_Unhashable())
+    # the multi-GPU mode takes a rowwise scheme (I2,
+    # tests/distributed/test_production_runner_mesh_scheme.py) and refuses one that
+    # reads other rows without a mesh form
     mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("gpus",))
-    with pytest.raises(ValueError, match="I2"):
-        ProductionRunner(_solver(), settings=SETTINGS, mesh=mesh, scheme=_KDK())
+
+    @dataclasses.dataclass(frozen=True)
+    class _NotRowwise(_KDK):
+        rowwise: bool = False
+
+    with pytest.raises(ValueError, match="not rowwise"):
+        ProductionRunner(_solver(), settings=SETTINGS, mesh=mesh, scheme=_NotRowwise())
+    ProductionRunner(_solver(), settings=SETTINGS, mesh=mesh, scheme=_KDK())
     runner = ProductionRunner(
         _solver(), settings=SETTINGS, segment=_static(steps=2), scheme=_KDK()
     )
