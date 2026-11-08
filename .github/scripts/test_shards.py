@@ -81,6 +81,10 @@ _NORNAX_ADAPTER = "tests/integration/test_mutual_fmm_nornax.py"
 _NORNAX_DISTRIBUTED = "tests/integration/test_mutual_distributed_nornax.py"
 _SEGMENT_CRITERION = "tests/distributed/test_mesh_segment_dehnen_error.py"
 _SEGMENT_MIGRATION = "tests/distributed/test_mesh_segment_migration_fused.py"
+# the fused multi-GPU lane's reverse mode end to end (WP-G G4): three whole-lane
+# gradient cases (2 and 4 devices, the criterion), each ~10-25 min of interpret-mode
+# compilation on CPU, so a job of its own beside the seams' and plumbing's
+_GRAD_GATES = "tests/distributed/test_mesh_grad_gates.py"
 # the mesh segment runner with an integration scheme on the fused force, both MACs
 # (multi-node plan I2): six fused-lane runs of compilation, kept out of the segment job
 _SEGMENT_SCHEME = "tests/distributed/test_production_runner_mesh_scheme_fused.py"
@@ -286,7 +290,7 @@ SHARDS: dict[str, list[str]] = {
         *_UNIT_MULTI_DEVICE,
         "-m",
         "not distributed_criterion and not distributed_segment"
-        " and not distributed_multiprocess",
+        " and not distributed_multiprocess and not distributed_grad",
     ],
     "distributed-criterion": ["tests/distributed", "-m", "distributed_criterion"],
     # the fused mesh lane's segment runner (S11): minutes of compile per case
@@ -312,6 +316,15 @@ SHARDS: dict[str, list[str]] = {
     # session 2, tracks E and D): with them the segment job took ~24 of its 40
     # minutes (1,390 s of calls on this host at -n 1, ~1.2x that on CI)
     "distributed-segment-runner": [*_SEGMENT_RUNNER_FILES, "-m", "distributed_segment"],
+    # reverse-mode gradients of the fused multi-GPU lane (WP-G): the cross seams'
+    # oracles and the plumbing's bitwise forward, then the end-to-end gradient gates
+    "distributed-grad": [
+        "tests/distributed",
+        "-m",
+        "distributed_grad",
+        f"--ignore={_GRAD_GATES}",
+    ],
+    "distributed-grad-gates": [_GRAD_GATES, "-m", "distributed_grad"],
     # the escaper path on the mesh (MESC), a job of its own: the fused cases are
     # minutes of compile each
     "distributed-segment-escapers": [_SEGMENT_ESCAPERS, "-m", "distributed_segment"],
@@ -337,6 +350,8 @@ GATED_SHARDS: tuple[str, ...] = (
     "distributed-segment-migration",
     "distributed-segment-scheme",
     "distributed-segment-runner",
+    "distributed-grad",
+    "distributed-grad-gates",
     "distributed-segment-escapers",
     "distributed-multiprocess",
     "nornax-distributed",
@@ -364,6 +379,10 @@ GATED_PATHS: tuple[str, ...] = (
     "jaccpot/mutual/",
     "jaccpot/nornax_adapter.py",
     "jaccpot/pallas/nearfield_",
+    # the multi-GPU gradient's seams and the single-card gradient chain they extend
+    "jaccpot/pallas/m2l_real_csr_lanes",
+    "jaccpot/runtime/_large_n_grad.py",
+    "jaccpot/runtime/kernels/_downward_prep.py",
     # their own tests, the fixtures every test shares, and the CI definition
     "tests/distributed/",
     _NORNAX_DISTRIBUTED,

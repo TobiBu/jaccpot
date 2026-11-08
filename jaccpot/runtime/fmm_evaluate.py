@@ -1119,6 +1119,7 @@ class EvaluateMixin(_EngineBase):
         options: Any,
         force_params: Optional[ForceParams] = None,
         return_force_scale: bool = False,
+        cross: Any = None,
     ) -> Any:
         """Differentiable evaluation on the ``large_n_gpu`` production state.
 
@@ -1156,6 +1157,10 @@ class EvaluateMixin(_EngineBase):
             Also return eq (16b)'s f_b per particle in the same order, as the
             production evaluation does (the fused provider's differentiable step,
             under ``mac_type='dehnen_error'``); not differentiated.
+        cross : Any
+            A multi-GPU device's cross far sources
+            (:class:`~jaccpot.runtime._large_n_grad.LargeNCrossFar`) for the far
+            chain; ``None`` (default): the single-domain evaluation.
 
         Returns
         -------
@@ -1196,6 +1201,12 @@ class EvaluateMixin(_EngineBase):
         force = resolve_grad_force_params(self, force_params)
         group = forward_tangent_group()
         if group is not None:
+            if cross is not None:
+                raise NotImplementedError(
+                    "JACCPOT_FORWARD_TANGENT_GROUP (forward-mode tangent groups) "
+                    "with cross far sources: the multi-GPU seams are reverse-only "
+                    "(custom_vjp). Unset the group for the multi-GPU lane."
+                )
             # forward mode, tangent directions in groups (_forward_group.py): the
             # same evaluation below, its tangent applied g directions at a time
             return grouped_jvp(
@@ -1204,6 +1215,7 @@ class EvaluateMixin(_EngineBase):
                     state,
                     plan=plan,
                     return_force_scale=return_force_scale,
+                    cross=cross,
                 ),
                 (positions, masses, force),
                 group=group,
@@ -1215,6 +1227,7 @@ class EvaluateMixin(_EngineBase):
             force,
             plan=plan,
             return_force_scale=return_force_scale,
+            cross=cross,
         )
 
     def _differentiable_large_n_eval(
@@ -1226,6 +1239,7 @@ class EvaluateMixin(_EngineBase):
         *,
         plan: "LargeNGradPlan",
         return_force_scale: bool,
+        cross: Any = None,
     ) -> Any:
         """:meth:`_differentiable_accelerations_large_n`'s evaluation, validated inputs.
 
@@ -1243,6 +1257,9 @@ class EvaluateMixin(_EngineBase):
             The gradient plan.
         return_force_scale : bool
             Also return eq (16b)'s f_b per particle.
+        cross : Any
+            A multi-GPU device's cross far sources (static; never a traced
+            argument of the grouped forward rule), or ``None``.
 
         Returns
         -------
@@ -1262,6 +1279,7 @@ class EvaluateMixin(_EngineBase):
                     plan=plan,
                     force_params=force,
                     return_force_scale=True,
+                    cross=cross,
                 )
             )
             dtype = self._grad_output_dtype(state)
@@ -1277,6 +1295,7 @@ class EvaluateMixin(_EngineBase):
             masses_sorted,
             plan=plan,
             force_params=force,
+            cross=cross,
         )
         return jnp.asarray(accelerations_sorted)[state.inverse_permutation].astype(
             self._grad_output_dtype(state)
