@@ -186,6 +186,38 @@ def build_runner(
     return solver, runner, state_dtype
 
 
+def cpu_mesh_switches(criterion: bool) -> None:
+    """The fused multi-GPU lane on forced CPU devices: the node tier's local smoke only.
+
+    The switches ``tests/distributed``'s mesh tests set (``_multiprocess_scenarios.
+    _cpu_fused_lane``): the lane believes it is on a GPU, its Pallas kernels run in
+    interpret mode, the halo exchange is the all-gather ``"buf"`` one. Process-wide
+    and for good; never on a real GPU.
+
+    Parameters
+    ----------
+    criterion : bool
+        ``mac_type="dehnen_error"`` (its CSR near field needs two more switches).
+    """
+    import jax
+    import yggdrax.distributed.comm as ygg_comm
+
+    if jax.default_backend() != "cpu":
+        return
+    jax.default_backend = lambda: "gpu"
+    resolve = ygg_comm.resolve_ragged_method
+    ygg_comm.resolve_ragged_method = lambda method="auto": (
+        "buf" if method == "auto" else resolve(method)
+    )
+    os.environ["JACCPOT_NEARFIELD_PALLAS_INTERPRET"] = "1"
+    os.environ["JACCPOT_STATIC_STRICT_FUSED_M2L_CSR"] = "0"
+    os.environ["JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP"] = "65536"
+    os.environ["JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF"] = "32"
+    if criterion:
+        os.environ["JACCPOT_NEARFIELD_LEAFPAIR_CSR"] = "1"
+        os.environ["JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB"] = "0"
+
+
 # ----------------------------------------------------------------------
 # The edge callback.
 # ----------------------------------------------------------------------
@@ -490,6 +522,7 @@ def cmd_run(a: argparse.Namespace) -> int:
         from jax.sharding import Mesh
 
         mesh = Mesh(np.asarray(jax.local_devices()[: a.devices]), ("gpus",))
+        cpu_mesh_switches(exec_cfg["mac"] == "dehnen_error")
     law = ForceLaw(G=1.0, softening=float(run["softening"]), kernel=a.kernel)
     tids = select_targets(n, cfg["targets"], seed=cfg["target_seed"])
     probe = EdgeProbe(
