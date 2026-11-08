@@ -1131,3 +1131,39 @@ steps, 4-step segments), the geometric MAC on the pure-JAX near field (CPU route
 with 7 (segments 2-4), each recorded as the edge's `retries` (`SegmentEdge`, the diagnostics' `retries`). Before: leaf
 64 raised at segment 19, leaf 256 at segment 2. The default production path (CSR lane on a GPU, no exact fill) runs
 the same programs: identity below.
+
+## A4 — the accuracy verification suite (wave 5, 2026-11-08)
+
+Plan A4 builds the reference force, the standard problems, the convergence ladders and the check mode that later
+tracks must pass. The worktree is `~/jaccpot-a4` (+ `~/Odisseo-a4`), branch `a4/verification-suite`, based on main
+`cc90bb6f`. How to run it, the schema and the tolerances are in `docs/accuracy_suite.md`. The HoreKa jobs are in
+`bench/slurm/a4/README.md`.
+
+### What was built
+| piece | what |
+| --- | --- |
+| `jaccpot/verification/reference.py` (new) | `reference_force`: an fp64 direct sum at `K` target ids (`select_targets(N, K, seed)`). Each pair term is rounded onto a per-target grid (`2^-86` of the global max term, a `pmax`) and summed as three 30-bit `int64` limbs (an integer `psum`), so the result is the same bits in ANY order. `gather_by_id` (exact rows by id, `all_gather` of `[K, D]`), `score_force` (rel-L2, p50/p90/p99/max), `force_law_of`, and the runner adapters `score_single_result` / `score_mesh_result` (no gather of the particles) |
+| `jaccpot/verification/baseline.py` (new) | the result schema `jaccpot.accuracy/1`; `check_result` with comparable config keys (different N/dt/MAC/precision/targets/seed: "not comparable") and per-metric tolerances (`abs`, `rel`, `ratio`, `ceiling`, `floor`) |
+| `bench/accuracy/` (new) | `ics.py` (Eddington spheres: Plummer, Hernquist, truncated NFW); `analysis.py` (Lagrangian radii and sigma, disc sigma_z^2 / sigma_R^2, `run_bar.py`'s bar probe + `bar_summary.py`'s numbers + the buckling time, merger centres and pericentres); `problems.py` (the six problems, per-tier defaults, tolerances); `suite.py` (`run`, `record`, `check`, `analyse-existing`, `ladder`, `summarize`, `ic`); `ladders.py` (N, dt, MAC and precision ladders, the latter with A3's `anchored` slot); `local_tier.sh` |
+| `bench/slurm/a4/` (new) | `card1.sbatch` / `node.sbatch` (one rung per array task: one A100, or one exclusive node with `--devices 4`), `ics.sbatch` (agama), `summarize.sbatch`, `submit.sh` (`--dry-run`, `--local-smoke`), `site.env`, `README.md` |
+| Odisseo `tools/a4_galaxy_ics.py` (new) | the 2026-10-31 galaxy, bar-disc and merger ICs in the suite's format (agama seeded too) |
+| CI | `tests/unit/verification/` (unit shard), `tests/distributed/test_reference_force_devices.py` (distributed tier, 2 forced devices), `tests/distributed/test_multiprocess_reference.py` (joins the `distributed-multiprocess` shard; `jaccpot/verification/` added to `GATED_PATHS`), `bench/tests/test_accuracy_suite.py` (bench-tooling) |
+
+No library file changed: the default paths are untouched. A3's files were not touched either.
+
+### Gates
+| gate | result | configuration |
+| --- | --- | --- |
+| 1. the reference equals an fp64 direct sum | max relative difference from `jaccpot.runtime.reference.direct_sum` < 1e-14 for `plummer`, `ferrers3`, `wendland_c2` (eps 0.02) and Newton; potential < 1e-14; against an extended-precision sum of the same terms < 4e-16 (smoke: 4.9e-16 at N = 3000) | CPU, N = 400 (with a dense clump), K = 48 |
+| 1. bitwise across devices | identical bits (acceleration, potential, positions) on 1 / 2 / 4 forced devices, each with its own row shuffle and padding; any row order, padding or split into two source groups on one device | CPU forced devices, N = 512, K = 64 |
+| 1. bitwise across processes | 2 and 4 processes x 1 device == 1 process x 2 / 4 devices, bit for bit (two kernels), and the runner's multi-GPU mode (`DirectMeshForce`, migrating) scored at its end state identically on both sides, rel-L2 < 1e-13 | gloo on localhost (M2's harness) |
+| 2. problems end to end | all six (`plummer`, `hernquist`, `nfw`, `disc_heating`, `bar`, `merger`) run through `ProductionRunner` and write `result.json` (CPU route, smoke sizes); the local GPU tier: see below | CPU, `dehnen_error`, fp32 |
+| 2. reproduces the recorded runs | the bar ladder (`analyse-existing bar`): `t_bar`, peak time and amplitude, bar length and pattern speed equal `ladder_final.json`; buckling 2736 / 2673 / 1736 / 1472 Myr (1e8 / 4e7 / 1e7 / 2.5e6, theta 0.7) against the record's 2.74 / 2.68 / 1.73 / 1.47 Gyr, s33 / s34 2156 / 2169 (record 2186 / 2172). The merger: first pericentre 9.04 kpc at t 1.307 in all three dt runs (record: 9.1 kpc, t 1.30), apocentre 84.7 kpc at t 4.14, second pericentre 0.57 kpc at t 7.61 (record: t 7.6, 0.6 kpc) | the 2026-10-31 `probe.jsonl` files |
+| 3. check passes / fails | baseline = Plummer N = 1024, 4 t_dyn. The re-run: CHECK PASS (bitwise on CPU). `--perturb dt=4` (same end time): FAIL, `energy.max_abs_dE` 2.67e-2 vs 5.07e-5 and `force.p99_end` 1.5x. `--perturb theta=0.95`: FAIL, `force.rel_l2_end` 1.87e-2 vs 8.73e-5 and energy 7x. N 1000 vs 1024: FAIL, "not comparable" | CPU route, `dehnen_error` 1e-4, fp32, K = 256 |
+| 4. HoreKa suite | `bash -n` on every script; `submit.sh --dry-run`: 21 arrays (14 one-card, 7 node) + ics + summary; every rung's command line parses (`bench/tests`); `--local-smoke`: every rung at tiny N on the CPU (node tier on 4 forced devices): see below | |
+| 5. CI | `test_shards.py check` rc 0 (3199 tests covered); new files under `JACCPOT_RUNTIME_TYPECHECK=1`: unit 13 passed (1.36 GB peak RSS, 35 s), forced 2 devices 3 passed (1.77 GB, 23 s), 2 processes 1 passed (1.58 GB per process, 40 s); top-level `tests/unit` guards pass | CPU |
+| identity | `provider_hlo_identity compare w5-main-cpu a4-tip-cpu`: see below | |
+
+**The reference's cost.** It makes two passes over the `N * K` pairs, about 3x an fp64 direct sum on them. It is a
+verification step, not a per-edge diagnostic. The runs score it at the first edge with a force, every
+`--score-every` segments and the last edge.

@@ -64,7 +64,9 @@ _PRECISION_RUNGS = [
 
 
 def _fmt_n(n: int) -> str:
-    return f"n{n:.0e}".replace("+0", "").replace("+", "")
+    """``n2.5e6`` for 2_500_000 (three significant digits, no ``+`` or leading zeros)."""
+    mant, exp = f"{n:.3g}".split("e") if "e" in f"{n:.3g}" else (f"{n:.3g}", "0")
+    return f"n{mant}e{int(exp)}"
 
 
 def _ladders(tier: str) -> dict:

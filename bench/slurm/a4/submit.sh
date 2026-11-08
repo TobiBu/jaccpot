@@ -39,6 +39,7 @@ if [ "$SMOKE" = 1 ]; then
   # Gate 4's local smoke: every job's exact command line at tiny N (A4_SMOKE=1 shrinks every rung),
   # on this host's CPU (the node tier on 4 forced host devices), plus the IC job at 1e-4 scale.
   : "${A4_PY:?--local-smoke needs A4_PY (e.g. /export/scratch/tbuck/mn-scratch/bin/py-a4)}"
+  cd "$JACCPOT"
   RUN=${A4_RUN:-$JACCPOT/.a4-smoke}
   export A4_LOCAL_SMOKE=1 A4_SMOKE=1 A4_RUN=$RUN A4_JACCPOT=$JACCPOT JAX_PLATFORMS=cpu
   export A4_IC=${A4_IC:-$RUN/ics} A4_IC_SCALE=${A4_IC_SCALE:-0.0001}

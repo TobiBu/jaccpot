@@ -58,13 +58,13 @@ scaling in N above ~1e6):
 | `disc_dt` | 1.6e7 at dt 2e-3, 1e-3, 5e-4 (3 h) | - |
 | `disc_mac` | 1.6e7, six MAC rungs (3 h) | 6.4e7 (6 h) |
 | `disc_precision` | 1.6e7, four precisions (6 h) | 6.4e7 (12 h) |
-| `bar_n` | 2.5e6, 1e7, 4e7 at theta 0.7, and 2.5e6, 1e7 at `dehnen_error`; 3 Gyr = 20000 steps (10 h) | 1e8 (16 h) |
+| `bar_n` | 2.5e6, 1e7, 4e7 at theta 0.7, and 2.5e6, 1e7 at `dehnen_error`; 3 Gyr = 20000 steps (10 h) | 1e8 at theta 0.7 and `dehnen_error` (16 h) |
 | `merger_n` | 1.25e7, 2.5e7, 5e7; t = 10, 10000 steps (6 h) | 1e8, 2e8 (12 h) |
 | `merger_dt` | 2.5e7 at dt 2e-3, 1e-3, 5e-4 (8 h) | 1e8 (16 h) |
 | `merger_mac` | 2.5e7: theta 0.7, 0.8, tol 1e-4 (6 h) | - |
 
 **Budget.** The 1-card tier has 53 rungs. They are mostly short: about 60-80 GPU-hours expected, which is
-15-20 node-hours, charged per GPU. The node tier has 16 rungs of 2-16 h, about 90-120 node-hours expected.
+15-20 node-hours, charged per GPU. The node tier has 21 rungs, mostly 0.5-2 h on dedicated cards (the `--time` limits are generous): about 25-40 node-hours expected, at most ~200 if every rung hit its limit.
 
 To stay inside a smaller budget:
 
