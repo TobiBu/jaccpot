@@ -1916,7 +1916,7 @@ class FastMultipoleMethod:
     def strict_run_v2(
         self: "FastMultipoleMethod",
         *,
-        state: Float[Array, "n 2 3"],
+        state: Float[Array, "n r 3"],
         masses: Float[Array, "n"],
         dt: Union[float, Array],
         num_steps: int,
@@ -1960,9 +1960,11 @@ class FastMultipoleMethod:
 
         Parameters
         ----------
-        state : Float[Array, 'n 2 3']
+        state : Float[Array, 'n r 3']
             Packed integrator state ``[N, 2, 3]``: positions and velocities
-            stacked on axis 1.
+            stacked on axis 1. A ``scheme`` may carry more rows after them
+            (:class:`jaccpot.position_precision.CompensatedKDK`: ``[N, 3, 3]`` /
+            ``[N, 4, 3]``); rows 0 and 1 stay the positions and velocities.
         masses : Float[Array, 'n']
             Particle masses ``[N]``.
         dt : Union[float, Array]
