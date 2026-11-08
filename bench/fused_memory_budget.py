@@ -303,9 +303,11 @@ def _args() -> argparse.Namespace:
     ap.add_argument(
         "--runner-scheme",
         default="builtin",
-        choices=("builtin", "nornax_kdk"),
+        choices=("builtin", "nornax_kdk", "summed", "comp_x", "comp_xv"),
         help="with --runner: the integration scheme (multi-node plan I1): the "
-        "runner's built-in KDK, or nornax.schemes.LeapfrogKDK (needs nornax)",
+        "runner's built-in KDK, or nornax.schemes.LeapfrogKDK (needs nornax); A3's "
+        "jaccpot.position_precision schemes: summed (SummedDriftKDK), comp_x / "
+        "comp_xv (CompensatedKDK, the state packed by compensated_state)",
     )
     ap.add_argument(
         "--runner-resume",
@@ -1051,6 +1053,21 @@ def _run_through_runner(result: dict, solver, state0, masses, dt, ext, saved) ->
         from nornax.schemes import LeapfrogKDK
 
         scheme = LeapfrogKDK()
+    elif ARGS.runner_scheme != "builtin":
+        from jaccpot.position_precision import (
+            CompensatedKDK,
+            SummedDriftKDK,
+            compensated_state,
+        )
+
+        if ARGS.runner_scheme == "summed":
+            scheme = SummedDriftKDK()
+        else:
+            velocities = ARGS.runner_scheme == "comp_xv"
+            scheme = CompensatedKDK(velocities=velocities)
+            state0 = jnp.asarray(
+                compensated_state(state0, velocities=velocities), state0.dtype
+            )
     result["runner_scheme"] = ARGS.runner_scheme
     s = int(ARGS.steps)
     targets = [1, 1 + s] + [1 + s * (2 + i) for i in range(ARGS.reps)]
