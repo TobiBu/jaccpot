@@ -420,7 +420,9 @@ def bar_summary(rows: list, diag: Optional[list] = None) -> dict:
         "bar.a2max_end": float(a2max[-1]),
         "bar.length_end_kpc": float(blen[-1]),
         "bar.omega_p_end": (
-            float(np.nanmean(omega[-20:])) if strong[-20:].any() else None
+            float(np.nanmean(omega[-20:]))
+            if strong[-20:].any() and np.isfinite(omega[-20:]).any()
+            else None
         ),
         "bar.t_buckle_myr": buckle,
         "bar.z_in_end_kpc": float(z_in[-1]),
