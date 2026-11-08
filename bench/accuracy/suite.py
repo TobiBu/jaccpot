@@ -465,6 +465,12 @@ def cmd_run(a: argparse.Namespace) -> int:
         exec_cfg["theta"] = 0.8
     if exec_cfg["mac"] == "dehnen_error" and exec_cfg.get("tol") is None:
         exec_cfg["tol"] = 1e-4
+    # a perturbed dt still covers t_end
+    num_steps = max(
+        block,
+        int(math.ceil(float(run["t_end"]) / float(exec_cfg["dt"]) / block)) * block,
+    )
+    exec_cfg["num_steps"] = num_steps
     with open(os.path.join(a.out, "config.json"), "w") as fh:
         json.dump(dict(cfg, executed=exec_cfg), fh, indent=1, default=str)
 
