@@ -932,3 +932,59 @@ orchestration). Branch `i2/sharded-scheme` in jaccpot, nornax and Odisseo (from 
 | 5, Odisseo mesh-lane files at 2 forced devices | 38 passed (new: `fmm_scheme="nornax_kdk"` on the mesh lane == the built-in lane bitwise); suite `-m 'not slow'` 274 passed, 6 skipped, 2 xfailed |
 | 3, GPU (functional; 2 A100s by autocvd, one process; shared host, no timings) | N = 262,144 Plummer (a = 1), galaxy-preset solver, fused mesh force, migration on, 10 x 10 steps at dt 1e-3, energy every edge, PRODUCTION flags (no `--xla_gpu_deterministic_ops`): `dehnen_error` and `dehnen` each: A-vs-A control 0 differing, `LeapfrogKDK` vs both built-in arms 0 differing (state, acceleration, `f_b`, diagnostics), 0 retries, energy drift -3.2e-7 / -2.5e-7 |
 | 6, CI | new gated shard/job `distributed-segment-scheme`; `jaccpot/scheme.py` joins `GATED_PATHS`; `test_shards.py check` rc 0; top-level `tests/unit` guards with `JACCPOT_RUNTIME_TYPECHECK=1` rc 0; nornax solver-tests job lists `test_jaccpot_sharded.py` (skips until its jaccpot pin has I2) |
+
+## FUP — the fused lane's CPU route, the geometric MAC's accuracy, two re-plans (wave 3, 2026-11-06)
+
+Three follow-ups of ODY (Odisseo's default FMM lane is the runner). jaccpot base main 4ace6562.
+
+### The CPU route: `RuntimePolicyConfig(cpu_fused_lane=True)` (opt-in)
+
+The fused lane gated its prepare on `jax.default_backend() == "gpu"`; Odisseo and jaccpot's own CPU tests reached it by
+making the whole process report `"gpu"`. Now an engine built with `cpu_fused_lane=True` takes, on a CPU backend, the
+GPU's lane policy at every engine gate (`FMMEngine._lane_backend` -> `runtime/_lane_platform.lane_policy_backend`:
+the large-N prepare, the split dual-tree build default, the near-field mode and chunk, the streamed traversal cap, the
+precompute/schedule caps, the tree jit), while kernel availability (`pallas_*_supported`) keeps the real backend: the
+pure-JAX kernels. With `use_pallas=True` the near field runs the CSR lane in Pallas interpret mode (what
+`dehnen_error`'s force scale needs): the three switches (`JACCPOT_NEARFIELD_PALLAS_INTERPRET`, `..._LEAFPAIR_CSR`,
+`JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB=0`) are context-local defaults (`jaccpot._env.scoped_env_defaults`, a
+`ContextVar`; `os.environ` is never written, a shell value wins), entered by `ProductionRunner`'s and
+`FusedForceProvider`'s entry points and `strict_run_v2`. On a GPU, and for every engine without the flag,
+`_lane_backend()` is `jax.default_backend()`: the programs are unchanged. Without the flag the provider's CPU refusal
+names it. **Verified:** the runner on the route = the monkeypatched lane bit for bit (N = 512 4 steps and N = 256 2
+steps; the geometric MAC on the pure-JAX near field and `dehnen_error` on the interpret-mode CSR lane). jaccpot's own
+CPU tests keep their monkeypatch (both routes are pinned equal by `tests/integration/strict/test_cpu_fused_route.py`).
+
+### The geometric MAC's accuracy: cell leaves, not the MAC (no numerics changed)
+
+ODY measured the fused lane's geometric Dehnen MAC ~36x less accurate than Odisseo's old coupler at the same theta
+(leaf 16, p4, theta 0.6: rel-L2 4.3e-3 vs 1.2e-4, N = 512). Both test `r_A + r_B <= theta d` about COM centres with
+exact radii; the difference is the TREE: the galaxy preset builds cell leaves (`leaf_size` a ceiling: 6.1 particles a
+leaf on average at N = 512, down to one), the coupler bucket leaves of exactly 16. The fused lane sends 68 % of the
+particle pairs to the far field there, the coupler 2.3 %. The general path on the same cell tree gives the same
+4.28e-3, the galaxy solver with bucket leaves the coupler's 1.196e-4; every accepted pair is within theta, every
+particle pair counted once, fp64 = fp32 (truncation). The gap closes with N (36x at 512, 5.7x at 2048, 3.8x at 8192).
+The coupler's accuracy needs theta ~0.3 at N ~ 500, ~0.45 at N ~ 2000, or leaf 64 at theta 0.6
+(`mn-scratch/fup/t2/FINDINGS.md`). Eq (16a) sets the accuracy directly. Not changed (an optional enhancement: never
+accept a far pair whose node holds fewer than ~p particles).
+
+### Two capacities the segment retry did not re-plan
+
+ODY's case: the FMM notebook's N = 512 cube collapsing (masses 0.5-1.5, softening 1e-3 `ferrers3`, dt 5e-3, 200
+steps, 4-step segments), the geometric MAC on the pure-JAX near field (CPU route), leaf 64 and 256: both raised
+"a fixed capacity saturated" with every walk and tree flag 0.
+
+1. **A far list filled EXACTLY.** The verdict reads a full far buffer as saturated (`far_count >= width`: an overflow
+   saturates the count to the width), the walk raises no flag (every pair fitted), so `_replan_walk_caps_from_needs`
+   re-planned nothing (leaf 256: 64 of 64 directed pairs). Now such a list grows (`_far_list_full`; at least one
+   pair more); a NAMED far cap that filled still raises.
+2. **The rectangle near-field layout** (the pure-JAX near field only; the CSR lane never reads it): its static
+   target-block cap is sized at the eager prepare from the START's densest row and only ever grown; rows that outgrow
+   it mid-segment (leaf 64: 71 against 64; leaf 256: 39 against 32) failed the verdict with no flag, and the re-prepare
+   at the same start sized it the same. Now, when neither the walk nor the tree overflowed and the rectangle guard
+   is active, `FusedForceProvider.replanned` doubles it (`_replan_rectangle_blocks`, up to the caps ladder's last
+   rung); the progress retries continue while each re-run gets further.
+
+**Result** (CPU route, default environment): leaf 64 runs all 200 steps with 2 retries (segments 3 and 19), leaf 256
+with 7 (segments 2-4), each recorded as the edge's `retries` (`SegmentEdge`, the diagnostics' `retries`). Before: leaf
+64 raised at segment 19, leaf 256 at segment 2. The default production path (CSR lane on a GPU, no exact fill) runs
+the same programs: identity below.
