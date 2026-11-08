@@ -26,6 +26,12 @@ be ``None`` or equal them. The external field and potential see one device's
 ``(cap, 2, 3)`` rows -- the single card's ``field(state, params)`` contract
 restricted to rows, so a per-particle field works unchanged.
 
+**The integration scheme** (``ProductionRunner(scheme=...)``, multi-node plan I2)
+goes to the segment runner, which calls its ``open_step`` / ``close_step`` on each
+device's rows inside the segment (:func:`jaccpot.scheme.check_mesh_scheme`: rowwise,
+or with a mesh form); ``None`` keeps the built-in programs. The restart file records
+it as the single card's does.
+
 **Diagnostics.** The moments are the single card's fp64 reductions over the flat
 sharded arrays: a padding row has zero mass and zero velocity, so every moment is
 exact without a mask. The energy is ``K + W_self + W_ext`` from
@@ -122,7 +128,9 @@ def _live_rows(count: np.ndarray, cap: int) -> np.ndarray:
     ).astype(np.int64)
 
 
-def _by_id(flat: dict, ids_flat: np.ndarray, count: np.ndarray) -> dict:
+def _by_id(
+    flat: dict, ids_flat: np.ndarray, count: np.ndarray, tail: Optional[tuple] = None
+) -> dict:
     """Host layout arrays in id order, with the identity checked.
 
     Parameters
@@ -133,6 +141,10 @@ def _by_id(flat: dict, ids_flat: np.ndarray, count: np.ndarray) -> dict:
         ``(ndev * cap,)`` global ids (``-1`` on padding).
     count : np.ndarray
         ``(ndev,)`` live rows per device.
+    tail : Optional[tuple]
+        The escaper tail's ``(flat, ids_flat, count)`` (MESC; its rows by device
+        too), or ``None``. A name ``flat`` has and the tail has not is zero on
+        its rows.
 
     Returns
     -------
@@ -148,7 +160,26 @@ def _by_id(flat: dict, ids_flat: np.ndarray, count: np.ndarray) -> dict:
     cap = int(ids_flat.shape[0]) // ndev
     rows = _live_rows(count, cap)
     ids = ids_flat[rows].astype(np.int64)
-    n = int(rows.shape[0])
+    owner_rows = rows // cap
+    if tail is not None:
+        t_flat, t_ids_flat, t_count = tail
+        t_cap = int(t_ids_flat.shape[0]) // ndev
+        t_rows = _live_rows(t_count, t_cap)
+        flat = {
+            name: (
+                arr[rows],
+                (
+                    t_flat[name][t_rows]
+                    if name in t_flat
+                    else np.zeros((t_rows.shape[0],) + arr.shape[1:], arr.dtype)
+                ),
+            )
+            for name, arr in flat.items()
+        }
+        ids = np.concatenate([ids, t_ids_flat[t_rows].astype(np.int64)])
+        owner_rows = np.concatenate([owner_rows, t_rows // t_cap])
+        rows = None
+    n = int(ids.shape[0])
     seen = np.zeros(n, bool)
     if n:
         if ids.min() < 0 or ids.max() >= n:
@@ -158,17 +189,24 @@ def _by_id(flat: dict, ids_flat: np.ndarray, count: np.ndarray) -> dict:
         raise ValueError("particle identity broken: ids are not exactly 0..N-1 once")
     out = {}
     for name, arr in flat.items():
-        full = np.empty((n,) + arr.shape[1:], arr.dtype)
-        full[ids] = arr[rows]
+        if rows is None:
+            bound, escaped = arr
+            full = np.empty((n,) + bound.shape[1:], bound.dtype)
+            full[ids] = np.concatenate([bound, escaped])
+        else:
+            full = np.empty((n,) + arr.shape[1:], arr.dtype)
+            full[ids] = arr[rows]
         out[name] = full
     owner = np.empty(n, np.int32)
-    owner[ids] = rows // cap
+    owner[ids] = owner_rows
     out["owner"] = owner
     return out
 
 
 def gather_by_id(
-    layout: Any, names: Sequence = ("state", "masses", "acceleration")
+    layout: Any,
+    names: Sequence = ("state", "masses", "acceleration"),
+    tail: Any = None,
 ) -> dict:
     """A :class:`~jaccpot.distributed.segment.MeshState`'s arrays on the host, by id.
 
@@ -184,6 +222,10 @@ def gather_by_id(
     names : Sequence
         Of its array fields (``state``, ``masses``, ``acceleration``,
         ``force_scale``); one that is ``None`` (not computed yet) is left out.
+    tail : Any
+        The escaper tail (:class:`~jaccpot.distributed.escapers.EscaperTail`,
+        MESC): its escapers are gathered too (``force_scale`` zero on them);
+        ``None`` or an empty tail: the layout alone.
 
     Returns
     -------
@@ -196,7 +238,18 @@ def gather_by_id(
         for name in names
         if getattr(layout, name) is not None
     }
-    return _by_id(flat, _host(layout.ids), _host(layout.count))
+    tail_part = None
+    if tail is not None and int(tail.total) > 0:
+        tail_part = (
+            {
+                name: _host(getattr(tail, name))
+                for name in ("state", "masses", "acceleration")
+                if name in flat and getattr(tail, name) is not None
+            },
+            _host(tail.ids),
+            _host(tail.count),
+        )
+    return _by_id(flat, _host(layout.ids), _host(layout.count), tail_part)
 
 
 class MeshBackend:
@@ -301,6 +354,7 @@ class MeshBackend:
             RunResult,
             _baselines,
             _diagnostics_row,
+            _escaper_fields,
             _moments,
             _warn_fusion_autotuner,
             load_restart,
@@ -323,6 +377,11 @@ class MeshBackend:
         started = time.perf_counter()
         dt_value = float(np.asarray(dt))
         restored: Optional[dict] = None
+        # the escaper path (escapers=, MESC): the split's record -- the bound
+        # rows' count, the ledger, the transfers and the tail's capacity; the
+        # escapers themselves are the segment runner's tail. ``None``: off.
+        policy = runner.escapers
+        split: Optional[dict] = None
         if restart_from is None:
             if state is None or (
                 masses is None and not isinstance(state, ProcessLocalParticles)
@@ -334,14 +393,22 @@ class MeshBackend:
                 host_state = np.asarray(state.state)
                 host_masses = np.asarray(state.masses)
                 external_arg = self._external_arg(external_params, host_state.dtype)
-                msr = self._fresh(
-                    host_state, host_masses, num_particles=int(state.num_particles)
-                )
+                num_all = int(state.num_particles)
+                local_n: Optional[int] = num_all
             else:
                 host_state = _host(state)
                 host_masses = _host(masses)
                 external_arg = self._external_arg(external_params, host_state.dtype)
-                msr = self._fresh(host_state, host_masses)
+                num_all = int(host_state.shape[0])
+                local_n = None
+            if policy is None:
+                msr = self._fresh(host_state, host_masses, num_particles=local_n)
+            else:
+                # the escaper path: the bound rows decomposed, the escapers in
+                # their tail (MESC)
+                msr, split = self._fresh_split(
+                    host_state, host_masses, num_all, local_n, policy
+                )
             del host_state, host_masses
             step, segment_done = 0, 0
             t0_run = float(t0)
@@ -357,6 +424,7 @@ class MeshBackend:
                 )
             msr = res.handle
             self._check_force_params(force_params, msr.force)
+            split = self._split_in(res.escapers, policy, msr)
             step, segment_done, t0_run = res.step, res.segment, res.t0
             anchor = res.time_anchor if dt_value == res.dt else (res.time, res.step)
             baselines = res.baselines
@@ -383,6 +451,7 @@ class MeshBackend:
                 dt_value=dt_value,
                 external_arg=external_arg,
             )
+            split = self._split_in(meta.get("escapers"), policy, msr)
             del arrays
         else:
             raise TypeError(
@@ -402,23 +471,39 @@ class MeshBackend:
         edges: list = []
         restarts: list = []
         stopped = False
+        # the escaper path: particles over the mesh, and this edge's re-split
+        # (its transfers, jump and the new split's potential, which the edge's
+        # row reuses)
+        n_all = 0
+        if split is not None:
+            n_all = int(np.sum(_host(msr.state.count))) + int(msr.tail.total)
+        edge_split: dict = {}
+
+        def moments_of(arrays: Any) -> dict:
+            return (
+                mesh_moments(arrays.state, arrays.masses, self.mesh, self.axis_name)
+                if is_multiprocess()
+                else _moments(arrays.state, arrays.masses)
+            )
 
         def diagnostics_at(step_now: int, due: bool) -> Optional[dict]:
             nonlocal baselines
             if every == 0 or not due:
                 return None
             layout = msr.state
-            moments = (
-                mesh_moments(layout.state, layout.masses, self.mesh, self.axis_name)
-                if is_multiprocess()
-                else _moments(layout.state, layout.masses)
-            )
+            moments = moments_of(layout)
+            if split is not None and msr.tail_on:
+                # the escapers' moments (their padding rows: zero mass and speed)
+                escaped = moments_of(msr.tail)
+                moments = {k: moments[k] + escaped[k] for k in moments}
             if baselines is None:
                 baselines = dict(_baselines(moments, time_at(step_now)), step=step_now)
             energy_due = every_energy > 0 and segment_done % every_energy == 0
             potential, reason = None, None
             if energy_on and energy_due:
-                potential, reason = self._potential(msr, external_arg)
+                potential = edge_split.get("potential")
+                if potential is None:
+                    potential, reason = self._potential(msr, external_arg)
                 if (
                     potential is not None
                     and potential["ok"]
@@ -426,7 +511,11 @@ class MeshBackend:
                     and step_now == baselines.get("step")
                 ):
                     # E0 at step 0 itself: the mesh force is prepared already
-                    w0 = potential["self"] + potential["external"]
+                    w0 = (
+                        potential["self"]
+                        + potential["external"]
+                        + potential.get("couple", 0.0)
+                    )
                     baselines["potential"] = w0
                     baselines["energy"] = float(baselines["kinetic"]) + w0
             row = _diagnostics_row(
@@ -434,11 +523,17 @@ class MeshBackend:
             )
             if reason is not None:
                 row["energy_unavailable"] = reason
+            if split is not None:
+                row.update(
+                    _escaper_fields(
+                        split, edge_split, row, baselines, n_all, potential, energy_on
+                    )
+                )
             return row
 
         def edge_at(retries: int, wall_s: float, due: bool, report: Any) -> Any:
             layout = msr.state
-            return MeshSegmentEdge(
+            edge = MeshSegmentEdge(
                 step=step,
                 time=time_at(step),
                 segment=segment_done,
@@ -450,7 +545,10 @@ class MeshBackend:
                 diagnostics=diagnostics_at(step, due),
                 plan=self._plan_record(msr, report),
                 layout=layout,
+                escapers=None if split is None else msr.tail,
             )
+            edge_split.clear()
+            return edge
 
         def at_edge(edge: Any) -> bool:
             # the position save_restart writes, the restart if due, the callbacks
@@ -466,6 +564,7 @@ class MeshBackend:
                 anchor=anchor,
                 external_params=external_arg,
                 plan=edge.plan,
+                escapers=None if split is None else dict(split),
             )
             restart = runner._restart_due(segment_done)
             if restart is not None:
@@ -477,7 +576,12 @@ class MeshBackend:
                     stop = True
             edges.append(
                 dataclasses.replace(
-                    edge, state=None, masses=None, self_acceleration=None, layout=None
+                    edge,
+                    state=None,
+                    masses=None,
+                    self_acceleration=None,
+                    layout=None,
+                    escapers=None,
                 )
             )
             return stop
@@ -503,11 +607,26 @@ class MeshBackend:
             step += int(steps)
             segment_done += 1
             last = index == len(lengths) - 1
+            if split is not None and segment_done % int(policy.every) == 0:
+                # the membership at this edge; a change moves the rows and
+                # records the ledger's jump
+                edge_split.update(
+                    self._resplit(
+                        msr,
+                        split,
+                        policy,
+                        n_all,
+                        energy=energy_on,
+                        external_arg=external_arg,
+                    )
+                )
             due = every > 0 and (segment_done % every == 0 or last)
             if at_edge(edge_at(int(report.retries), wall_s, due, report)):
                 stopped = True
                 break
-        gathered = gather_by_id(msr.state, ("state", "masses"))
+        gathered = gather_by_id(
+            msr.state, ("state", "masses"), tail=None if split is None else msr.tail
+        )
         return RunResult(
             state=gathered["state"],
             masses=gathered["masses"],
@@ -526,6 +645,7 @@ class MeshBackend:
             time_anchor=anchor,
             state_owned=True,
             mode="mesh",
+            escapers=None if split is None else dict(split),
         )
 
     # ------------------------------------------------------------------
@@ -603,6 +723,7 @@ class MeshBackend:
             migrate=bool(self.config.migrate),
             migration_cap=self.config.migration_cap if cap is None else int(cap),
             splitters=migration.get("splitters"),
+            scheme=self.runner.scheme,
         )
 
     def _cap(self, num_particles: int) -> int:
@@ -732,6 +853,308 @@ class MeshBackend:
         layout, migration = self._decomposed(state, masses, force, num_particles)
         return self._segment_runner(layout, force, migration)
 
+    # ------------------------------------------------------------------
+    # The escaper path (escapers=, MESC; jaccpot.distributed.escapers).
+    # ------------------------------------------------------------------
+
+    def _coupling_G(self, force: Any) -> float:
+        """The coupling's ``G``: the force's own (it is static in it).
+
+        Parameters
+        ----------
+        force : Any
+            The run's force.
+
+        Returns
+        -------
+        float
+            ``G``.
+        """
+        return self._own_force_params(force)[0]
+
+    def _fresh_split(
+        self,
+        state: np.ndarray,
+        masses: np.ndarray,
+        num_all: int,
+        num_particles: Optional[int],
+        policy: Any,
+    ) -> tuple:
+        """A fresh run's segment runner under the escaper policy, and its split.
+
+        The membership of the initial state (:func:`~jaccpot.distributed.escapers.initial_membership`);
+        nobody beyond ``r_escape``: the run's default decomposition with an empty
+        tail (the run IS the run without escapers until someone leaves); else the
+        bound rows decomposed and the escapers placed in their tail
+        (:func:`~jaccpot.distributed.escapers.place_split`), so the cuts, the box
+        and every capacity are the bound rows'.
+
+        Parameters
+        ----------
+        state : np.ndarray
+            ``[N, 2, 3]`` (or this process's ids, with ``num_particles``).
+        masses : np.ndarray
+            ``[N]``.
+        num_all : int
+            N over the run.
+        num_particles : Optional[int]
+            As :meth:`_decomposed`.
+        policy : Any
+            The :class:`~jaccpot.escapers.EscaperPolicy`.
+
+        Returns
+        -------
+        tuple
+            ``(MeshSegmentRunner, split)``; ``split`` holds ``n_bound``,
+            ``ledger``, ``transfers``, ``tail_cap``, ``tail_grown`` (the tail's
+            growths) and ``recuts`` (``migrate=True``: the repartitions after a
+            changed split).
+        """
+        from jaccpot.distributed.escapers import (
+            empty_tail,
+            initial_membership,
+            place_split,
+        )
+        from jaccpot.distributed.migration import ownership_splitters
+        from jaccpot.distributed.multiprocess import local_id_range
+        from jaccpot.distributed.segment import MeshState, _force_box_cubic
+
+        lo = 0 if num_particles is None else local_id_range(num_all, self.mesh)[0]
+        escaper, transfers = initial_membership(
+            state[:, 0],
+            masses,
+            lo=lo,
+            num_particles=num_all,
+            mesh=self.mesh,
+            policy=policy,
+        )
+        force = self._force()
+        if transfers == 0:
+            layout, migration = self._decomposed(state, masses, force, num_particles)
+            tail = empty_tail(self.mesh, self.axis_name, state.dtype)
+        else:
+            migrate = bool(self.config.migrate)
+            cubic = _force_box_cubic(force) if migrate else None
+            shard, tail = place_split(
+                self.mesh,
+                state,
+                masses,
+                escaper,
+                lo=lo,
+                num_particles=num_all,
+                cap=self._cap(num_all),
+                num_samples=int(self.config.num_samples),
+                axis_name=self.axis_name,
+                cubic=cubic,
+            )
+            migration = None
+            if migrate:
+                migration = {
+                    "splitters": ownership_splitters(
+                        self.mesh,
+                        shard.positions,
+                        shard.count,
+                        cubic=bool(cubic),
+                        axis_name=self.axis_name,
+                    )
+                }
+            layout = MeshState.from_shard_state(
+                shard, self.mesh, axis_name=self.axis_name
+            )
+        msr = self._segment_runner(layout, force, migration)
+        msr.attach_escapers(tail, self._coupling_G(force))
+        split = {
+            "n_bound": int(num_all) - int(tail.total),
+            "ledger": 0.0,
+            "transfers": int(transfers),
+            "tail_cap": int(tail.cap),
+            "tail_grown": 0,
+            "recuts": 0,
+        }
+        return msr, split
+
+    def _split_in(
+        self, split_in: Optional[dict], policy: Any, msr: Any
+    ) -> Optional[dict]:
+        """A continued run's split (a ``RunResult``'s or a restart file's).
+
+        Parameters
+        ----------
+        split_in : Optional[dict]
+            The record it carries (``None``: it ran without escapers).
+        policy : Any
+            This runner's policy (``None``: off).
+        msr : Any
+            The continued segment runner (its tail is the record's).
+
+        Returns
+        -------
+        Optional[dict]
+            The split, or ``None``.
+
+        Raises
+        ------
+        ValueError
+            If the run continues in another escaper mode.
+        """
+        if (split_in is None) != (policy is None):
+            raise ValueError(
+                "a run continues in its own escaper mode: "
+                + (
+                    "this one ran with escapers= (pass the runner the policy)"
+                    if policy is None
+                    else "this one ran without escapers (escapers=None)"
+                )
+            )
+        if split_in is None:
+            return None
+        if msr.tail is None:
+            raise ValueError("the continued run has no escaper tail")
+        return {
+            "n_bound": int(split_in["n_bound"]),
+            "ledger": split_in["ledger"],
+            "transfers": int(split_in["transfers"]),
+            "tail_cap": int(msr.tail.cap),
+            "tail_grown": int(split_in.get("tail_grown", 0)),
+            "recuts": int(split_in.get("recuts", 0)),
+        }
+
+    def _resplit(
+        self,
+        msr: Any,
+        split: dict,
+        policy: Any,
+        n_all: int,
+        *,
+        energy: bool,
+        external_arg: Any,
+    ) -> dict:
+        """A segment edge's membership check; on a change, the rows moved and the jump.
+
+        :func:`jaccpot.escapers.resplit` on the mesh: the per-device counts of
+        rows leaving and returning (one small program); on a change the energy of
+        the SAME state in its old and its new representation (the ledger's jump;
+        ``split["ledger"]`` becomes ``None`` once a jump is unknown), the tail
+        grown first if a device's escapers outgrow it (a new tail capacity: its
+        programs compile again), and the device-local move
+        (:func:`~jaccpot.distributed.escapers.resplit`). The carried
+        accelerations are dropped: the next segment's start force evaluates the
+        new split.
+
+        Parameters
+        ----------
+        msr : Any
+            The segment runner.
+        split : dict
+            The run's split, updated in place.
+        policy : Any
+            The radii.
+        n_all : int
+            Particles over the mesh.
+        energy : bool
+            Evaluate the jump (the run's energy diagnostic is on).
+        external_arg : Any
+            The external potential's parameters.
+
+        Returns
+        -------
+        dict
+            ``transfers`` and, after a change, ``jump`` and ``potential`` (the new
+            split's, which the edge's diagnostics row reuses).
+
+        Raises
+        ------
+        RuntimeError
+            If no particle would stay in the tree, or a device's bound rows would
+            outgrow its shard (``cap``).
+        """
+        from jaccpot.distributed.escapers import (
+            grown_tail,
+            membership,
+            resplit,
+            tail_capacity,
+        )
+
+        tail = msr.tail
+        out, back = membership(self.mesh, self.axis_name, msr.state, tail, policy)
+        changed = int(out.sum() + back.sum())
+        if changed == 0:
+            return {"transfers": 0}
+        bound_now = _host(msr.state.count).astype(np.int64)
+        tail_now = _host(tail.count).astype(np.int64)
+        bound_next = bound_now - out + back
+        tail_next = tail_now - back + out
+        if int(bound_next.sum()) <= 0:
+            raise RuntimeError(
+                f"the escaper policy (r_escape {policy.r_escape}) leaves no "
+                "particle in the tree"
+            )
+        if int(bound_next.max()) > int(msr.cap):
+            raise RuntimeError(
+                f"returning escapers would leave device {int(bound_next.argmax())} "
+                f"with {int(bound_next.max())} bound rows > its shard's cap="
+                f"{msr.cap}: give the shards more headroom (MeshRunConfig.cap)"
+            )
+
+        def total(potential: Optional[dict]) -> Optional[float]:
+            if potential is None or not potential["ok"]:
+                return None
+            return (
+                float(potential["self"])
+                + float(potential["external"])
+                + float(potential.get("couple", 0.0))
+            )
+
+        before = total(self._potential(msr, external_arg)[0]) if energy else None
+        if int(tail_next.max()) > int(tail.cap):
+            tail = grown_tail(
+                self.mesh, self.axis_name, tail, tail_capacity(int(tail_next.max()))
+            )
+            split["tail_cap"] = int(tail.cap)
+            split["tail_grown"] = int(split.get("tail_grown", 0)) + 1
+        layout, tail = resplit(
+            self.mesh,
+            self.axis_name,
+            msr.state,
+            tail,
+            policy,
+            float(msr.coupling_G),
+            donate=bool(msr.donate),
+        )
+        tail.total = int(tail_next.sum())
+        msr.state = layout
+        msr.tail = tail
+        split["n_bound"] = int(n_all) - int(tail.total)
+        split["transfers"] = int(split["transfers"]) + changed
+        edge: dict = {"transfers": changed, "jump": None}
+        if msr.migrate:
+            # The bound rows' box is another one now (a far row left it, or a
+            # returner widened it), and the migration's fixed cuts are Morton
+            # codes of the OLD box: in the new one they cut anywhere (a 4-device
+            # mesh overflowed a shard at the next step's migration). Re-cut in
+            # the new box as the start does: a full repartition, its cuts kept.
+            msr.splitters = None
+            msr.state, diag = msr._repartition(msr.state)
+            if bool(diag["declined"][0]):
+                raise RuntimeError(
+                    "the repartition after a changed escaper split was declined: "
+                    "some device would receive "
+                    f"{int(np.asarray(diag['recv_counts']).max())} rows > "
+                    f"cap={msr.cap}"
+                )
+            split["recuts"] = int(split.get("recuts", 0)) + 1
+        if energy:
+            after, _ = self._potential(msr, external_arg)
+            edge["potential"] = after
+            after_w = total(after)
+            if before is not None and after_w is not None:
+                edge["jump"] = after_w - before
+        if edge["jump"] is None or split["ledger"] is None:
+            split["ledger"] = None
+        else:
+            split["ledger"] = float(split["ledger"]) + float(edge["jump"])
+        return edge
+
     def _sharded(self, arr: Optional[np.ndarray]) -> Any:
         """A flat host array placed ``P(axis)`` on the mesh.
 
@@ -847,13 +1270,29 @@ class MeshBackend:
             ``(None, reason)`` when the force has no mesh potential (warned once).
         """
         try:
-            return (
-                msr.potential_energy(
+            potential = msr.potential_energy(
+                external_potential_fn=self.runner.external_potential_fn,
+                external_params=external_arg,
+            )
+            if msr.tail_on:
+                # the escaper split: the coupling W_c, the escapers' K and W_ext
+                from jaccpot.distributed.escapers import tail_energy
+
+                extra = tail_energy(
+                    self.mesh,
+                    self.axis_name,
+                    msr.state,
+                    msr.tail,
+                    float(msr.coupling_G),
                     external_potential_fn=self.runner.external_potential_fn,
                     external_params=external_arg,
-                ),
-                None,
-            )
+                )
+                potential["external"] = (
+                    potential["external"] + extra["external_escapers"]
+                )
+                potential["couple"] = extra["couple"]
+                potential["kinetic_escapers"] = extra["kinetic_escapers"]
+            return potential, None
         except NotImplementedError as exc:
             reason = str(exc)
             if not self._energy_warned:
@@ -937,6 +1376,17 @@ class MeshBackend:
                 }
             ),
             "bits": None if report is None else int(report.bits),
+            # the escaper path (MESC) only: the tail's capacity and counts
+            **(
+                {}
+                if getattr(msr, "tail", None) is None
+                else {
+                    "escapers": {
+                        "cap": int(msr.tail.cap),
+                        "counts": [int(c) for c in _host(msr.tail.count)],
+                    }
+                }
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -981,12 +1431,17 @@ class MeshBackend:
             _template_shapes,
         )
         from jaccpot.runtime.strict_carry import external_field_key
+        from jaccpot.scheme import scheme_record
 
         refuse_in_multiprocess("save_restart", _MULTIPROCESS_RESTART)
         runner = self.runner
         current = runner._current
         msr = None if current is None else current["handle"]
-        if msr is None or msr.state.acceleration is None:
+        split = None if current is None else current.get("escapers")
+        # a changed escaper split drops the carried accelerations (the
+        # continuation's start force evaluates them), so its edges hold none
+        resplit_edge = split is not None and int(current["segment"]) > 0
+        if msr is None or (msr.state.acceleration is None and not resplit_edge):
             raise RuntimeError(
                 "save_restart needs a run that has done a segment: the state at "
                 "step 0 is the run's input"
@@ -999,10 +1454,26 @@ class MeshBackend:
         }
         ids_flat = _host(layout.ids).astype(np.int32)
         count = _host(layout.count)
-        by_id = _by_id(flat, ids_flat, count)
+        tail = None if split is None else msr.tail
+        tail_part = None
+        if tail is not None:
+            tail_part = (
+                {
+                    name: _host(getattr(tail, name))
+                    for name in ("state", "masses", "acceleration")
+                    if getattr(tail, name) is not None
+                },
+                _host(tail.ids).astype(np.int32),
+                _host(tail.count),
+            )
+        by_id = _by_id(flat, ids_flat, count, tail_part)
         arrays = {name: by_id[name] for name in flat}
         arrays["mesh_ids"] = ids_flat
         arrays["mesh_padding"] = flat["state"][ids_flat < 0, 0]
+        if tail_part is not None:
+            # the escaper tail's layout: the id of every row (-1 on padding); its
+            # padding rows are zero
+            arrays["escaper_ids"] = tail_part[1]
         force = msr.force
         field = runner.external_acceleration_fn
         external_key = external_field_key(field, current["external_params"])
@@ -1048,6 +1519,20 @@ class MeshBackend:
             },
             "fingerprint": runner._fingerprint(by_id["state"], by_id["masses"]),
         }
+        if split is not None and runner.escapers is not None:
+            # only with the escaper path: the policy, the split and the ledger
+            meta["escapers"] = {
+                **runner.escapers.record(),
+                "n_bound": int(split["n_bound"]),
+                "ledger": split["ledger"],
+                "transfers": int(split["transfers"]),
+                "tail_cap": int(split["tail_cap"]),
+                "tail_grown": int(split.get("tail_grown", 0)),
+                "recuts": int(split.get("recuts", 0)),
+            }
+        if runner.scheme is not None:
+            # only with a scheme: built-in files stay byte for byte (as one card)
+            meta["scheme"] = scheme_record(runner.scheme)
         # UTF-8 bytes, as the single card's
         arrays["meta"] = np.frombuffer(json.dumps(meta).encode("utf-8"), np.uint8)
         _atomic_savez(str(path), **arrays)
@@ -1102,6 +1587,7 @@ class MeshBackend:
         """
         from jaccpot.production import _key_digest, _qualname
         from jaccpot.runtime.strict_carry import external_field_key
+        from jaccpot.scheme import scheme_record
 
         saved = meta.get("mesh")
         if saved is None:
@@ -1119,6 +1605,9 @@ class MeshBackend:
         ]
         if dt_value != float(meta["counters"]["dt"]):
             mismatches.append("dt")
+        if meta.get("scheme") != scheme_record(runner.scheme):
+            # another scheme continues correctly, but not bitwise
+            mismatches.append("scheme")
         field = runner.external_acceleration_fn
         external = meta["external"]
         key = external_field_key(field, external_arg)
@@ -1129,15 +1618,29 @@ class MeshBackend:
             # the total of another field (or of none): the next segment computes
             # this one's in a start force
             mismatches.append("external_field")
-        acceleration = arrays["acceleration"] if field_matches else None
+        acceleration = arrays.get("acceleration") if field_matches else None
         force_scale = arrays.get("force_scale")
+        # the escaper path (MESC): the tail's rows, by id
+        tail_ids = arrays.get("escaper_ids")
+        if (tail_ids is None) != (runner.escapers is None):
+            raise ValueError(
+                "a run continues in its own escaper mode: "
+                + (
+                    f"{path} ran with escapers= (pass the runner the policy)"
+                    if runner.escapers is None
+                    else f"{path} ran without escapers (escapers=None)"
+                )
+            )
         # the layout is the mesh's and the cap; whether the programs are the run's
         # is the force key's digest (below), whatever class built the force
         same_layout = int(saved["ndev"]) == self.ndev and (
             self.config.cap is None or int(self.config.cap) == int(saved["cap"])
         )
+        tail = None
         if same_layout:
             layout = self._layout_from_file(arrays, int(saved["cap"]), acceleration)
+            if tail_ids is not None:
+                tail = self._tail_from_file(arrays, tail_ids, acceleration)
             migration = saved.get("migration")
             if bool(migration) != bool(self.config.migrate):
                 # the cuts (or their absence) are part of the trajectory
@@ -1148,6 +1651,26 @@ class MeshBackend:
                 migration if self.config.migrate else None,
             )
             self._install_plan(msr.force, meta)
+        elif tail_ids is not None:
+            # another mesh: the bound rows decomposed there, the escapers placed
+            # in their tail (as a fresh run with this membership)
+            mismatches.append("mesh_layout")
+            force = self._force()
+            layout, migration, tail = self._decomposed_split(
+                arrays, tail_ids, force, int(meta["escapers"]["tail_cap"])
+            )
+            ids = _host(layout.ids)
+            live = ids >= 0
+            for name, by_id in (
+                ("acceleration", acceleration),
+                ("force_scale", force_scale),
+            ):
+                if by_id is None:
+                    continue
+                flat = np.zeros((ids.shape[0],) + by_id.shape[1:], by_id.dtype)
+                flat[live] = by_id[ids[live]]
+                setattr(layout, name, self._sharded(flat))
+            msr = self._segment_runner(layout, force, migration)
         else:
             mismatches.append("mesh_layout")
             force = self._force()
@@ -1166,6 +1689,8 @@ class MeshBackend:
                 flat[live] = by_id[ids[live]]
                 setattr(layout, name, self._sharded(flat))
             msr = self._segment_runner(layout, force, migration)
+        if tail is not None:
+            msr.attach_escapers(tail, self._coupling_G(msr.force))
         digests = {"force_key": _key_digest(msr.force.key())}
         if same_layout and digests["force_key"] != meta["digests"].get("force_key"):
             mismatches.append("force_key")
@@ -1250,6 +1775,126 @@ class MeshBackend:
             acceleration=self._sharded(flat(acceleration)),
             force_scale=self._sharded(flat(arrays.get("force_scale"))),
         )
+
+    def _tail_from_file(
+        self,
+        arrays: dict,
+        tail_ids: np.ndarray,
+        acceleration: Optional[np.ndarray],
+    ) -> Any:
+        """The written run's escaper tail, bit for bit (MESC).
+
+        Parameters
+        ----------
+        arrays : dict
+            The file's arrays (by id).
+        tail_ids : np.ndarray
+            ``escaper_ids``: the id of every tail row (``-1`` on padding).
+        acceleration : Optional[np.ndarray]
+            ``[N, 3]`` the carried total, or ``None``.
+
+        Returns
+        -------
+        Any
+            The :class:`~jaccpot.distributed.escapers.EscaperTail`, placed.
+
+        Raises
+        ------
+        ValueError
+            If the tail's rows do not split over the mesh or its live rows do not
+            lead every device.
+        """
+        from jaccpot.distributed.escapers import EscaperTail
+
+        ids = np.asarray(tail_ids, np.int32)
+        if ids.shape[0] % self.ndev:
+            raise ValueError(f"the file's escaper tail has {ids.shape} ids")
+        cap_e = ids.shape[0] // self.ndev
+        live = ids >= 0
+        count = live.reshape(self.ndev, cap_e).sum(axis=1).astype(np.int32)
+        leading = np.arange(cap_e)[None, :] < count[:, None]
+        if not np.array_equal(live.reshape(self.ndev, cap_e), leading):
+            raise ValueError(
+                "the file's escaper tail: live rows do not lead every device"
+            )
+
+        def flat(by_id: Optional[np.ndarray]) -> Optional[np.ndarray]:
+            if by_id is None:
+                return None
+            out = np.zeros((ids.shape[0],) + by_id.shape[1:], by_id.dtype)
+            out[live] = by_id[ids[live]]
+            return out
+
+        return EscaperTail(
+            state=self._sharded(flat(arrays["state"])),
+            masses=self._sharded(flat(arrays["masses"])),
+            ids=self._sharded(ids),
+            count=self._sharded(count),
+            cap=int(cap_e),
+            total=int(live.sum()),
+            acceleration=self._sharded(flat(acceleration)),
+        )
+
+    def _decomposed_split(
+        self, arrays: dict, tail_ids: np.ndarray, force: Any, tail_cap: int
+    ) -> tuple:
+        """A restart's by-id split on another mesh: the bound rows decomposed, the
+        escapers in their tail (:func:`~jaccpot.distributed.escapers.place_split`).
+
+        Parameters
+        ----------
+        arrays : dict
+            The file's arrays (by id).
+        tail_ids : np.ndarray
+            The written tail's ids (who is an escaper).
+        force : Any
+            The run's force (its box shape).
+        tail_cap : int
+            The written tail's capacity (kept, if it holds this mesh's chunks).
+
+        Returns
+        -------
+        tuple
+            ``(MeshState, migration, EscaperTail)``.
+        """
+        from jaccpot.distributed.escapers import place_split, tail_capacity
+        from jaccpot.distributed.migration import ownership_splitters
+        from jaccpot.distributed.multiprocess import _device_chunks
+        from jaccpot.distributed.segment import MeshState, _force_box_cubic
+
+        state = arrays["state"]
+        n = int(state.shape[0])
+        escaper = np.zeros(n, bool)
+        escaper[tail_ids[tail_ids >= 0]] = True
+        most = max(int(escaper[a:b].sum()) for a, b in _device_chunks(n, self.ndev))
+        migrate = bool(self.config.migrate)
+        cubic = _force_box_cubic(force) if migrate else None
+        shard, tail = place_split(
+            self.mesh,
+            state,
+            arrays["masses"],
+            escaper,
+            lo=0,
+            num_particles=n,
+            cap=self._cap(n),
+            num_samples=int(self.config.num_samples),
+            axis_name=self.axis_name,
+            cubic=cubic,
+            tail_cap=max(int(tail_cap), tail_capacity(most)),
+        )
+        migration = None
+        if migrate:
+            migration = {
+                "splitters": ownership_splitters(
+                    self.mesh,
+                    shard.positions,
+                    shard.count,
+                    cubic=bool(cubic),
+                    axis_name=self.axis_name,
+                )
+            }
+        layout = MeshState.from_shard_state(shard, self.mesh, axis_name=self.axis_name)
+        return layout, migration, tail
 
     def _restored_force(self, plan: dict) -> Any:
         """The force of a same-mesh restore, before its prepare.

@@ -157,6 +157,30 @@ def harmonic_potential(state_rows, params):
     return 0.5 * params["k"] * jnp.sum(d * d, axis=1)
 
 
+class KDK:
+    """``nornax.schemes.LeapfrogKDK``'s expressions (I2: ``M2_SCHEME=kdk``)."""
+
+    rowwise = True
+
+    def key(self):
+        return ("test.KDK", 1)
+
+    def open_step(self, state, acceleration, dt):
+        return state.at[:, 0].set(
+            state[:, 0] + state[:, 1] * dt + 0.5 * acceleration * dt**2
+        )
+
+    def close_step(self, state_open, acceleration, acceleration_new, dt):
+        return state_open.at[:, 1].set(
+            state_open[:, 1] + 0.5 * (acceleration + acceleration_new) * dt
+        )
+
+
+def _scheme():
+    """``M2_SCHEME``: ``kdk`` runs the runner with :class:`KDK` (I2), else none."""
+    return KDK() if os.environ.get("M2_SCHEME") == "kdk" else None
+
+
 def direct_runner(n: int) -> dict:
     """``ProductionRunner(mesh=...)`` with ``DirectMeshForce`` (N = 256, float64).
 
@@ -183,6 +207,7 @@ def direct_runner(n: int) -> dict:
             segment=SegmentConfig(steps=2, diagnostics_every_energy=1, **segment),
             external_acceleration_fn=harmonic,
             external_potential_fn=harmonic_potential,
+            scheme=_scheme(),
             mesh=MeshRunConfig(
                 mesh,
                 cap=int(np.ceil(1.6 * num / n)),
@@ -218,6 +243,74 @@ def direct_runner(n: int) -> dict:
         except NotImplementedError as exc:
             refused = "refused" if "orbax" in str(exc) else str(exc)
     out["restart_refused"] = refused
+    return out
+
+
+# ----------------------------------------------------------------------
+# The escaper path on the mesh (MESC).
+# ----------------------------------------------------------------------
+
+
+def escaper_runner(n: int) -> dict:
+    """``ProductionRunner(mesh=..., escapers=...)`` with escapers crossing.
+
+    ESC's system (``test_production_runner_mesh_escapers._system``: a Plummer
+    sphere, eight fliers leaving ``r_escape = 5`` at several edges and a returner
+    coming back inside ``r_return = 4.5``), 3 segments of 10 steps continued in
+    memory to 6, the energy at every edge, migrating. ``MESC_FORCE``: ``direct``
+    (the default, :class:`~jaccpot.distributed.segment.DirectMeshForce`) or
+    ``fused`` (the CPU fused lane, ``MESC_MAC`` ``dehnen`` / ``dehnen_error``).
+    """
+    from jaccpot import FastMultipoleMethod
+    from jaccpot.distributed.segment import DirectMeshForce
+    from jaccpot.escapers import EscaperPolicy
+    from jaccpot.production import MeshRunConfig, ProductionRunner, SegmentConfig
+    from tests.distributed import test_production_runner_mesh_escapers as tme
+
+    fused = os.environ.get("MESC_FORCE", "direct") == "fused"
+    mac = os.environ.get("MESC_MAC", "dehnen")
+    mesh = mp.global_mesh(AXIS)
+    state, masses = tme._system()
+    if fused:
+        from tests.integration.strict import test_escapers as te
+
+        _cpu_fused_lane(True)
+        solver, settings, force = te._solver(mac), te._settings(mac), None
+    else:
+        solver = FastMultipoleMethod(preset="large_n_gpu", G=tme.G, softening=tme.SOFT)
+        settings = None
+        force = DirectMeshForce(G=tme.G, softening=tme.SOFT, axis_name=AXIS)
+    runner = ProductionRunner(
+        solver,
+        **({} if settings is None else {"settings": settings}),
+        segment=SegmentConfig(steps=tme.STEPS, diagnostics_every_energy=1),
+        escapers=EscaperPolicy(tme.R_ESCAPE, tme.R_RETURN),
+        mesh=MeshRunConfig(
+            mesh,
+            cap=int(np.ceil(1.5 * state.shape[0] / n)),
+            num_samples=64,
+            migrate=True,
+            force=force,
+        ),
+    )
+    s, m = _input(state, masses, mesh)
+    half = tme.STEPS * tme.SEGMENTS // 2
+    first = runner.run(s, m, dt=tme.DT, num_steps=half)
+    edges = _edges(first)
+    res = runner.run(dt=tme.DT, num_steps=2 * half, restart_from=first)
+    got = res.handle.gather()
+    out = {
+        "state": res.state,
+        "owner": got["owner"],
+        "edges": edges + _edges(res),
+        "reports": _reports(res.handle),
+        "split": res.escapers,
+        "tail_ids": mp.host_value(res.handle.tail.ids),
+    }
+    # (a split that changed at the last edge dropped the carried acceleration)
+    for name in ("acceleration", "force_scale"):
+        if name in got:
+            out[name] = got[name]
     return out
 
 
@@ -356,6 +449,7 @@ def fused_runner(n: int) -> dict:
         solver,
         settings=settings,
         segment=SegmentConfig(steps=2, diagnostics_every_energy=1),
+        scheme=_scheme(),
         mesh=MeshRunConfig(
             mesh,
             cap=int(num / n * 1.3),

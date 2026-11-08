@@ -72,12 +72,17 @@ def test_helpers_are_the_single_process_values(n, tmp_path):
     _assert_same(sp, mp, sp_json, mp_json)
 
 
+@pytest.mark.parametrize("scheme", [None, "kdk"])
 @pytest.mark.parametrize("n", [2, 4])
-def test_direct_force_runner_is_the_single_process_run(n, tmp_path):
+def test_direct_force_runner_is_the_single_process_run(n, scheme, tmp_path):
     """The runner's mesh mode with the direct force: state, acceleration and owner
     by id, every edge's diagnostics (energy, moments) and plan record, every
-    segment report -- equal; restart files refused under several processes."""
-    sp, mp, sp_json, mp_json = _run("direct_runner", n, tmp_path, timeout=900.0)
+    segment report -- equal; restart files refused under several processes. With
+    a scheme too (I2: ``M2_SCHEME=kdk``, the KDK's expressions as a scheme)."""
+    env = None if scheme is None else {"M2_SCHEME": scheme}
+    sp, mp, sp_json, mp_json = _run(
+        "direct_runner", n, tmp_path / str(scheme), env=env, timeout=900.0
+    )
     assert sp_json["restart_refused"] == "one process"
     assert mp_json["restart_refused"] == "refused", mp_json["restart_refused"]
     # the energy is reported at every edge (the mesh-order fold is under test)
@@ -112,6 +117,12 @@ FUSED_CASES = [
         marks=_MANUAL,
     ),
     pytest.param(_TREE_REPLAN, 2, id="dehnen_error-migrate-treereplan-2"),
+    # I2: the runner with a scheme (the KDK's expressions), migrating, re-planned
+    pytest.param(
+        {"M2_MAC": "dehnen", "M2_MIGRATE": "1", "M2_SCHEME": "kdk"},
+        2,
+        id="dehnen-migrate-scheme-2",
+    ),
     # on four devices the A3 start overflows a leaf capacity of 44 already at the
     # prepare (one process or four), so the criterion's 4-process case is the
     # cube with the undersized cross capacity
@@ -208,3 +219,34 @@ def test_slurm_bound_device_ids(monkeypatch, visible, local_ids, want):
     assert mp.slurm_bound_device_ids() == want
     monkeypatch.delenv("SLURM_LOCALID")
     assert mp.slurm_bound_device_ids() is None  # not a SLURM step
+
+
+ESCAPER_CASES = [
+    pytest.param({}, 2, id="direct-2"),
+    pytest.param({}, 4, id="direct-4"),
+    # the fused lane: minutes of compile a process
+    *(
+        pytest.param(
+            {"MESC_FORCE": "fused", "MESC_MAC": mac},
+            2,
+            id=f"fused-{mac}-2",
+            marks=_MANUAL,
+        )
+        for mac in ("dehnen", "dehnen_error")
+    ),
+]
+
+
+@pytest.mark.parametrize("env,n", ESCAPER_CASES)
+def test_escaper_runner_is_the_single_process_run(env, n, tmp_path):
+    """The escaper path on the mesh (MESC), escapers leaving and returning at
+    several edges, the run continued in memory: state, acceleration and owner by
+    id, the tail's layout, the split and ledger, every edge's diagnostics --
+    equal."""
+    sp, mp, sp_json, mp_json = _run(
+        "escaper_runner", n, tmp_path, env=env, timeout=3600.0 if env else 900.0
+    )
+    counts = [e["diagnostics"]["n_escapers"] for e in mp_json["edges"]]
+    assert counts[0] == 1 and max(counts) > 1, counts
+    assert mp_json["split"]["transfers"] > 1
+    _assert_same(sp, mp, sp_json, mp_json)
