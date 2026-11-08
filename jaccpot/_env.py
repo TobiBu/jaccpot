@@ -35,9 +35,11 @@ at any layer, can use it without an import cycle.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import os
 import warnings
-from typing import Iterable, Optional
+from typing import Iterable, Iterator, Mapping, Optional
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSEY = frozenset({"0", "false", "no", "off"})
@@ -45,6 +47,13 @@ _FALSEY = frozenset({"0", "false", "no", "off"})
 #: Variables already warned about, so a knob read per call does not spam. Process
 #: wide on purpose; `_reset_malformed_warning_cache` exists for tests.
 _WARNED: set[str] = set()
+
+#: Defaults scoped to the current context (:func:`scoped_env_defaults`): a value a
+#: reader takes when the variable is unset in the process environment. Empty
+#: outside a scope, so nothing changes unless a scope is entered.
+_SCOPED_DEFAULTS: contextvars.ContextVar[Mapping[str, str]] = contextvars.ContextVar(
+    "jaccpot_scoped_env_defaults", default={}
+)
 
 __all__ = [
     "env_choice",
@@ -54,7 +63,60 @@ __all__ = [
     "env_int",
     "env_snapshot",
     "env_text",
+    "scoped_env_defaults",
 ]
+
+
+def _raw(name: str) -> Optional[str]:
+    """The variable's text: the process environment's, else the scope's default.
+
+    Parameters
+    ----------
+    name : str
+        Environment variable name.
+
+    Returns
+    -------
+    Optional[str]
+        ``os.environ[name]`` when set, else the innermost
+        :func:`scoped_env_defaults` value for ``name``, else ``None``.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return _SCOPED_DEFAULTS.get().get(name)
+    return raw
+
+
+@contextlib.contextmanager
+def scoped_env_defaults(defaults: Mapping[str, str]) -> Iterator[None]:
+    """Give unset variables a value for the current context, not the process.
+
+    Inside the scope every reader in this module reads ``defaults[name]`` for a
+    variable the process environment does not set; a value set in the
+    environment still wins (a shell override keeps working). Nested scopes merge,
+    the inner one winning. The scope is a :class:`contextvars.ContextVar`, so it
+    is neither process-global nor visible to other threads, and ``os.environ``
+    is never written.
+
+    Used by the fused lane's CPU route (:mod:`jaccpot.runtime._lane_platform`),
+    whose ``dehnen_error`` near field needs the CSR lane's kernel in Pallas
+    interpret mode -- knobs that are read at trace time across the near-field
+    modules.
+
+    Parameters
+    ----------
+    defaults : Mapping[str, str]
+        ``{name: value}``.
+
+    Yields
+    ------
+    None
+    """
+    token = _SCOPED_DEFAULTS.set({**_SCOPED_DEFAULTS.get(), **dict(defaults)})
+    try:
+        yield
+    finally:
+        _SCOPED_DEFAULTS.reset(token)
 
 
 def _reset_malformed_warning_cache() -> None:
@@ -121,7 +183,7 @@ def env_flag(name: str, default: bool = False) -> bool:
         one-time warning -- so an explicit ``=0`` still reliably turns a default-on
         knob off, while a typo changes nothing.
     """
-    raw = os.environ.get(name)
+    raw = _raw(name)
     if raw is None:
         return bool(default)
     text = str(raw).strip().lower()
@@ -154,7 +216,7 @@ def env_flag_optional(name: str) -> Optional[bool]:
         ``None`` when the variable is unset, else :func:`env_flag`'s reading of
         it (a malformed value warns once and yields ``False``).
     """
-    if os.environ.get(name) is None:
+    if _raw(name) is None:
         return None
     return env_flag(name, False)
 
@@ -179,7 +241,7 @@ def env_int(name: str, default: int, *, minimum: Optional[int] = None) -> int:
     int
         The parsed value, clamped when ``minimum`` is given.
     """
-    raw = os.environ.get(name)
+    raw = _raw(name)
     if raw is None:
         value = int(default)
     else:
@@ -210,7 +272,7 @@ def env_float(name: str, default: float, *, minimum: Optional[float] = None) -> 
     float
         The parsed value, clamped when ``minimum`` is given.
     """
-    raw = os.environ.get(name)
+    raw = _raw(name)
     if raw is None:
         value = float(default)
     else:
@@ -260,7 +322,7 @@ def env_choice(name: str, default: str, choices: Iterable[str]) -> str:
         raise ValueError(
             f"env_choice({name!r}) default {default!r} is not one of {sorted(allowed)}"
         )
-    raw = os.environ.get(name)
+    raw = _raw(name)
     if raw is None:
         return normalised_default
     text = str(raw).strip().lower()
@@ -291,7 +353,7 @@ def env_text(name: str, default: str = "") -> str:
     str
         The raw value, or ``default``.
     """
-    raw = os.environ.get(name)
+    raw = _raw(name)
     return default if raw is None else str(raw)
 
 
@@ -315,9 +377,10 @@ def env_snapshot(prefixes: tuple, *, exclude_suffixes: tuple = ()) -> dict:
     dict
         ``{name: value}``, sorted by name.
     """
+    merged = {**_SCOPED_DEFAULTS.get(), **os.environ}
     return {
         name: str(value)
-        for name, value in sorted(os.environ.items())
+        for name, value in sorted(merged.items())
         if name.startswith(tuple(prefixes))
         and not (exclude_suffixes and name.endswith(tuple(exclude_suffixes)))
     }

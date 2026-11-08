@@ -181,6 +181,7 @@
   "aspect_threshold": "8.0",
   "basis_impl": "RealSHBasis(p_max=32, name='real', coefficient_ordering='ell-major, m=-ell..+ell (packed real SH)', runtime_expansion_basis='solidfmm')",
   "config": "FMMResolvedConfig(theta=0.5, G=1.0, softening=1e-12, working_dtype=None, tree=TreeBuilderConfig(mode='lbvh', target_leaf_particles=32, refine_local=False, max_refine_levels=2, aspect_threshold=8.0), traversal=TraversalExecutionConfig(m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=None, jit_tree='auto', jit_traversal=True), preset=None)",
+  "cpu_fused_lane": "False",
   "dehnen_geometry_mode": "'com'",
   "dehnen_radius_scale": "1.0",
   "enable_interaction_cache": "True",

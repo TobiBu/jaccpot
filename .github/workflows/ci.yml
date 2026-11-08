@@ -182,7 +182,8 @@ jobs:
           # built-in runner against a scheme at the runner tests' operating point;
           # out of `integration-strict`, which is near its cap. Measured at `-n 2`,
           # coverage, cold cache, on a 64-core host loaded by four other suites:
-          # 12.4 min.
+          # 12.4 min. With it the fused lane's CPU route (FUP, 2026-11-06; 6.0 min
+          # serial under typecheck, loaded host).
           - shard: integration-strict-scheme
             typecheck: "0"
             timeout: 25

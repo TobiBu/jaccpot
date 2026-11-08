@@ -13,6 +13,7 @@ from jaxtyping import Array
 from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
+from jaccpot._env import env_flag
 from jaccpot._searchsorted import searchsorted_method
 from jaccpot.nearfield._fast_lane import (
     compute_leaf_p2p_accelerations_radix_fast_lane,
@@ -640,9 +641,7 @@ def evaluate_large_n_nearfield_fast_lane(
             )
 
             # interpret mode reaches the kernels as the acceleration lane does
-            interpret = str(
-                os.environ.get("JACCPOT_NEARFIELD_PALLAS_INTERPRET", "0")
-            ).strip().lower() in {"1", "true", "yes", "on"}
+            interpret = env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False)
             if interpret or pallas_nearfield_fused_supported():
                 diag_mode_pot = normalize_large_n_nearfield_diag_mode()
                 if diag_mode_pot == "zero":

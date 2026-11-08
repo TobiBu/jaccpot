@@ -444,6 +444,19 @@ class RuntimePolicyConfig:
         than traced, and it is the bound whose violation raises
         ``"fixed_max_leaf_size too small for prepared tree"``. Legacy name:
         ``fixed_max_leaf_size``.
+    cpu_fused_lane : bool
+        The fused lane's CPU route (opt-in; ``False`` by default). The fused lane
+        (``preset="large_n_gpu"`` / ``"galaxy"``: ``FusedForceProvider``,
+        ``ProductionRunner``, ``strict_run_v2``) declines a CPU backend: its
+        prepare falls back to the general path, and the runner cannot run. With
+        ``True``, on a CPU backend the lane runs as it does on a card -- every
+        lane policy this engine takes from the backend is the GPU one
+        (:mod:`jaccpot.runtime._lane_platform`) -- with the pure-JAX kernels; and
+        with ``use_pallas=True`` the near field's Pallas kernel runs in interpret
+        mode on the CSR lane, which ``mac_type="dehnen_error"``'s force scale
+        needs. Slow (no timing claims): functional and accuracy work, tests,
+        small-N runs. No effect on a GPU backend, so a configuration that sets it
+        runs the same programs on a card.
     """
 
     host_refine_mode: str = "auto"
@@ -463,6 +476,7 @@ class RuntimePolicyConfig:
     upward_leaf_batch_size: Optional[int] = None
     fixed_order: Optional[int] = None
     fixed_max_leaf_size: Optional[int] = None
+    cpu_fused_lane: bool = False
 
 
 @dataclass(frozen=True)

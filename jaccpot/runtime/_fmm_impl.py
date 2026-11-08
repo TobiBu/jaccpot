@@ -77,6 +77,7 @@ from jaccpot.softening import resolve_softening_kernel, support_factor
 
 from ._adaptive_policy import adaptive_pair_policy  # noqa: F401
 from ._interaction_cache import _InteractionCacheEntry
+from ._lane_platform import lane_policy_backend
 from ._large_n_types import LargeNPreparedState
 from .capacity_plan import DEFAULT_LEAF_HEADROOM
 from .dtypes import require_x64
@@ -427,6 +428,9 @@ class FMMEngine(
         # field against the flat defaults before the swap -- all seventeen
         # matched, so a caller who omits the group gets exactly what it got.
         _policy = RuntimePolicyConfig() if runtime_policy is None else runtime_policy
+        # the fused lane's CPU route (opt-in): read by `_lane_backend`, so it is set
+        # before the first lane gate (`_resolve_derived_lane_flags`)
+        self.cpu_fused_lane: bool = bool(_policy.cpu_fused_lane)
         # The near-field trio arrives as one group too (audit F09). Unlike the
         # policy group above, the names differ: NearFieldConfig drops the
         # redundant `nearfield_` prefix inside a class already called that. The
@@ -1633,7 +1637,7 @@ class FMMEngine(
         self._streamed_minimum_memory_gpu_default_split_build: bool = (
             derive_split_build_default(
                 memory_objective=self.memory_objective,
-                backend=jax.default_backend(),
+                backend=self._lane_backend(),
                 tree_type=self.tree_type,
                 expansion_basis=self.expansion_basis,
                 streamed_far_pairs=self.streamed_far_pairs,
@@ -1683,6 +1687,21 @@ class FMMEngine(
             os.environ.get("JACCPOT_RETAIN_FAR_PAIRS_FOR_GRAD", "0")
         ).strip().lower() in {"1", "true", "yes", "on"}
         self._apply_large_n_gpu_production_contract()
+
+    def _lane_backend(self) -> str:
+        """The backend this engine's lane policy follows.
+
+        ``jax.default_backend()``, except ``"gpu"`` on a CPU backend for an engine
+        built with ``RuntimePolicyConfig(cpu_fused_lane=True)``: the fused lane's
+        CPU route (:mod:`jaccpot.runtime._lane_platform`). Every lane gate of the
+        engine reads this; kernel availability (the Pallas gates) does not.
+
+        Returns
+        -------
+        str
+            The backend name.
+        """
+        return lane_policy_backend(self)
 
     def _is_large_n_gpu_production_profile(self) -> bool:
         """Whether this solver should run the canonical large-N GPU contract.
@@ -1774,7 +1793,7 @@ class FMMEngine(
         self._streamed_minimum_memory_gpu_default_split_build = (
             derive_split_build_default(
                 memory_objective=self.memory_objective,
-                backend=jax.default_backend(),
+                backend=self._lane_backend(),
                 tree_type=self.tree_type,
                 expansion_basis=self.expansion_basis,
                 streamed_far_pairs=self.streamed_far_pairs,

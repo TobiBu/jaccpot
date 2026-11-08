@@ -144,3 +144,72 @@ def test_a_doubling_lower_bound_stops_at_the_limit(engine):
     needs = _needs(948_961_280, lower=1)
     assert engine._replan_walk_caps_from_needs(needs) is True
     assert _caps(engine)[0] == _CSR_INT32
+
+
+# --------------------------------------------------------------------------
+# A far list filled EXACTLY (FUP, 2026-11-06): the walk raises no flag (every pair
+# fitted) but the verdict reads a full far buffer as saturated, so the segment
+# failed and, with nothing re-planned, the runner raised (N = 512 collapsing cube,
+# leaf 256, the far list 64 of 64 directed pairs).
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def small(monkeypatch):
+    monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_WALK", raising=False)
+    eng = fsr.StrictRunMixin()
+    eng._strict_fused_validated_caps = dict(
+        flat_walk=True,
+        compact_far_pair_capacity=64,
+        near_edge_capacity=512,
+        peak_wavefront=60,
+    )
+    eng._strict_fused_traced_caps = {"queue_capacity": 128}
+    return eng
+
+
+def test_an_exactly_full_far_list_is_re_planned_wider(small):
+    needs = _needs(64, near=252, far_ovf=0, lower=1)
+    assert small._replan_walk_caps_from_needs(needs) is True
+    far, near = _caps(small)
+    assert far > 64 and far % 2 == 0
+    assert near == 512  # the near list did not fill: unchanged
+
+
+def test_a_far_list_below_its_width_is_not_re_planned(small):
+    before = dict(small._strict_fused_validated_caps)
+    assert small._replan_walk_caps_from_needs(_needs(62, far_ovf=0)) is False
+    assert small._strict_fused_validated_caps == before
+
+
+def test_a_named_far_cap_that_filled_is_not_widened(small):
+    small._strict_fused_validated_caps["far_named"] = True
+    needs = _needs(64, far_ovf=0)
+    assert small._walk_overflowed_a_named_cap(needs) is True
+    assert small._replan_walk_caps_from_needs(needs) is False
+    assert _caps(small)[0] == 64
+
+
+# --------------------------------------------------------------------------
+# The pure-JAX near field's rectangle layout (FUP, 2026-11-06): its static
+# target-block cap is sized at the eager prepare from the START's densest row; a
+# segment whose rows outgrow it failed with no walk or tree flag and was never
+# re-planned (N = 512 collapsing cube, leaf 64, rows of 71 against 64).
+# --------------------------------------------------------------------------
+
+
+def test_the_rectangle_cap_doubles_up_to_the_ladders_last_rung(monkeypatch):
+    from jaccpot.runtime._large_n_pipeline import _STATIC_TARGET_BLOCKS_CAP_ATTR
+
+    monkeypatch.setenv(
+        "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF_OPTIONS", "8,16,32,64"
+    )
+    eng = fsr.StrictRunMixin()
+    assert eng._replan_rectangle_blocks() is False  # nothing resolved yet
+    setattr(eng, _STATIC_TARGET_BLOCKS_CAP_ATTR, 16)
+    assert eng._replan_rectangle_blocks() is True
+    assert getattr(eng, _STATIC_TARGET_BLOCKS_CAP_ATTR) == 32
+    assert eng._replan_rectangle_blocks() is True
+    assert getattr(eng, _STATIC_TARGET_BLOCKS_CAP_ATTR) == 64
+    assert eng._replan_rectangle_blocks() is False  # the last rung
+    assert getattr(eng, _STATIC_TARGET_BLOCKS_CAP_ATTR) == 64

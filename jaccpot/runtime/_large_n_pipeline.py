@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
-from jaccpot._env import env_choice, env_int
+from jaccpot._env import env_choice, env_float, env_int
 from jaccpot._jax_compat import Tracer
 
 # `_read_large_n_env_config` is re-imported although only its memoising wrapper
@@ -19,6 +19,7 @@ from jaccpot._jax_compat import Tracer
 # the F16 lesson from `near_field.py` is that a module's attribute surface is
 # wider than its import surface. Keeping it costs nothing and cannot break a
 # caller that reaches it as `_large_n_pipeline._read_large_n_env_config`.
+from ._lane_platform import lane_policy_backend
 from ._large_n_env import _large_n_env_config_for_fmm
 from ._large_n_nearfield import (
     build_large_n_leaf_particle_groups,
@@ -198,14 +199,11 @@ def _build_radix_fast_lane_payloads(
             source_leaf_valid_flat, source_leaf_ids_flat, 0
         )
 
-        payload_max_mb_raw = os.environ.get(
-            "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB",
-            "1024",
+        # through `_env`: the fused lane's CPU route scopes this to 0
+        # (`runtime._lane_platform`)
+        payload_max_mb = env_float(
+            "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB", 1024.0, minimum=0.0
         )
-        try:
-            payload_max_mb = max(0.0, float(payload_max_mb_raw))
-        except Exception:
-            payload_max_mb = 1024.0
         est_payload_bytes = float(
             num_target_leaves
             * max(1, source_slots)
@@ -2827,7 +2825,9 @@ def can_use_large_n_prepare_path(
     The ``large_n_gpu`` preset is the only switch that opens the lane, and the lane
     still declines (silently) off a GPU backend, off the radix tree or the real
     basis, with adaptive or mixed order, and for a traced call. So on a CPU the
-    preset prepares an ``FMMPreparedState`` on the general path. The engine's
+    preset prepares an ``FMMPreparedState`` on the general path -- unless the
+    engine takes the fused lane's CPU route (``RuntimePolicyConfig(
+    cpu_fused_lane=True)``, :func:`~jaccpot.runtime._lane_platform.lane_policy_backend`). The engine's
     ``runtime_path="large_n"`` used to open it under any preset too (and turn the
     ``dehnen_theta`` decline into a raise); X4 of the 2026-10 cleanup stopped
     consulting it, and Z-b removed it.
@@ -2837,7 +2837,7 @@ def can_use_large_n_prepare_path(
         return False
     if not allow_stateful_cache:
         return False
-    if jax.default_backend() != "gpu":
+    if lane_policy_backend(fmm) != "gpu":
         return False
     if str(getattr(fmm, "tree_type", "")).strip().lower() != "radix":
         return False

@@ -1954,7 +1954,7 @@ class PrepareMixin(_EngineBase):
         if (
             runtime_traversal_config is not None
             and self.memory_objective == "minimum_memory"
-            and jax.default_backend() == "gpu"
+            and self._lane_backend() == "gpu"
             and self.tree_type == "radix"
             and self.expansion_basis == "solidfmm"
             and bool(self.streamed_far_pairs)
@@ -2569,7 +2569,7 @@ class PrepareMixin(_EngineBase):
         """
         if self.memory_objective == "minimum_memory":
             return False
-        if jax.default_backend() != "gpu":
+        if self._lane_backend() != "gpu":
             return True
         return int(num_particles) <= int(_NEARFIELD_GPU_PRECOMPUTE_MAX_PARTICLES)
 
@@ -2592,7 +2592,7 @@ class PrepareMixin(_EngineBase):
         """
         if not bool(self.precompute_nearfield_scatter_schedules):
             return False
-        if jax.default_backend() != "gpu":
+        if self._lane_backend() != "gpu":
             return True
         # For large GPU runs, schedule materialization is often memory-dominant;
         # keep execution streamed/chunked instead.
@@ -2729,7 +2729,7 @@ class PrepareMixin(_EngineBase):
         if self.nearfield_schedule_item_cap is not None:
             return int(self.nearfield_schedule_item_cap)
 
-        backend_name = jax.default_backend()
+        backend_name = self._lane_backend()
         base_cap = (
             _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU
             if backend_name == "gpu"
