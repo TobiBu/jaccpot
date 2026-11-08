@@ -247,7 +247,13 @@ def test_num_target_leaves_is_checked():
     a, b, adj = _case(11)
     p, m, ls, lc, nb, off, cnt, Lt = _call_layout(a, b, adj)
     w = jnp.zeros((int(p.shape[0]), 3))
-    kw = dict(leaf_width=8, softening_sq=0.25, G=1.0, chunk=1, interpret=True)
+    kw = dict(
+        leaf_width=8,
+        softening_sq=jnp.asarray(0.25),
+        G=jnp.asarray(1.0),
+        chunk=1,
+        interpret=True,
+    )
     with pytest.raises(ValueError, match="num_target_leaves"):
         nearfield_leafpair_csr_sorted_direct_reverse_pallas(
             p, m, ls, lc, nb, off, cnt, w, num_target_leaves=int(ls.shape[0]) + 1, **kw

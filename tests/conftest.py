@@ -534,6 +534,11 @@ _DIFF_FMM_TEST_FILES = frozenset(
         # the runner's gradient mode (S9 session 2): one gradient of its chain is
         # 19-21 GB of compile on CPU
         "test_runner_gradient_mode.py",
+        # the multi-GPU gradient (WP-G): one interpret-mode reverse program of the
+        # mesh force per test, ~7.5 GB at p3 on 4 forced devices; one worker (`-n 1`)
+        # held them all, 12.7 GB for the gates file against the 16 GB runner
+        "test_mesh_grad_gates.py",
+        "test_mesh_grad_forward.py",
     }
 )
 

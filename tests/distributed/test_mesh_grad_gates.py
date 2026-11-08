@@ -59,7 +59,11 @@ pytestmark = [
 
 AXIS = "gpus"
 N = 2048
-LEAF, LEAF_CAP, ORDER, THETA, SOFT, EPS = 64, 128, 4, 0.8, 1e-2, 1e-4
+# p3, not p4: the interpret-mode reverse program's compile peaks at ~7.5 GB at p3 and
+# ~15 GB at p4 (N does not matter), and CI's ubuntu-latest runner has 16 GB. The
+# gates check the gradient's correctness, which does not depend on the order; the
+# p4 numbers are in the WP-G record (PR #510).
+LEAF, LEAF_CAP, ORDER, THETA, SOFT, EPS = 64, 128, 3, 0.8, 1e-2, 1e-4
 H = 1e-6
 
 _ENV = {

@@ -69,7 +69,7 @@ def full_reverse(case):
         mult,
         cent,
         src,
-        None,
+        src,  # targets: unused under symmetric=True (an Array for the type checker)
         lbar,
         order=ORDER,
         k_lanes=K,

@@ -434,12 +434,12 @@ def _far_placeholder_bwd(*args: Any) -> Any:
 _far_placeholder.defvjp(_far_placeholder_fwd, _far_placeholder_bwd)
 
 
-def placeholder_far_seam(plan: CrossGradPlan) -> Callable[..., Array]:
+def placeholder_far_seam(plan: Optional[CrossGradPlan]) -> Callable[..., Array]:
     """Seam A's default: the production M2L launch forward, a reverse that raises.
 
     Parameters
     ----------
-    plan : CrossGradPlan
+    plan : Optional[CrossGradPlan]
         The device's plan (unused: the real seam binds its far layout).
 
     Returns

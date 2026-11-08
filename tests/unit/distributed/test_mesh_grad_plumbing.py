@@ -109,7 +109,7 @@ def _accumulate(**kwargs):
         ({"JACCPOT_STATIC_STRICT_FUSED_M2L_CSR": "0"}, {}),
         ({"JACCPOT_M2L_CSR_INTERPRET": "1"}, {"n_targets": None}),
         ({"JACCPOT_M2L_CSR_INTERPRET": "1"}, {"targets_sorted": False}),
-        ({"JACCPOT_M2L_CSR_INTERPRET": "1"}, {"force_scale": object()}),
+        ({"JACCPOT_M2L_CSR_INTERPRET": "1"}, {"force_scale": "far"}),
     ],
 )
 def test_cross_reverse_raises_where_the_cross_terms_would_vanish(
@@ -117,17 +117,46 @@ def test_cross_reverse_raises_where_the_cross_terms_would_vanish(
 ):
     for key, value in env.items():
         monkeypatch.setenv(key, value)
+    if kwargs.get("force_scale") == "far":
+        # a real FarForceScaleInputs (not a sentinel): CI's unit jobs run the
+        # runtime type checker, which would refuse anything else first
+        from jaccpot.runtime._force_scale_levels import FarForceScaleInputs
+
+        kwargs = dict(
+            kwargs,
+            force_scale=FarForceScaleInputs(
+                node_mass=jnp.ones((6,)),
+                node_radii=jnp.zeros((6,)),
+                softening_sq=jnp.asarray(0.0),
+                gravitational_constant=1.0,
+            ),
+        )
     with pytest.raises(ValueError, match="cross_reverse"):
         _accumulate(**kwargs)
 
 
-def test_cross_reverse_raises_without_cross_sources_in_the_sweep():
+@pytest.fixture(scope="module")
+def tree_and_upward():
+    """A real ``Tree`` and ``TreeUpwardData`` (CI's unit jobs type-check the
+    sweep's arguments, so placeholders would be refused before the check)."""
+    from jaccpot.runtime import _fmm_impl as fmm_impl_private
+
+    rng = np.random.default_rng(0)
+    positions = jnp.asarray(rng.uniform(-1.0, 1.0, (128, 3)))
+    masses = jnp.asarray(rng.uniform(0.5, 1.5, (128,)))
+    solver = fmm_impl_private.FMMEngine(expansion_basis="solidfmm", mac_type="bh")
+    state = solver.prepare_state(positions, masses, leaf_size=8, max_order=2)
+    return state.tree, state.upward
+
+
+def test_cross_reverse_raises_without_cross_sources_in_the_sweep(tree_and_upward):
     from jaccpot.runtime.kernels._l2l import _prepare_solidfmm_downward_sweep
 
+    tree, upward = tree_and_upward
     with pytest.raises(ValueError, match="cross_reverse"):
         _prepare_solidfmm_downward_sweep(
-            None,  # pyright: ignore[reportArgumentType]
-            None,  # pyright: ignore[reportArgumentType]
+            tree,
+            upward,
             theta=0.5,
             mac_type="dehnen",
             cross_reverse=lambda *a: None,
@@ -152,7 +181,7 @@ def test_the_placeholder_seams_raise_in_reverse_only(monkeypatch):
     src = jnp.asarray([3, 4, 3, 4, 3, 4], jnp.int32)
     offsets = jnp.asarray([0, 2, 4, 6], jnp.int32)
     args = (mp, cen, src, offsets, jnp.int32(6), order, 32, True, "triton", 1)
-    seam = placeholder_far_seam(None)  # pyright: ignore[reportArgumentType]
+    seam = placeholder_far_seam(None)
     got = seam(*args, n_local, True, False)
     want = m2l_real_csr_lanes_pallas(
         mp,
