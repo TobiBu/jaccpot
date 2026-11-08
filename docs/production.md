@@ -768,6 +768,23 @@ timeout leaves `CUDA_VISIBLE_DEVICES` empty and the run lands on the CPU.
   cross far pairs through the locals) and the cross near pairs' potential lane. A force
   without `potential_shard` reports every energy field as `None`, `energy_unavailable`
   says why, and the run warns once.
+- **Momentum across devices (M1, #173).** The mesh conserves momentum as well as one card,
+  with no reaction sent back. Each cross pair is evaluated on BOTH of its devices: every
+  device walks the gathered summary trees from the same seed, so both ends get the same pair
+  set (`cross._symmetric_walk`). Each device then applies its own half from what the other
+  shipped: the peer's multipole through M2L into its locals, and the peer's particles
+  through the cross near term. Both ends read bitwise-identical multipoles, centres and
+  particles. One card does the same with its own pairs (each canonical pair once per
+  direction, `_directed_csr_from_canonical`), so a cross pair cancels in `sum m a` as well
+  as a local pair does. Measured per force, as `|sum m a| / sum m |a|`, with the cross part
+  alone carrying about half of `sum m |a|`:
+  - fp64, forced CPU devices: ~1e-17 total and ~1e-16 for the cross part, for both MACs
+    (`tests/distributed/test_mesh_cross_momentum.py` pins it; dropping the cross far pairs
+    on one device gives 0.15);
+  - fp32 on two A100s: ~4e-9 for each part, against 1.1e-8 for one card.
+
+  So `momentum_drift` on N devices is in the one-card class (`docs/production_2026-11.md`,
+  `## M1`).
 - **Retry.** The segment runner's: a fired flag on any device re-plans what the segment
   outgrew (the walk caps, the tree's leaf capacity, depth and level plan, the cross
   capacities), re-prepares every device at the segment's start from a host copy of the

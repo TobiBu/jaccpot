@@ -81,6 +81,7 @@ _NORNAX_ADAPTER = "tests/integration/test_mutual_fmm_nornax.py"
 _NORNAX_DISTRIBUTED = "tests/integration/test_mutual_distributed_nornax.py"
 _SEGMENT_CRITERION = "tests/distributed/test_mesh_segment_dehnen_error.py"
 _SEGMENT_MIGRATION = "tests/distributed/test_mesh_segment_migration_fused.py"
+_SEGMENT_MOMENTUM = "tests/distributed/test_mesh_cross_momentum.py"
 # the fused multi-GPU lane's reverse mode end to end (WP-G G4): three whole-lane
 # gradient cases (2 and 4 devices, the criterion), each ~10-25 min of interpret-mode
 # compilation on CPU, so a job of its own beside the seams' and plumbing's
@@ -306,6 +307,7 @@ SHARDS: dict[str, list[str]] = {
         "distributed_segment",
         f"--ignore={_SEGMENT_CRITERION}",
         f"--ignore={_SEGMENT_MIGRATION}",
+        f"--ignore={_SEGMENT_MOMENTUM}",
         f"--ignore={_SEGMENT_ESCAPERS}",
         f"--ignore={_SEGMENT_SCHEME}",
         *(f"--ignore={path}" for path in _SEGMENT_RUNNER_FILES),
@@ -322,6 +324,9 @@ SHARDS: dict[str, list[str]] = {
     # session 2, tracks E and D): with them the segment job took ~24 of its 40
     # minutes (1,390 s of calls on this host at -n 1, ~1.2x that on CI)
     "distributed-segment-runner": [*_SEGMENT_RUNNER_FILES, "-m", "distributed_segment"],
+    # the mesh's momentum across devices, total and cross part at round-off (M1):
+    # ~4.6 min of calls on a loaded host; with it the segment job took 30 of its 40
+    "distributed-segment-momentum": [_SEGMENT_MOMENTUM, "-m", "distributed_segment"],
     # reverse-mode gradients of the fused multi-GPU lane (WP-G): the cross seams'
     # oracles and the plumbing's bitwise forward, then the end-to-end gradient gates
     "distributed-grad": [
@@ -356,6 +361,7 @@ GATED_SHARDS: tuple[str, ...] = (
     "distributed-segment-migration",
     "distributed-segment-scheme",
     "distributed-segment-runner",
+    "distributed-segment-momentum",
     "distributed-grad",
     "distributed-grad-gates",
     "distributed-segment-escapers",
