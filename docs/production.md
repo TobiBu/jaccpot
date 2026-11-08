@@ -407,12 +407,63 @@ res = runner.run(state, masses, dt=1e-3, num_steps=10_000)
 - **Restarts** carry the split and the ledger (`meta["escapers"]`, the arrays in the
   caller's rows plus `escaper_order`); a restart and a chained run continue bitwise. A run
   continues only in its own escaper mode.
-- **Not supported:** the multi-GPU mode (`mesh=`; it would need escaper rows outside the
-  equal-count domain cuts, the coupling's centre of mass as one more all-reduce per step,
-  and a split-aware migration and restart) and the gradient mode. Both refuse.
+- **Not supported:** the gradient mode (it refuses).
 - **Cost.** One fused reduction over the rows per step (the bound centre of mass and the
   coupling sum), a membership check per edge, and at a changing edge a row permutation
   and two energy evaluations. HoreKa rows: `bench/slurm/escaper_timing.sbatch`.
+
+### Escapers on the mesh (`mesh=` with `escapers=`; wave 3, MESC)
+
+The same policy, Hamiltonian, ledger and diagnostics in the multi-GPU mode, in both of its
+runtimes (one process with N devices, and N processes with one device each):
+
+```python
+runner = ProductionRunner(
+    solver, settings=settings, segment=segment,
+    mesh=MeshRunConfig(mesh),
+    escapers=EscaperPolicy(r_escape=80.0),
+)
+```
+
+- **The layout.** The bound rows are the ordinary mesh layout (`MeshState`), so the
+  decomposition, the cuts, the global and Morton boxes, the cross walk, the migration,
+  the repartition and every capacity see the bound rows only: an escaper at Mpc stretches
+  no device's box. The escapers live in a TAIL of their own
+  (`jaccpot.distributed.escapers.EscaperTail`): a block of `cap_e` rows per device,
+  sharded like the layout, never sorted, cut or migrated. A particle stays on the device
+  it escaped from; a returner re-enters that device's bound rows (the next migration or
+  repartition takes it to its domain). Every move at an edge is device-local.
+- **Per step**, inside the segment program: the tail drifts and kicks with the bound
+  rows; after the tree force, `M_b` and `X_b` (per-device fp64 sums) and then the
+  escapers' total pull (a 3-vector) are all-gathered and folded in mesh order -- two
+  small all-gathers, not `psum`, so one process and N processes give the same bits.
+- **At an edge** (every `every`-th): a small program counts, per device, the bound rows
+  beyond `r_escape` and the escapers within `r_return`; on a change the potential is
+  evaluated before and after (the ledger's jump), the tail grows first if a device's
+  escapers outgrow `cap_e` (`tail_capacity`: 1.5x the largest device's count, at least
+  64 rows; a new `cap_e` compiles the tail programs again, counted in
+  `RunResult.escapers["tail_grown"]`), and one device-local program moves the rows. The
+  carried accelerations are dropped (the next segment's start force evaluates the new
+  split). Under `migrate=True` the bound box changed with the split, and the migration's
+  fixed cuts are Morton codes of the old box, so the runner re-cuts with a full
+  repartition in the new box (`RunResult.escapers["recuts"]`).
+- **While the tail is empty** the segments run the DEFAULT programs: escapers on but
+  nobody escaping is the run without them, bitwise (state, diagnostics). Once someone
+  has escaped, one start and one segment program carry the tail for every split.
+- **Output.** `RunResult.state`, `MeshSegmentEdge.state_host()` / `gather()` (and so
+  `SnapshotWriter`) and the restart files are by id over the bound rows and the tail.
+  `edge.state` / `edge.layout` are the bound layout only; `edge.escapers` is the tail.
+  `edge.plan["escapers"]` has the tail's `cap` and per-device `counts`.
+- **Restart files** (one process; several processes continue from a `RunResult`, as
+  without escapers): the by-id arrays cover every particle, `escaper_ids` is the tail's
+  layout and `meta["escapers"]` the policy, split and ledger. On the same mesh a restart
+  is bitwise; on another mesh the bound rows are decomposed there and the escapers placed
+  in its tail. After a changed split the file holds no acceleration (the continuation's
+  start force computes it), as on one card.
+- **What it neglects:** as on one card (the escapers' tides across the bound system and
+  their mutual gravity). The tail's cost per step is O(`cap_e`) per device plus the two
+  all-gathers; its memory is ~60 B per tail row (Sgr 2.2e6 on two cards: see
+  `docs/production_2026-11.md`, MESC).
 
 ## Restart files
 
@@ -479,9 +530,48 @@ multi-stage schemes are not split steps.
   scheme permuted rows; a scheme that is not rowwise keeps the input order.
 - A restart file records the scheme (`meta["scheme"]`, only when there is one);
   continuing it under another scheme warns `"scheme"` in the mismatches.
-- Refused: the multi-GPU mode (`mesh=`; its seam is I2), the gradient mode (it
-  differentiates the built-in; nornax's `leapfrog_kdk_rollout` over
-  `FusedProviderForce` is the differentiable route), and `strict_run_v2(carry="state")`.
+- Refused: the gradient mode (it differentiates the built-in; nornax's
+  `leapfrog_kdk_rollout` over `FusedProviderForce` is the differentiable route), and
+  `strict_run_v2(carry="state")`.
+
+### On the mesh (multi-node plan I2)
+
+`ProductionRunner(..., mesh=MeshRunConfig(...), scheme=LeapfrogKDK())` runs the
+scheme in the multi-GPU mode too, in both runtimes (one process driving N devices; N
+processes with one device each). Each segment step calls `open_step` / `close_step`
+inside the segment's `shard_map`, on ONE device's `(cap, 2, 3)` rows, padding rows
+included (zero mass, zero velocity, zero acceleration), with or without the
+migration to fixed cuts (the opening half sees the rows the device owned at the
+step's start, the closing half the rows it owns after the migration).
+
+- A `rowwise` scheme (the KDK) runs per shard unchanged and is the built-in mesh
+  runner BITWISE: state, edges, gathers, diagnostics and restart files by id, with
+  repartitions, migration, segment retries, chained runs and restarts, on the direct
+  and the fused force, both MACs (`tests/distributed/test_production_runner_mesh_scheme.py`,
+  `..._scheme_fused.py`; `test_multiprocess_runtime.py`'s scheme cases: 2 and 4
+  processes == one process).
+- A scheme whose step reads other rows (a centre of mass, a global timestep) is not
+  rowwise and must declare a MESH FORM: `jaccpot.scheme.ShardedSplitStepScheme`,
+  i.e. `open_step_shard(state, acceleration, dt, *, live_rows, axis_name)` and
+  `close_step_shard(state_open, acceleration, acceleration_new, dt, *, live_rows,
+  axis_name)`, reducing with collectives whose result does not depend on the
+  transport's reduction order (`nornax.sharded.mesh_sum`: an `all_gather` folded in
+  mesh order). A scheme with a mesh form uses it whether or not it is rowwise. A
+  non-rowwise scheme without one is refused when the runner is built
+  (`jaccpot.scheme.check_mesh_scheme`); on one card it runs as before.
+- `scheme=None` keeps the mesh programs: their lowered text is main's (the
+  segment, start, potential and repartition programs, migrating or not, direct and
+  fused force, both MACs; source locations aside).
+- A scheme together with `escapers=` is refused on the mesh: the escaper tail's rows
+  are stepped by the built-in KDK (routing them through the scheme is a follow-up).
+  One card takes both.
+- The mesh restart file records the scheme as the single card's does; a restore
+  under another scheme lists `"scheme"` in the mismatches and is not bitwise.
+- The force behind nornax's protocol: `jaccpot.distributed.sharded_force.ShardedMeshForce`
+  wraps a prepared mesh force (`FusedMeshForce`, `DirectMeshForce`) as a
+  `nornax.sharded.ShardedForceModel` (per-device carry: the overflow bits, the walk
+  needs and, under `dehnen_error`, `f_b`). The runner does not use it (its programs
+  call the force directly); nornax's drivers and its sharded conformance kit do.
 
 ## Gradient mode (S9 session 2)
 

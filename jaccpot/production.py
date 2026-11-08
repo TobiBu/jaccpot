@@ -86,7 +86,7 @@ import numpy as np
 from yggdrax import TreeDepthError
 
 from jaccpot.escapers import EscaperPolicy
-from jaccpot.scheme import check_scheme, scheme_record
+from jaccpot.scheme import check_mesh_scheme, check_scheme, scheme_record
 
 __all__ = [
     "DIAGNOSTICS",
@@ -391,9 +391,15 @@ class MeshSegmentEdge(SegmentEdge):
     layout : Any
         The :class:`~jaccpot.distributed.segment.MeshState` at the edge (``None``
         once kept in :attr:`RunResult.edges`).
+    escapers : Any
+        The escaper tail (``ProductionRunner(mesh=..., escapers=...)``;
+        :class:`~jaccpot.distributed.escapers.EscaperTail`), whose rows
+        :meth:`state_host` and :meth:`gather` include; ``None`` without the
+        escaper path (or once kept in :attr:`RunResult.edges`).
     """
 
     layout: Any = None
+    escapers: Any = None
 
     def state_host(self) -> np.ndarray:
         """The state by global id, as a host array (one gather of the state and ids).
@@ -437,7 +443,7 @@ class MeshSegmentEdge(SegmentEdge):
 
         if self.layout is None:
             raise RuntimeError(_CONSUMED_EDGE)
-        return gather_by_id(self.layout, names)
+        return gather_by_id(self.layout, names, tail=self.escapers)
 
 
 @dataclass
@@ -1706,9 +1712,12 @@ class ProductionRunner:
         :class:`jaccpot.scheme.SplitStepScheme` -- ``nornax.schemes.LeapfrogKDK``
         is the KDK, bitwise to the built-in -- does each step's drift and kick
         around its one force evaluation inside the segment scan; segments,
-        retries, restarts and diagnostics stay the runner's. One card only (the
-        multi-GPU mode takes one in I2), and not in the gradient mode. Anything
-        else is a ``TypeError`` (:func:`jaccpot.scheme.check_scheme`).
+        retries, restarts and diagnostics stay the runner's. In the multi-GPU
+        mode (I2) it runs on each device's rows inside the segment's
+        ``shard_map``: a rowwise scheme as it is, any other through its mesh
+        form (:class:`jaccpot.scheme.ShardedSplitStepScheme`) or refused
+        (:func:`jaccpot.scheme.check_mesh_scheme`). Not in the gradient mode.
+        Anything else is a ``TypeError`` (:func:`jaccpot.scheme.check_scheme`).
     escapers : Optional[EscaperPolicy]
         ``None`` (the default): every particle is in the tree, every program as
         without it. A :class:`jaccpot.escapers.EscaperPolicy`: the ESCAPER PATH
@@ -1725,13 +1734,19 @@ class ProductionRunner:
         snapshots, restart files and the result see the CALLER's row order; the
         in-scan ``step_callback`` and the external field see the internal one
         (tree rows first: a per-particle field works unchanged, a field with
-        per-row parameters does not). One card only, not in the gradient mode.
+        per-row parameters does not). Not in the gradient mode. On the mesh
+        (``mesh=``; wave 3, MESC; :mod:`jaccpot.distributed.escapers`) the
+        escapers live in a tail of their own next to the bound rows' layout, so
+        the decomposition, cuts, boxes and capacities are the bound rows'; the
+        same semantics, ledger and diagnostics, gathered by id.
 
     Raises
     ------
     ValueError
         If ``settings.carry`` is not ``"particles"``, or with ``mesh`` and a
-        ``step_callback``, a ``scheme`` or ``escapers``.
+        ``step_callback``, a scheme that is neither rowwise nor has a mesh form,
+        or a scheme together with ``escapers`` (the escaper tail has the
+        built-in KDK only).
     TypeError
         If ``escapers`` is not an :class:`~jaccpot.escapers.EscaperPolicy`.
 
@@ -1817,18 +1832,15 @@ class ProductionRunner:
                     "segment runner's scan streams nothing); use a callback at the "
                     "segment edges"
                 )
-            if scheme is not None:
+            # I2: the scheme runs on each device's rows; one whose step reads
+            # other rows must have a mesh form
+            check_mesh_scheme(scheme)
+            if scheme is not None and escapers is not None:
                 raise ValueError(
-                    "the multi-GPU mode runs the built-in KDK only (its scheme seam "
-                    "is the multi-node plan's I2); pass scheme=None"
-                )
-            if escapers is not None:
-                raise ValueError(
-                    "the escaper path runs on one card (mesh=None): on the mesh the "
-                    "escapers would need their own rows outside the domain "
-                    "decomposition (the cuts and the migration are equal-count over "
-                    "every row), the coupling's centre of mass as one more "
-                    "all-reduce per step, and a split-aware restart; not built"
+                    "the multi-GPU mode runs a scheme without the escaper path: the "
+                    "escaper tail's rows are stepped by the built-in KDK (their "
+                    "drift and kick are not routed through the scheme yet); pass "
+                    "escapers=None, or scheme=None, or run on one card (mesh=None)"
                 )
             self.mesh = mesh if isinstance(mesh, MeshRunConfig) else MeshRunConfig(mesh)
             self._mesh_backend = MeshBackend(self)
