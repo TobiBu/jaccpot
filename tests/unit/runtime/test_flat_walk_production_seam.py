@@ -291,7 +291,9 @@ def test_a_wrapped_pallas_walk_count_raises_instead_of_looping(
     # the Pallas walk counts past a full list in int32: past 2^31 - 1 pairs the
     # count wraps negative, and the ladder sized its next rung from it (2 entries),
     # walked again and never stopped
-    import jaccpot.pallas.mutual_walk_pallas as mwp
+    # jaccpot calls the walk through pallas_mutual_walk, which looks it up here
+    import yggdrax.interactions as mwp
+
     import jaccpot.runtime._interaction_cache as ic
 
     tree, geometry, _, _ = tree_and_geometry

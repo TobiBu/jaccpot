@@ -25,7 +25,7 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
-from jaccpot.pallas.mutual_walk_pallas import mutual_walk_pallas  # noqa: E402
+from yggdrax.interactions import mutual_walk_pallas  # noqa: E402
 
 ap = argparse.ArgumentParser()
 ap.add_argument("capture")
@@ -57,11 +57,6 @@ def _sums(a, b, n):
 
 
 def make(layout: str, block: int, warps: int, programs: int):
-    os.environ["JACCPOT_WALK_MAX_PROGRAMS"] = str(programs)
-    # the env var is read at trace time and is not a static argument of the walk's
-    # inner jit, whose cache would otherwise hand back the previous grid
-    jax.clear_caches()
-
     @jax.jit
     def f(left, right, cent, rad, root, act):
         r = mutual_walk_pallas(
@@ -78,6 +73,7 @@ def make(layout: str, block: int, warps: int, programs: int):
             block=block,
             num_warps=warps,
             node_layout=layout,
+            max_programs=programs,
         )
         return (
             r.far_count,

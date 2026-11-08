@@ -1,18 +1,19 @@
 """Dehnen (2014) eq (16a) as a per-pair test inside the flat walks.
 
 The general path evaluates the criterion through ``adaptive_pair_policy`` on the
-yggdrax dual walk. The fused strict lane runs a FLAT walk -- the Pallas
+yggdrax dual walk. The fused strict lane runs a FLAT walk -- yggdrax's Pallas
 ``mutual_walk_pallas`` on the GPU, ``yggdrax.dual_tree_walk_mutual`` elsewhere --
 which has no policy seam and must stay cheap per pair. So the criterion is split
-in two:
+in two, and the half the walks evaluate lives in yggdrax (``yggdrax._dehnen_accept``,
+exported from ``yggdrax.interactions``) next to the Pallas walk that runs it:
 
 * :func:`dehnen_walk_table` builds, once per walk, a ``[nodes, W]`` table holding
   everything eq (16a) reads about a node: ``G M``, the node's acceptance threshold
   ``eps * min_b f_b`` and the normalised multipole powers
   ``s_n = P_n / (M rho^n)``, ``n = 1..p`` (eq 12, with ``rho`` the walk's own
   exact centre-of-mass radius). ``W`` is a power of two (Triton's array shapes).
-* :func:`dehnen_pair_accept` evaluates eq (15)/(16a) for one pair, symmetrised,
-  from two gathered rows. It is elementwise only -- no gathers, no reductions --
+* ``dehnen_pair_accept`` (yggdrax, re-exported here) evaluates eq (15)/(16a) for
+  one pair, symmetrised, from two gathered rows. It is elementwise only -- no gathers, no reductions --
   so the same function runs inside the Pallas kernel on a block of lanes and in
   the XLA walk on a whole round.
 
@@ -45,16 +46,23 @@ the walk's radii to compare the two as sets.
 from __future__ import annotations
 
 import dataclasses
-import math
-from typing import Any, NamedTuple, Sequence
+from typing import Any, NamedTuple
 
 import jax.numpy as jnp
 from jaxtyping import Array
+from yggdrax.interactions import (
+    WALK_TABLE_GM,
+    WALK_TABLE_POWER0,
+    WALK_TABLE_THRESHOLD,
+    dehnen_pair_accept,
+    walk_table_width,
+)
 
 from jaccpot.runtime._adaptive_policy import dehnen_multipole_power_by_degree
 
 __all__ = [
     "WALK_TABLE_GM",
+    "WALK_TABLE_POWER0",
     "WALK_TABLE_THRESHOLD",
     "DehnenWalkAccept",
     "FlatWalkCriterion",
@@ -63,36 +71,9 @@ __all__ = [
     "walk_table_width",
 ]
 
-#: column of ``G M`` in the walk table
-WALK_TABLE_GM = 0
-#: column of the node's acceptance threshold ``eps * min_b f_b`` (a force)
-WALK_TABLE_THRESHOLD = 1
-#: column of ``s_1``; ``s_n`` sits at ``WALK_TABLE_POWER0 + n - 1``
-WALK_TABLE_POWER0 = 2
-
-#: the improvement factor of eq (15): ``8 max(rho) / (rho_A + rho_B)``
-_IMPROVEMENT = 8.0
-#: floor of every division, as in ``adaptive_pair_policy``
+#: floor of every division, as in ``adaptive_pair_policy`` (and in yggdrax's
+#: ``dehnen_pair_accept``)
 _TINY = 1e-24
-
-
-def walk_table_width(order: int) -> int:
-    """Columns of the walk table for expansion order ``order``.
-
-    ``G M``, the threshold and ``s_1..s_p``, padded to a power of two.
-
-    Parameters
-    ----------
-    order : int
-        Expansion order ``p``.
-
-    Returns
-    -------
-    int
-        The table width, a power of two ``>= order + 2``.
-    """
-    need = int(order) + WALK_TABLE_POWER0
-    return 1 << max(0, (need - 1).bit_length())
 
 
 def dehnen_walk_table(
@@ -155,76 +136,6 @@ def dehnen_walk_table(
         cols.append(jnp.where(rho > 0.0, s, jnp.zeros_like(s)))
     cols += [jnp.zeros_like(m)] * (width - len(cols))
     return jnp.stack(cols, axis=1)
-
-
-def _powers(x: Array, p: int) -> list[Array]:
-    out = [jnp.ones_like(x)]
-    for _ in range(p):
-        out.append(out[-1] * x)
-    return out
-
-
-def dehnen_pair_accept(
-    *,
-    row_a: Sequence[Array],
-    row_b: Sequence[Array],
-    radius_a: Array,
-    radius_b: Array,
-    dist_sq: Array,
-    order: int,
-    theta_max: Any,
-) -> Array:
-    """Eq (16a), symmetrised, for pairs given their two gathered table rows.
-
-    Elementwise in every argument, so it runs on a block of lanes inside Pallas
-    as well as on a whole round in XLA.
-
-    Parameters
-    ----------
-    row_a : Sequence[Array]
-        Node A's table columns ``0..p+1`` (see :func:`dehnen_walk_table`).
-    row_b : Sequence[Array]
-        Node B's table columns.
-    radius_a : Array
-        A's MAC radius.
-    radius_b : Array
-        B's MAC radius.
-    dist_sq : Array
-        Squared centre distance.
-    order : int
-        Expansion order ``p``. Static.
-    theta_max : Any
-        The convergence clause's bound (the paper's 1).
-
-    Returns
-    -------
-    Array
-        True where both directions pass eq (16a) and the expansion converges.
-    """
-    p = int(order)
-    dtype = dist_sq.dtype
-    tiny = jnp.asarray(_TINY, dtype)
-    r = jnp.sqrt(dist_sq)
-    rsum = radius_a + radius_b
-    convergent = rsum < theta_max * r
-    inv_r = 1.0 / jnp.maximum(r, tiny)
-    a = radius_a * inv_r
-    b = radius_b * inv_r
-    pa = _powers(a, p)
-    pb = _powers(b, p)
-    e_ab = pb[p]  # n = 0: s_0 = 1
-    e_ba = pa[p]
-    for n in range(1, p + 1):
-        c = float(math.comb(p, n))
-        e_ab = e_ab + c * row_a[WALK_TABLE_POWER0 + n - 1] * pa[n] * pb[p - n]
-        e_ba = e_ba + c * row_b[WALK_TABLE_POWER0 + n - 1] * pb[n] * pa[p - n]
-    improvement = (
-        _IMPROVEMENT * jnp.maximum(radius_a, radius_b) / jnp.maximum(rsum, tiny)
-    )
-    scale = improvement * inv_r * inv_r
-    ok_ab = row_a[WALK_TABLE_GM] * e_ab * scale < row_b[WALK_TABLE_THRESHOLD]
-    ok_ba = row_b[WALK_TABLE_GM] * e_ba * scale < row_a[WALK_TABLE_THRESHOLD]
-    return convergent & ok_ab & ok_ba
 
 
 @dataclasses.dataclass(frozen=True)

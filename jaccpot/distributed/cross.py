@@ -325,7 +325,7 @@ def _summary_table_width(order: int) -> int:
     int
         ``p + 2``.
     """
-    from jaccpot.runtime._walk_criterion import WALK_TABLE_POWER0
+    from yggdrax.interactions import WALK_TABLE_POWER0
 
     return WALK_TABLE_POWER0 + int(order)
 
@@ -1682,7 +1682,7 @@ def cross_walk_backend() -> str:
     """Walk implementation of the export and receiver walks.
 
     ``JACCPOT_CROSS_WALK``: ``"pallas"`` (one Pallas launch per round,
-    :func:`jaccpot.pallas.mutual_walk_pallas.mutual_walk_pallas` with a seeded
+    yggdrax's ``mutual_walk_pallas`` with a seeded
     start) or ``"flat"`` (yggdrax ``dual_tree_walk_mutual``, traced JAX). Unset:
     whatever the local lane's own walk uses (``JACCPOT_STATIC_STRICT_FUSED_WALK``,
     Pallas on an Ampere+ GPU).
@@ -1757,11 +1757,10 @@ def cross_walk_fn(
         seed_count: Optional[Array] = None,
         separation_floor: float = 0.0,
     ) -> Any:
-        from jaccpot._env import env_flag
-        from jaccpot.pallas.mutual_walk_pallas import mutual_walk_pallas
+        from jaccpot.runtime._interaction_cache import pallas_mutual_walk
 
         del mac_type  # dehnen / bh: the kernel's (r_a + r_b)^2 <= theta^2 d^2
-        return mutual_walk_pallas(
+        return pallas_mutual_walk(
             left_child_full,
             right_child_full,
             centers,
@@ -1775,7 +1774,6 @@ def cross_walk_fn(
             seed_a=seed_a,
             seed_b=seed_b,
             seed_count=seed_count,
-            interpret=env_flag("JACCPOT_WALK_PALLAS_INTERPRET", False),
             separation_floor=float(separation_floor),
         )
 
@@ -1832,17 +1830,15 @@ def _criterion_walk_fn(order: int, theta_max: float) -> Callable[..., Any]:
             separation_floor=float(separation_floor),
         )
         if pallas:
-            from jaccpot._env import env_flag
-            from jaccpot.pallas.mutual_walk_pallas import mutual_walk_pallas
+            from jaccpot.runtime._interaction_cache import pallas_mutual_walk
 
-            return mutual_walk_pallas(
+            return pallas_mutual_walk(
                 left_child_full,
                 right_child_full,
                 centers,
                 radii,
                 float(theta),
                 root,
-                interpret=env_flag("JACCPOT_WALK_PALLAS_INTERPRET", False),
                 error_table=error_table,
                 error_order=int(order),
                 theta_max=float(theta_max),
