@@ -958,6 +958,7 @@ def _shard_rebuild(
     cross_near_sink: Optional[dict],
     axis_name: str,
     force_scale: Optional[Array],
+    keep_far_list: bool = False,
 ) -> Any:
     """One device's topology in the global box, the cross hook between the sweeps.
 
@@ -986,6 +987,10 @@ def _shard_rebuild(
     force_scale : Optional[Array]
         ``(cap,)`` eq (16b)'s ``f_b`` in input row order under the criterion, else
         ``None``.
+    keep_far_list : bool
+        Keep the walk's far list in the topology (``provider.rebuild``'s): the
+        gradient plan reads it (:mod:`jaccpot.distributed.grad`). ``False``
+        (default): the force's program.
 
     Returns
     -------
@@ -1006,6 +1011,7 @@ def _shard_rebuild(
         bounds=bounds,
         num_valid=live,
         cross_hook=cross_hook,
+        keep_far_list=keep_far_list,
         **({} if force_scale is None else {"force_scale": force_scale}),
     )
 
@@ -1867,6 +1873,128 @@ class FusedMeshForce:
             force_scale=force_scale,
         )
         return phi, bits
+
+    def with_grad_plan(
+        self, positions: Array, masses: Array, counts: Array
+    ) -> "FusedMeshForce":
+        """Derive the gradient plan's static fields from the mesh's template.
+
+        :func:`~jaccpot.distributed.grad.mesh_grad_statics` (an ``eval_shape`` of a
+        ``keep_far_list`` rebuild under this mesh's ``shard_map``; nothing runs),
+        kept on this force with the key they were derived under: a re-prepared
+        force (a re-plan, another template) must derive them again before
+        :meth:`differentiable_shard`. Call it after :meth:`prepare`.
+
+        Parameters
+        ----------
+        positions : Array
+            ``(ndev * cap, 3)`` mesh-sharded positions (shapes only).
+        masses : Array
+            ``(ndev * cap,)`` masses.
+        counts : Array
+            ``(ndev,)`` live rows per device.
+
+        Returns
+        -------
+        FusedMeshForce
+            ``self``, with ``grad_statics``.
+        """
+        from jaccpot.distributed.grad import mesh_grad_statics
+
+        self.grad_statics = mesh_grad_statics(self, positions, masses, counts)
+        self._grad_statics_key = self.key()
+        return self
+
+    def differentiable_shard(
+        self,
+        positions: Array,
+        masses: Array,
+        live: Array,
+        ids: Array,
+        force_scale: Optional[Array] = None,
+        params: Any = None,
+        *,
+        far_seam: Optional[Callable[..., Any]] = None,
+        near_seam: Optional[Callable[..., Any]] = None,
+    ) -> tuple[Array, ...]:
+        """:meth:`shard`, differentiable in ``positions`` and ``masses`` (inside ``shard_map``).
+
+        :func:`~jaccpot.distributed.grad.mesh_differentiable_force_shard` with this
+        force's setup, the statics of :meth:`with_grad_plan` and a cross hook
+        recording the frozen layout (built per trace from the current
+        capacities). Called like :meth:`shard`: under :meth:`context`, with
+        :meth:`before_trace` before a fresh trace; the loss belongs OUTSIDE the
+        ``shard_map``. The forward is :meth:`shard`'s bitwise on the live rows
+        (padding rows zero).
+
+        Parameters
+        ----------
+        positions : Array
+            ``(cap, 3)``.
+        masses : Array
+            ``(cap,)``.
+        live : Array
+            Scalar live row count.
+        ids : Array
+            ``(cap,)`` global ids; unused.
+        force_scale : Optional[Array]
+            ``(cap,)`` the previous force's ``f_b`` (:attr:`scale_carry` only).
+        params : Any
+            Force parameters (``None``: the solver's).
+        far_seam, near_seam : Optional[Callable[..., Any]]
+            The cross seams (:mod:`jaccpot.distributed.grad`); ``None``: the
+            real ones (:func:`~jaccpot.distributed.grad.cross_far_seam`,
+            :func:`~jaccpot.distributed.grad.cross_near_seam`).
+
+        Returns
+        -------
+        tuple[Array, ...]
+            ``(acceleration, bits, needs)``, then ``f_b`` with ``force_scale``.
+
+        Raises
+        ------
+        RuntimeError
+            Without statics of this force's current setup (:meth:`with_grad_plan`).
+        """
+        from jaccpot.distributed import grad as _grad
+
+        del ids
+        statics = getattr(self, "grad_statics", None)
+        if statics is None or getattr(self, "_grad_statics_key", None) != self.key():
+            raise RuntimeError(
+                "FusedMeshForce.differentiable_shard needs the gradient plan's "
+                "statics of the current setup: call with_grad_plan(positions, "
+                "masses, counts) after prepare (and after every re-plan)"
+            )
+        if self.hook is None and len(self.devices) > 1:
+            raise RuntimeError(
+                "FusedMeshForce.differentiable_shard: the cross capacities are not "
+                "sized yet (cross_caps='auto' before plan_cross); the force has no "
+                "cross hook to replay"
+            )
+        hook, near_sink, grad_sink = _grad.make_mesh_grad_hook(
+            self.solver,
+            self.mesh,
+            theta=self.theta_value,
+            cross_caps=self.cross_caps,
+            near_theta=self.near_theta,
+            axis_name=self.axis_name,
+        )
+        return _grad.mesh_differentiable_force_shard(
+            self._setup_or_raise(),
+            positions,
+            masses,
+            live,
+            statics=statics,
+            cross_hook=hook,
+            cross_near_sink=near_sink,
+            grad_sink=grad_sink,
+            axis_name=self.axis_name,
+            force_scale=force_scale,
+            params=params,
+            far_seam=far_seam or _grad.cross_far_seam,
+            near_seam=near_seam or _grad.cross_near_seam,
+        )
 
     # ------------------------------------------------------------------
     # The segment retry.

@@ -1082,6 +1082,107 @@ jobs:
             exit 1
           fi
 
+  # Reverse-mode gradients of the fused multi-GPU lane (WP-G): the cross seams'
+  # oracles and the plumbing's bitwise forward, on FOUR forced devices so the
+  # 4-device cases run (the segment jobs use two).
+  test-distributed-grad:
+    name: test-distributed-grad
+    needs: changes
+    if: needs.changes.outputs.gated == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+      XLA_FLAGS: --xla_force_host_platform_device_count=4
+      JACCPOT_TEST_JAX_CACHE_DIR: ${{ github.workspace }}/.jax_cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Restore JAX compilation cache
+        uses: actions/cache@v4
+        with:
+          path: .jax_cache
+          key: jax-cache-distributed-grad-${{ runner.os }}--${{ hashFiles('jaccpot/**/*.py', 'tests/**/*.py') }}
+          restore-keys: |
+            jax-cache-distributed-grad-${{ runner.os }}--
+      - name: Install package + dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install -e ".[dev]"
+      - name: Multi-GPU gradient seams + plumbing on four forced devices
+        # `-n 1`: interpret-mode reverse programs peak at ~10 GB each; one at a time.
+        run: |
+          set -o pipefail
+          rc=0
+          mapfile -t selection < <(python .github/scripts/test_shards.py args distributed-grad)
+          pytest "${selection[@]}" -n 1 -rs --durations=10 \
+            | tee pytest-distributed-grad.txt || rc=$?
+          if [ "$rc" != 0 ] && [ "$rc" != 5 ]; then exit "$rc"; fi
+      - name: Fail if the tier was skipped rather than run
+        run: |
+          if grep -qE "no tests ran|collected 0 items" pytest-distributed-grad.txt \
+             || grep -qE "^SKIPPED.*needs >= 2 devices" pytest-distributed-grad.txt; then
+            echo "::error::the Multi-GPU gradient seams + plumbing tier did not run on forced devices"
+            exit 1
+          fi
+
+  # The same lane's gradient end to end (finite differences, direct sum, single
+  # card, NaN verdict, Euler identity): three whole-lane reverse programs.
+  test-distributed-grad-gates:
+    name: test-distributed-grad-gates
+    needs: changes
+    if: needs.changes.outputs.gated == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+      XLA_FLAGS: --xla_force_host_platform_device_count=4
+      JACCPOT_TEST_JAX_CACHE_DIR: ${{ github.workspace }}/.jax_cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Restore JAX compilation cache
+        uses: actions/cache@v4
+        with:
+          path: .jax_cache
+          key: jax-cache-distributed-grad-gates-${{ runner.os }}--${{ hashFiles('jaccpot/**/*.py', 'tests/**/*.py') }}
+          restore-keys: |
+            jax-cache-distributed-grad-gates-${{ runner.os }}--
+      - name: Install package + dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install -e ".[dev]"
+      - name: Multi-GPU gradient gates on four forced devices
+        # `-n 1`: interpret-mode reverse programs peak at ~10 GB each; one at a time.
+        run: |
+          set -o pipefail
+          rc=0
+          mapfile -t selection < <(python .github/scripts/test_shards.py args distributed-grad-gates)
+          pytest "${selection[@]}" -n 1 -rs --durations=10 \
+            | tee pytest-distributed-grad-gates.txt || rc=$?
+          if [ "$rc" != 0 ] && [ "$rc" != 5 ]; then exit "$rc"; fi
+      - name: Fail if the tier was skipped rather than run
+        run: |
+          if grep -qE "no tests ran|collected 0 items" pytest-distributed-grad-gates.txt \
+             || grep -qE "^SKIPPED.*needs >= 2 devices" pytest-distributed-grad-gates.txt; then
+            echo "::error::the Multi-GPU gradient gates tier did not run on forced devices"
+            exit 1
+          fi
+
   test-distributed-segment-momentum:
     name: test-distributed-segment-momentum
     needs: changes

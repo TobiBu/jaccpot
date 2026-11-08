@@ -427,6 +427,7 @@ class SweepsMixin(_EngineBase):
         n_targets: Optional[int] = None,
         cross_far: Optional[tuple] = None,
         far_force_scale: Optional[FarForceScaleInputs] = None,
+        cross_reverse: Optional[Callable[..., Array]] = None,
     ) -> Union[TreeDownwardData, tuple[TreeDownwardData, Array]]:
         """Build interactions and locals needed for the downward sweep.
 
@@ -485,6 +486,12 @@ class SweepsMixin(_EngineBase):
             the Pallas L2L cascade. Only where
             :func:`~jaccpot.runtime.kernels._l2l._far_force_scale_in_downward_available`
             holds.
+        cross_reverse : Optional[Callable[..., Array]]
+            With ``cross_far``: the multi-GPU gradient's M2L seam (seam A,
+            :mod:`jaccpot.distributed.grad`), called in place of the CSR M2L
+            lanes kernel's ``custom_vjp`` on the merged cross-domain CSR. Raises
+            off that kernel or on an unsorted list (the cross source terms would
+            silently leave the gradient). ``None`` (default): production.
 
         Returns
         -------
@@ -572,6 +579,7 @@ class SweepsMixin(_EngineBase):
                 use_pallas=self.use_pallas,
                 timing_recorder=timing_recorder,
                 force_scale=far_force_scale,
+                **({} if cross_reverse is None else {"cross_reverse": cross_reverse}),
             )
 
         raise ValueError(
