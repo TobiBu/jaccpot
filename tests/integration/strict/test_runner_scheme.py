@@ -62,7 +62,7 @@ class _KDK:
     def open_step(self, state, acceleration, dt):
         dt = self._dt(dt)
         x, v = state[:, 0], state[:, 1]
-        return state.at[:, 0].set(x + (v * dt + 0.5 * acceleration * dt**2))
+        return state.at[:, 0].set(x + dt * (v + (0.5 * dt) * acceleration))
 
     def close_step(self, state_open, acceleration, acceleration_new, dt):
         dt = jnp.asarray(self._dt(dt), dtype=state_open.dtype)

@@ -465,6 +465,37 @@ runner = ProductionRunner(
   all-gathers; its memory is ~60 B per tail row (Sgr 2.2e6 on two cards: see
   `docs/production_2026-11.md`, MESC).
 
+## The drift order (A3)
+
+The drift is `x + dt (v + 0.5 dt a)`: the increment is summed first, then added to
+the positions in ONE rounding (`GalaxySettings.drift_order="summed"`, the default since
+multi-node plan A3; `jaccpot.runtime.fmm_state.drift_positions`). Before A3 the drift
+was evaluated left to right, `x + v dt + 0.5 a dt**2`: in a float32 state `x + v dt` is
+rounded to `x`'s grid and then `0.5 a dt**2` -- below `x`'s last bit for most
+particles at `dt` 5e-4 -- is rounded against `x` on its own, with the same sign along
+an orbit. On the 2026-10-31 merger (4.7e7 particles, `dt` 5e-4, t 0.8, `dehnen_error`,
+[`production_2026-11.md`](production_2026-11.md), A3):
+
+| drift | dE/E0 | dL/L0 | force rel-L2 | B/p at 1e8 (`dehnen_error`) |
+| --- | --- | --- | --- | --- |
+| legacy (before A3), float32 state | 8.66e-6 | 7.60e-6 | 2.04e-4 | 254.5 |
+| summed (the default), float32 state | -1.24e-6 | 3.17e-7 | 2.07e-4 | 254.3 |
+| float64 state (float32 force) | -1.25e-6 | 3.17e-7 | 2.01e-4 | out of memory at 9e7 |
+
+- **`drift_order="legacy"`** restores the old expression: the bitwise path to a run, or
+  a restart file, from before A3. The single-card scan, the multi-GPU mode (its escaper
+  tail too) and the gradient mode follow the setting; a `scheme` brings its own drift
+  (nornax's `LeapfrogKDK(drift_order=...)`, summed by default).
+- **Restarts.** A legacy run's fingerprint records no `drift_order`, so a file written
+  before A3 continues bitwise under `drift_order="legacy"`; under the default it
+  continues correctly but not bitwise (the warning names the drift order).
+- **What it does not fix:** float32 velocities at much smaller steps (block-step rungs):
+  at `dt` 2.5e-5 they limit dL to ~2e-7 where a float64 state keeps 1e-13.
+  `jaccpot.position_precision.CompensatedKDK(velocities=True)` (opt-in scheme, a
+  double-float32 state `[N, 4, 3]`) follows the float64 state there, but costs 301 B/p
+  at 1e8 under `dehnen_error`: **over the 277 B/p budget**, a prototype, not a
+  production setting.
+
 ## Restart files
 
 One `.npz`, written to a temporary file and renamed (a crash keeps the previous one):
@@ -518,8 +549,8 @@ force evaluation per step at its end: the KDK leapfrog, and later the P3T-style 
 Hermite (U6), whose `open_step` integrates the direct-sum subsystems. Block steps and
 multi-stage schemes are not split steps.
 
-- `scheme=None` (the default) is the built-in velocity-Verlet KDK: the same programs
-  as before (identity vs the wave-2 base, 36/36).
+- `scheme=None` (the default) is the built-in velocity-Verlet KDK (its drift summed
+  since A3, `GalaxySettings.drift_order`).
 - `LeapfrogKDK()` writes the built-in's expressions operand for operand (nornax's
   `drift_positions` / `kick_velocities`, which its own rollouts call), so it is the
   built-in, bit for bit (`tests/integration/strict/test_runner_scheme.py`: literal and

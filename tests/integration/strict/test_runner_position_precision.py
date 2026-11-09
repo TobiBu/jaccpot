@@ -2,7 +2,7 @@
 
 On CPU at N = 512 with ``test_production_runner.py``'s operating point:
 
-* the built-in drift is ``x + (v dt + 0.5 a dt**2)`` (the default since A3) and
+* the built-in drift is ``x + dt (v + 0.5 dt a)`` (the default since A3) and
   ``GalaxySettings(drift_order="legacy")`` is ``x + v dt + 0.5 a dt**2`` left to
   right (every run before A3), each bit for bit a scheme that writes it out;
 * a restart records the order: a legacy run's settings record has no
@@ -51,7 +51,7 @@ class _KDK:
         x, v = state[:, 0], state[:, 1]
         if self.order == "legacy":
             return state.at[:, 0].set(x + v * dt + 0.5 * acceleration * dt**2)
-        return state.at[:, 0].set(x + (v * dt + 0.5 * acceleration * dt**2))
+        return state.at[:, 0].set(x + dt * (v + (0.5 * dt) * acceleration))
 
     def close_step(self, state_open, acceleration, acceleration_new, dt):
         dt = jnp.asarray(dt, dtype=state_open.dtype)

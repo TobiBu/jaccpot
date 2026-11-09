@@ -194,7 +194,7 @@ class GalaxySettings:
     drift_order : Literal["summed", "legacy"]
         The built-in drift's evaluation order (multi-node plan A3,
         :func:`jaccpot.runtime.fmm_state.drift_positions`): ``"summed"`` (the
-        default since A3) is ``x + (v dt + 0.5 a dt**2)``, one rounding of the
+        default since A3) is ``x + dt (v + 0.5 dt a)``, one rounding of the
         positions per step; ``"legacy"`` is ``x + v dt + 0.5 a dt**2`` left to right,
         the expression of every run before A3 -- the bitwise path to their states
         and restart files. In a float32 state the left-to-right form rounds the

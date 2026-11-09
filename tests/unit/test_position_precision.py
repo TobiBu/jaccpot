@@ -53,7 +53,7 @@ def test_the_drift_orders():
     x, v = st[:, 0], st[:, 1]
     summed = np.asarray(drift_positions(x, v, acc, dt))
     legacy = np.asarray(drift_positions(x, v, acc, dt, "legacy"))
-    assert np.array_equal(summed, np.asarray(x + (v * dt + 0.5 * acc * dt**2)))
+    assert np.array_equal(summed, np.asarray(x + dt * (v + (0.5 * dt) * acc)))
     assert np.array_equal(legacy, np.asarray(x + v * dt + 0.5 * acc * dt**2))
     assert not np.array_equal(summed, legacy)
     assert DRIFT_ORDERS == ("summed", "legacy")

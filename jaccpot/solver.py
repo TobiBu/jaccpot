@@ -2061,7 +2061,7 @@ class FastMultipoleMethod:
             docstring).
         drift_order : Literal["summed", "legacy"]
             The built-in drift's evaluation order (multi-node plan A3):
-            ``"summed"`` (the default) is ``x + (v dt + 0.5 a dt**2)``, one rounding
+            ``"summed"`` (the default) is ``x + dt (v + 0.5 dt a)``, one rounding
             of ``x`` per step; ``"legacy"`` is ``x + v dt + 0.5 a dt**2`` left to
             right, the bitwise path to runs before A3. Not with a ``scheme`` (its
             ``open_step`` is the drift).

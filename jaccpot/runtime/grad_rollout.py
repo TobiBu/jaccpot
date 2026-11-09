@@ -777,7 +777,7 @@ def differentiable_rollout(
 
     Each step is the production particle carry's, expression for expression::
 
-        x = x + (v * dt + 0.5 * a * dt**2)   # drift_order="summed" (the default)
+        x = x + dt * (v + (0.5 * dt) * a)   # drift_order="summed" (the default)
         a_new, aux = step_fn(x, masses, params, aux)
         a_new = a_new + external_fn(stack([x, v]), external_args)   # if a field
         v = v + 0.5 * (a + a_new) * dt

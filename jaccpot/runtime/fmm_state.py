@@ -117,7 +117,7 @@ def drift_positions(
     """The velocity-Verlet drift: ``x + v dt + 0.5 a dt**2``.
 
     ``order="summed"`` (the default, multi-node plan A3) sums the increment
-    first, ``x + (v dt + 0.5 a dt**2)``: ``x`` is rounded once per step. Left to
+    first, ``x + dt (v + 0.5 dt a)``: ``x`` is rounded once per step. Left to
     right (``"legacy"``), ``x + v dt`` is rounded to ``x``'s grid and then
     ``0.5 a dt**2`` -- in a float32 state below ``x``'s last bit for most particles
     at ``dt`` 5e-4 -- is rounded against ``x`` on its own, with the same sign along
@@ -145,7 +145,13 @@ def drift_positions(
     """
     if order == "legacy":
         return positions + velocities * dt + 0.5 * acceleration * dt**2
-    return positions + (velocities * dt + 0.5 * acceleration * dt**2)
+    # the increment as dt * (v + (0.5 dt) a): every addition has ONE product operand,
+    # so a backend that contracts a multiply-add into an FMA (XLA:CPU's LLVM, NVPTX)
+    # forms the same FMAs in every program the expression lands in -- the scan, the
+    # gradient rollout, a scheme, a mesh shard. ``v dt + 0.5 a dt**2`` (two products
+    # into one addition) let the contraction pick either product by context, and two
+    # programs drifted 1 ulp apart after a few steps
+    return positions + dt * (velocities + (0.5 * dt) * acceleration)
 
 
 def _velocity_verlet_state_update(

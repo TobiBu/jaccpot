@@ -100,7 +100,7 @@ def test_the_trajectory_is_a_hand_written_scan(dtype, checkpoint):
 
         def verlet(carry, _):
             x, v, a = carry
-            x = x + (v * dt + 0.5 * a * dt**2)
+            x = x + dt * (v + (0.5 * dt) * a)
             a_new = step(x, m)[0] + field(x, v)
             return (x, v + 0.5 * (a + a_new) * dt, a_new), None
 

@@ -244,7 +244,7 @@ def test_a2_one_device_segment_is_the_single_card_particle_carry(
     def segment(s, a, m, dt):
         def step(carry, _):
             s_now, a_now, ok = carry
-            x = s_now[:, 0] + (s_now[:, 1] * dt + 0.5 * a_now * dt**2)
+            x = s_now[:, 0] + dt * (s_now[:, 1] + (0.5 * dt) * a_now)
             s_now = s_now.at[:, 0].set(x)
             a_new, ok_new = force(x, m)
             a_new = jnp.asarray(a_new, s_now.dtype)

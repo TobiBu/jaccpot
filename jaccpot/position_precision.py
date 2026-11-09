@@ -95,8 +95,9 @@ def _compensated_add(hi: Array, lo: Array, delta: Array) -> tuple[Array, Array]:
 
 
 def _drift_increment(velocity: Array, acceleration: Array, dt: Array) -> Array:
-    # ``v dt + 0.5 a dt**2``: the built-in (summed) drift's increment
-    return velocity * dt + 0.5 * acceleration * dt**2
+    # ``dt (v + 0.5 dt a)``: the built-in (summed) drift's increment
+    # (``jaccpot.runtime.fmm_state.drift_positions``)
+    return dt * (velocity + (0.5 * dt) * acceleration)
 
 
 def _kick_increment(acceleration: Array, acceleration_new: Array, dt: Array) -> Array:
