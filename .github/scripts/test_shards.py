@@ -93,6 +93,9 @@ _SEGMENT_SCHEME = "tests/distributed/test_production_runner_mesh_scheme_fused.py
 _MULTIPROCESS = "tests/distributed/test_multiprocess_runtime.py"
 # its GPU half (M2G): manual, skipped without JACCPOT_RUN_MANUAL_TESTS=1 and two cards
 _MULTIPROCESS_GPU = "tests/distributed/test_multiprocess_gpu.py"
+# the A4 reference force on N processes x 1 device against 1 process x N devices
+# (2 processes in CI, ~1 min; 4 manual)
+_MULTIPROCESS_REFERENCE = "tests/distributed/test_multiprocess_reference.py"
 # the mesh potential and the production runner's multi-GPU mode on the fused force
 # (S11 session 2, tracks E and D): ~11 min of compilation between them on CI
 _SEGMENT_RUNNER_FILES = (
@@ -344,6 +347,7 @@ SHARDS: dict[str, list[str]] = {
     "distributed-multiprocess": [
         _MULTIPROCESS,
         _MULTIPROCESS_GPU,
+        _MULTIPROCESS_REFERENCE,
         "-m",
         "distributed_multiprocess",
     ],
@@ -375,6 +379,8 @@ GATED_PATHS: tuple[str, ...] = (
     "jaccpot/production.py",
     # the scheme seam the mesh segments call (I2)
     "jaccpot/scheme.py",
+    # the A4 reference force, gated across devices and processes
+    "jaccpot/verification/",
     # what the fused mesh lane (test-distributed-segment) takes its shapes, template,
     # verdict and plan from on the runtime side
     "jaccpot/runtime/fused_provider.py",
