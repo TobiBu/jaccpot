@@ -1,0 +1,342 @@
+{
+ "comparable": [
+  "num_particles",
+  "ic_seed",
+  "dt",
+  "t_end",
+  "mac",
+  "theta",
+  "tol",
+  "precision",
+  "softening",
+  "kernel",
+  "targets",
+  "target_seed",
+  "problem_ic"
+ ],
+ "config": {
+  "analyse_every": 2,
+  "cell_min_level": "auto",
+  "devices": 1,
+  "dt": 0.001,
+  "energy_every": 2,
+  "ic": "/export/scratch/tbuck/mn-scratch/a4/local/ics/galaxy.npz",
+  "ic_meta": {
+   "counts": [
+    50773,
+    10155,
+    139072
+   ],
+   "halo_total_mass": 82.17231378743037,
+   "kind": "galaxy",
+   "params": {
+    "bulge_mass": 1.2,
+    "bulge_scale": 0.08,
+    "disk_mass": 6.0,
+    "halo_mass": 100.0,
+    "halo_mass_factor": 5.0,
+    "halo_rcut": 10.0,
+    "halo_rs": 2.0,
+    "hdisk": 0.03,
+    "iterations": 8,
+    "jr0_factor": 0.38,
+    "jz0_factor": 0.1,
+    "kind": "galaxy",
+    "n_particles": 200000,
+    "output": "galaxy.tmp.npz",
+    "q_target": 1.2,
+    "r0": 10.0,
+    "rdisk": 0.24,
+    "rmax": 25.0,
+    "rp": 0.4,
+    "seed": 41,
+    "spin_a": [
+     30.0,
+     0.0
+    ],
+    "spin_b": [
+     60.0,
+     150.0
+    ]
+   },
+   "seed": 41,
+   "subsample_fraction": 0.5,
+   "units": "10 kpc, 1e10 Msun, G = 1; time unit 149.1 Myr"
+  },
+  "ic_seed": 1,
+  "kernel": "ferrers3",
+  "mac": "dehnen_error",
+  "num_particles": 100000,
+  "num_steps": 500,
+  "perturbation": null,
+  "precision": "fp32",
+  "problem": "disc_heating",
+  "problem_ic": "file",
+  "score_every": 0,
+  "softening": 0.0015,
+  "steps": 50,
+  "t_dyn": null,
+  "t_end": 0.5,
+  "target_seed": 0,
+  "targets": 2048,
+  "theta": null,
+  "tier": "local",
+  "tol": 0.0001
+ },
+ "metrics": {
+  "angmom.max_dL": 5.201373043218915e-06,
+  "disc.zrms_growth_0": 0.041430203221010986,
+  "disc.zrms_growth_1": 0.015172483618580701,
+  "disc.zrms_growth_2": -0.006931501128538908,
+  "energy.end_dE": 7.814880860026244e-05,
+  "energy.max_abs_dE": 7.814880860026244e-05,
+  "force.max_end": 0.001072755045510893,
+  "force.max_start": 0.0011257539478535987,
+  "force.p50_end": 8.259562730731086e-05,
+  "force.p50_start": 8.188965398485968e-05,
+  "force.p99_end": 0.00045246178834775554,
+  "force.p99_start": 0.000432029781866318,
+  "force.rel_l2_end": 0.00014933595744074735,
+  "force.rel_l2_start": 0.00015904046444585222,
+  "heat.sigR2_growth_0": 0.0054789555004644,
+  "heat.sigR2_growth_1": 0.045442140497356176,
+  "heat.sigR2_growth_2": 0.02464874185297994,
+  "heat.sigR2_rate_0": 0.06514404152099235,
+  "heat.sigR2_rate_1": 0.067760724051479,
+  "heat.sigR2_rate_2": 0.0748890971841641,
+  "heat.sigz2_growth_0": 0.043878019351215825,
+  "heat.sigz2_growth_1": 0.019850402056980743,
+  "heat.sigz2_growth_2": 0.0336795514782815,
+  "heat.sigz2_rate_0": 0.054626525742524044,
+  "heat.sigz2_rate_1": 0.03473065885283777,
+  "heat.sigz2_rate_2": 0.07630451385256008,
+  "momentum.max_dP": 2.242155742561299e-09
+ },
+ "problem": "disc_heating",
+ "provenance": {
+  "commit": "9c90393c8feaddc1c1bb283588f866f48be16197",
+  "date": "2026-11-08T22:09:27+0100",
+  "devices": [
+   "cuda:0"
+  ],
+  "host": "compgpu9",
+  "jax": "0.11.2",
+  "platform": "gpu",
+  "processes": 1,
+  "recorded_from": "/export/scratch/tbuck/mn-scratch/a4/local/base/disc_heating/result.json",
+  "segments": 10,
+  "slurm_job": null,
+  "wall_s": 272.12340092658997,
+  "xla_flags": " --xla_gpu_experimental_enable_fusion_autotuner=false"
+ },
+ "schema": "jaccpot.accuracy/1",
+ "series": {
+  "angular_momentum_drift": [
+   0.0,
+   8.018834154823498e-07,
+   1.2803285055379652e-06,
+   2.0256978579424085e-06,
+   2.1442612354423566e-06,
+   2.1296013731294263e-06,
+   2.4450930560562785e-06,
+   2.623681517421402e-06,
+   3.184117793656669e-06,
+   3.799230173269973e-06,
+   5.201373043218915e-06
+  ],
+  "energy_drift": [
+   null,
+   null,
+   1.7741036305452583e-05,
+   null,
+   6.421693288113266e-06,
+   null,
+   3.650469775324089e-05,
+   null,
+   4.165695061685083e-05,
+   null,
+   7.814880860026244e-05
+  ],
+  "force": [
+   [
+    0.05,
+    0.00015904046444585222,
+    8.188965398485968e-05,
+    0.000432029781866318,
+    0.0011257539478535987
+   ],
+   [
+    0.5,
+    0.00014933595744074735,
+    8.259562730731086e-05,
+    0.00045246178834775554,
+    0.001072755045510893
+   ]
+  ],
+  "momentum_drift": [
+   0.0,
+   3.2654004217642724e-10,
+   7.946928166112289e-10,
+   1.245416253986424e-09,
+   1.6409434183952407e-09,
+   1.6494002810937841e-09,
+   8.589384214396848e-10,
+   1.2637110819099197e-09,
+   1.465407600067464e-09,
+   1.628068324082114e-09,
+   2.242155742561299e-09
+  ],
+  "sigR2": [
+   [
+    0.0,
+    3.8059762469867375,
+    3.0709246778198245,
+    2.5433772485383925
+   ],
+   [
+    0.1,
+    3.668112780564993,
+    3.1541906742570864,
+    2.5433059262333595
+   ],
+   [
+    0.2,
+    3.5609433160573483,
+    3.1872729682736867,
+    2.53049865488852
+   ],
+   [
+    0.3,
+    3.8119514876543503,
+    3.0841802070805677,
+    2.6284429682121986
+   ],
+   [
+    0.4,
+    3.838948219649436,
+    3.1987420365003794,
+    2.628389170000939
+   ],
+   [
+    0.5,
+    3.8268290214798024,
+    3.210474068486111,
+    2.606068297772358
+   ]
+  ],
+  "sigz2": [
+   [
+    0.0,
+    1.201504542607893,
+    1.0179543468166137,
+    0.6992066141232594
+   ],
+   [
+    0.1,
+    1.2057036859957502,
+    0.9998733620595102,
+    0.7044563161838697
+   ],
+   [
+    0.2,
+    1.2136463201494667,
+    0.9821251168825079,
+    0.7041746924755908
+   ],
+   [
+    0.3,
+    1.179796154414539,
+    1.0233369522757287,
+    0.719567454920664
+   ],
+   [
+    0.4,
+    1.2056940305864716,
+    0.9937046745000605,
+    0.7223218443470115
+   ],
+   [
+    0.5,
+    1.2542241821790159,
+    1.0381611498765746,
+    0.7227555792775785
+   ]
+  ],
+  "t": [
+   0.0,
+   0.05,
+   0.1,
+   0.15,
+   0.2,
+   0.25,
+   0.3,
+   0.35000000000000003,
+   0.4,
+   0.45,
+   0.5
+  ]
+ },
+ "tier": "local",
+ "tolerances": {
+  "angmom.max_dL": {
+   "kind": "ratio",
+   "value": 2.0,
+   "why": "angular-momentum drift: <= 2x"
+  },
+  "energy.max_abs_dE": {
+   "kind": "ratio",
+   "value": 2.0,
+   "why": "energy drift: <= 2x the baseline's"
+  },
+  "force.p99_end": {
+   "kind": "ratio",
+   "value": 1.5,
+   "why": "the error tail at the end: <= 1.5x"
+  },
+  "force.rel_l2_end": {
+   "kind": "ratio",
+   "value": 1.5,
+   "why": "force error at the end (an evolved state): <= 1.5x"
+  },
+  "force.rel_l2_start": {
+   "kind": "ratio",
+   "value": 1.25,
+   "why": "force error at the first edge: <= 1.25x the baseline"
+  },
+  "heat.sigR2_growth_0": {
+   "kind": "abs",
+   "value": 0.05,
+   "why": "sigma_R^2 growth within 5 points"
+  },
+  "heat.sigR2_growth_1": {
+   "kind": "abs",
+   "value": 0.05,
+   "why": "sigma_R^2 growth within 5 points"
+  },
+  "heat.sigR2_growth_2": {
+   "kind": "abs",
+   "value": 0.05,
+   "why": "sigma_R^2 growth within 5 points"
+  },
+  "heat.sigz2_growth_0": {
+   "kind": "abs",
+   "value": 0.05,
+   "why": "sigma_z^2 growth within 5 points"
+  },
+  "heat.sigz2_growth_1": {
+   "kind": "abs",
+   "value": 0.05,
+   "why": "sigma_z^2 growth within 5 points"
+  },
+  "heat.sigz2_growth_2": {
+   "kind": "abs",
+   "value": 0.05,
+   "why": "sigma_z^2 growth within 5 points"
+  },
+  "momentum.max_dP": {
+   "kind": "ratio",
+   "value": 10.0,
+   "why": "momentum drift is a round-off random walk: <= 10x"
+  }
+ }
+}
