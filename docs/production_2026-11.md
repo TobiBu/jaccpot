@@ -1275,6 +1275,18 @@ verification step, not a per-edge diagnostic. The runs score it at the first edg
   expression landed in: the runner's scan and nornax's `leapfrog_kdk_rollout` drifted 1 ulp apart after 5 steps (3
   of 64 rows at 8 steps, float64). With ONE product per addition every program forms the same FMAs: bitwise over 32
   steps. Same precision (toy, dt 5e-4: dE -8.1e-8, dL 1.1e-8 against -8.3e-8 / 1.1e-8).
+- **And in kernels of their own (the #516 fix).** One product per addition fixes WHICH product an FMA takes, not
+  WHETHER the kernel forms it: CI's `test_mesh_segment_migration.py` (a migrating and a plain multi-GPU run, bitwise by
+  id) came 1 ulp apart in one velocity after 16 steps. From step-15 inputs equal in both programs, the step-16 KICK
+  `v + (a + a') dt / 2` (code unchanged by A3) was an FMA in the migrating program -- fused with the migration's
+  gathers -- and a rounded product then sum in the plain one (`-0.10753167263574202` against `...204`, the FMA and the
+  two-rounding value of the same operands); the summed drift had moved XLA's fusion so the kick landed in another
+  kernel (the legacy order: no difference in 80 steps). Under `"summed"`, `drift_positions` and `kick_velocities`
+  now compute in a kernel of their own (`fmm_state._isolated`: `optimization_barrier` on the operands -- carried
+  arrays already -- and on the result, one `[N, 3]` buffer), so every program compiles the same kernel: the scan, the
+  mesh segments migrating or not, the gradient rollout, nornax's rollouts and `LeapfrogKDK`. `"legacy"` keeps the
+  expressions before A3, fused where XLA puts them. Cost at 1e8: none in the peak (below); one extra elementwise pass
+  for each of the drift and the kick (timing: the HoreKa sbatch).
 - Every drift follows `drift_order`: `strict_run_v2` (both carries), the multi-GPU `MeshSegmentRunner` (and its
   escaper tail), `differentiable_rollout` (the gradient mode). `GalaxySettings.drift_order` (default `"summed"`) is
   what `ProductionRunner` passes to all of them; a `scheme` brings its own (nornax's `LeapfrogKDK(drift_order=...)`).
@@ -1294,7 +1306,8 @@ jaccpot `6caeb981` + yggdrax main `ba82e37`):
 
 | drift | dE/E0 | dL/L0 | vs float64 state | rel-L2 / p99 / max |
 | --- | --- | --- | --- | --- |
-| summed (default) | -1.24e-6 | 3.17e-7 | 0.99x / 1.00x | 2.09e-4 / 6.30e-4 / 5.46e-3 |
+| summed (default), `c737829e` (kernels of their own) | -1.23e-6 | 3.16e-7 | 0.99x / 1.00x | 2.07e-4 / 6.30e-4 / 5.46e-3 |
+| summed, `6caeb981` (before the #516 fix) | -1.24e-6 | 3.17e-7 | 0.99x / 1.00x | 2.09e-4 / 6.30e-4 / 5.46e-3 |
 | legacy | 8.66e-6 | 7.60e-6 | 6.9x / 24x | 2.04e-4 / 6.19e-4 / 5.46e-3 |
 | float64 state (session 1) | -1.25e-6 | 3.17e-7 | 1 | 2.01e-4 / 6.32e-4 / 5.46e-3 |
 
@@ -1310,8 +1323,21 @@ name):
   `g_unit`, `dehnen_error`, each with its pure-JAX twin), and each one's diff is the drift's ops and nothing else
   (29 diff lines per variant, no renumbering past them).
 
-**GPU pins** (`dce_pins.py` S1, S1p, S1e, S1x, S5, R1p, main against the tip): queued behind the busy cards
-(`mn-scratch/a3/pins/`); expected: the force arrays equal, the stepped states moved.
+**Identity after the #516 fix** (`c737829e`): legacy against main 36/36; summed: the same 34 variants, each diff the
+barriered drift and kick (26 lines per variant).
+
+**GPU pins** (`dce_pins.py`, main `83dd7575` against the tip `c737829e`, one local A100): S1, S1p, R1p: force
+bitwise, stepped state rel-L2 1.0e-6; S1e (state and particle carry): force bitwise, state 9.5e-7; S1x (the halo):
+force bitwise, state 4.2e-7; S5 (`BlockStepFMM`, its own integrator): bitwise (`mn-scratch/a3/pins/compare_all.json`).
+
+**Memory at 1e8** (`fused_memory_budget.py --runner`, L2's operating point, one local A100, contended: no timings):
+
+| MAC | legacy | summed, before the #516 fix (`6caeb981`) | summed, with the kernels of their own (`c737829e`) |
+| --- | --- | --- | --- |
+| geometric, theta 0.8 | 232.8 B/p | 232.8 | 232.8 |
+| `dehnen_error` 1e-4 | 252.9 / 253.5 B/p (two runs) | 253.5 | 253.1 |
+
+The summed drift and the barrier change no peak (run-to-run spread +-0.6 B/p).
 
 **Tests.** Unit `tests/unit/test_position_precision.py` (the orders, the compensated arithmetic, the shape guard);
 `tests/integration/strict/test_runner_position_precision.py` (the default runner IS a scheme writing the summed drift,
@@ -1323,5 +1349,5 @@ peak RSS of the largest 11.9 GB (`integration-strict-grad-runner`, unchanged fil
 `test_shards.py check` rc 0.
 
 **Timing (gate 3):** `bench/slurm/a3/position_precision_timing.sbatch`, legacy against summed, A-B-A-B, 1e8 and
-2.6e5, both MACs (prepared; the user submits). The summed drift adds no array and one vector multiply FEWER (2
-multiplies and 2 additions per component against 3 and 2); B/p at 1e8: 254.5 (legacy) against 254.3 (session 1's summed form, `dehnen_error`).
+2.6e5, both MACs (prepared; the user submits). The summed drift adds no array; the kernels of their own add one
+elementwise pass each to the drift and the kick (local, contended, not evidence: +0.6-0.8 % of the step).

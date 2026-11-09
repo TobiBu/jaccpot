@@ -482,6 +482,11 @@ an orbit. On the 2026-10-31 merger (4.7e7 particles, `dt` 5e-4, t 0.8, `dehnen_e
 | summed (the default), float32 state | -1.24e-6 | 3.17e-7 | 2.07e-4 | 254.3 |
 | float64 state (float32 force) | -1.25e-6 | 3.17e-7 | 2.01e-4 | out of memory at 9e7 |
 
+- **The drift and the kick run in kernels of their own** (`fmm_state._isolated`: an `optimization_barrier` on the
+  operands and the result): a backend that contracts multiply-adds into FMAs decides per kernel, so the same
+  expression fused with different neighbours rounds differently; isolated, every program -- the scan, the
+  multi-GPU segments migrating or not, the gradient rollout, nornax's `LeapfrogKDK` -- compiles the same kernel and
+  agrees bit for bit. No peak memory (1e8: 232.8 / 253.1 B/p, geometric / `dehnen_error`, as legacy).
 - **`drift_order="legacy"`** restores the old expression: the bitwise path to a run, or
   a restart file, from before A3. The single-card scan, the multi-GPU mode (its escaper
   tail too) and the gradient mode follow the setting; a `scheme` brings its own drift
