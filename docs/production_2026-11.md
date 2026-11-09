@@ -1307,8 +1307,8 @@ name):
 - legacy tip (`PROVIDER_HLO_DRIFT_ORDER=legacy`) against main: **PASS 36/36**;
 - summed tip against main: 2/36 identical (`eval_seam`, `eval_seam_purejax`: one force, no drift); the 34 others are
   every variant that steps (state / particles / tree carries, chains, retries, history, callbacks, external field,
-  `g_unit`, `dehnen_error`, each with its pure-JAX twin), and each one's diff is the drift's nine ops and nothing else
-  (29 diff lines per variant).
+  `g_unit`, `dehnen_error`, each with its pure-JAX twin), and each one's diff is the drift's ops and nothing else
+  (29 diff lines per variant, no renumbering past them).
 
 **GPU pins** (`dce_pins.py` S1, S1p, S1e, S1x, S5, R1p, main against the tip): queued behind the busy cards
 (`mn-scratch/a3/pins/`); expected: the force arrays equal, the stepped states moved.
@@ -1323,5 +1323,5 @@ peak RSS of the largest 11.9 GB (`integration-strict-grad-runner`, unchanged fil
 `test_shards.py check` rc 0.
 
 **Timing (gate 3):** `bench/slurm/a3/position_precision_timing.sbatch`, legacy against summed, A-B-A-B, 1e8 and
-2.6e5, both MACs (prepared; the user submits). The summed drift adds no array and no op count beyond one scalar
-product; B/p at 1e8: 254.5 (legacy) against 254.3 (session 1's summed form, `dehnen_error`).
+2.6e5, both MACs (prepared; the user submits). The summed drift adds no array and one vector multiply FEWER (2
+multiplies and 2 additions per component against 3 and 2); B/p at 1e8: 254.5 (legacy) against 254.3 (session 1's summed form, `dehnen_error`).
