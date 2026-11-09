@@ -38,6 +38,8 @@ import numpy as np
 import pytest
 import yggdrax.distributed.comm as ygg_comm
 
+from jaccpot.runtime.fmm_state import drift_positions, kick_velocities  # noqa: E402
+
 pytest.importorskip("yggdrax.distributed.partition", reason="needs sfc_repartition")
 
 from jaccpot import FastMultipoleMethod  # noqa: E402
@@ -258,11 +260,11 @@ def test_a_one_device_segment_is_the_single_card_particle_carry_with_its_force_s
     def segment(s, a, f_b, m, dt):
         def step(carry, _):
             s_now, a_now, f_b_now, ok = carry
-            x = s_now[:, 0] + dt * (s_now[:, 1] + (0.5 * dt) * a_now)
+            x = drift_positions(s_now[:, 0], s_now[:, 1], a_now, dt)
             s_now = s_now.at[:, 0].set(x)
             a_new, f_b_new, ok_new = force(x, m, f_b_now)
             a_new = jnp.asarray(a_new, s_now.dtype)
-            v = s_now[:, 1] + 0.5 * (a_now + a_new) * dt
+            v = kick_velocities(s_now[:, 1], a_now, a_new, dt)
             carry = (s_now.at[:, 1].set(v), a_new, jnp.asarray(f_b_new, s.dtype))
             return carry + (ok & ok_new,), None
 

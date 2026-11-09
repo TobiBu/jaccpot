@@ -132,7 +132,7 @@ from beartype.typing import Callable
 from jax.custom_derivatives import CustomVJPPrimal, SymbolicZero
 from jaxtyping import Array
 
-from .fmm_state import check_drift_order, drift_positions
+from .fmm_state import check_drift_order, drift_positions, kick_velocities
 from .fused_topology import (
     GRAD_FAIL_MASK,
     OVERFLOW_FAIL_MASK,
@@ -1074,7 +1074,8 @@ def _rollout(
         # only if the field reads velocities), so the reverse pass needs x and
         # the aux, not the whole carry
         a_new, aux_out = force(x, v, aux_in, c)
-        return v + 0.5 * (a + a_new) * consts.join(c)[1], a_new, aux_out
+        v_new = kick_velocities(v, a, a_new, consts.join(c)[1], drift_order)
+        return v_new, a_new, aux_out
 
     def drift(x: Array, v: Array, a: Array, c: tuple) -> Array:
         # strict_run_v2's `_advance`: the same expression, in the same order

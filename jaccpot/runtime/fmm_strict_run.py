@@ -1871,6 +1871,7 @@ class StrictRunMixin(_EngineBase):
                     acceleration_now,
                     acceleration_new,
                     dt_now,
+                    drift_order,
                 )
             else:
                 state_new = scheme.close_step(
@@ -1985,6 +1986,7 @@ class StrictRunMixin(_EngineBase):
                     acceleration_prev,
                     acceleration_new,
                     dt_now,
+                    drift_order,
                 )
             else:
                 state_new = scheme.close_step(

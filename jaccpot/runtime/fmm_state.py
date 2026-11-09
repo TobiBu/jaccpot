@@ -63,6 +63,7 @@ __all__ = [
     "TreeBuilderConfig",
     "check_drift_order",
     "drift_positions",
+    "kick_velocities",
 ]
 
 _STRICT_REFRESH_DIAG_MODES = frozenset(
@@ -145,13 +146,83 @@ def drift_positions(
     """
     if order == "legacy":
         return positions + velocities * dt + 0.5 * acceleration * dt**2
-    # the increment as dt * (v + (0.5 dt) a): every addition has ONE product operand,
-    # so a backend that contracts a multiply-add into an FMA (XLA:CPU's LLVM, NVPTX)
-    # forms the same FMAs in every program the expression lands in -- the scan, the
-    # gradient rollout, a scheme, a mesh shard. ``v dt + 0.5 a dt**2`` (two products
-    # into one addition) let the contraction pick either product by context, and two
-    # programs drifted 1 ulp apart after a few steps
-    return positions + dt * (velocities + (0.5 * dt) * acceleration)
+    # the increment as dt * (v + (0.5 dt) a), in a kernel of its own (_isolated)
+    return _isolated(
+        lambda x, v, a: x + dt * (v + (0.5 * dt) * a),
+        positions,
+        velocities,
+        acceleration,
+    )
+
+
+def _isolated(fn: Callable[..., Array], *operands: Array) -> Array:
+    """``fn(*operands)`` compiled as a kernel of its own, the same in every program.
+
+    A backend that contracts a multiply-add into an FMA (XLA:CPU's LLVM, NVPTX)
+    decides per KERNEL, so the same expression fused with different neighbours --
+    the migration's gathers in one program, nothing in another -- rounds
+    differently: the multi-GPU runner's migrating and plain runs (bitwise by id
+    before) came 1 ulp apart in one velocity after 16 steps
+    (``tests/distributed/test_mesh_segment_migration.py``; the step's inputs equal,
+    one program's kick an FMA, the other's not). An ``optimization_barrier`` on the
+    operands and on the result keeps producers and consumers out of the kernel:
+    every program compiles the same one. The operands are carried arrays already;
+    the result is one ``[N, 3]`` buffer, then written into the state.
+
+    Parameters
+    ----------
+    fn : Callable[..., Array]
+        Elementwise, on ``operands``.
+    *operands : Array
+        Its array inputs.
+
+    Returns
+    -------
+    Array
+        ``fn(*operands)``.
+    """
+    return jax.lax.optimization_barrier(fn(*jax.lax.optimization_barrier(operands)))
+
+
+def kick_velocities(
+    velocities: Array,
+    acceleration: Array,
+    acceleration_new: Array,
+    dt: Array,
+    order: str = "summed",
+) -> Array:
+    """The velocity-Verlet kick: ``v + 0.5 (a + a') dt``.
+
+    ``order="summed"`` (the default since A3) computes it in a kernel of its own
+    (:func:`_isolated`), so every program rounds it the same way;
+    ``"legacy"`` is the expression before A3, fused where XLA puts it.
+
+    Parameters
+    ----------
+    velocities : Array
+        ``[N, 3]`` at the step's start.
+    acceleration : Array
+        ``[N, 3]`` total acceleration at the step's start positions.
+    acceleration_new : Array
+        ``[N, 3]`` at its end positions.
+    dt : Array
+        The step.
+    order : str
+        :data:`DRIFT_ORDERS`; static.
+
+    Returns
+    -------
+    Array
+        ``[N, 3]``: the velocities at the step's end.
+    """
+    if order == "legacy":
+        return velocities + 0.5 * (acceleration + acceleration_new) * dt
+    return _isolated(
+        lambda v, a, a_new: v + 0.5 * (a + a_new) * dt,
+        velocities,
+        acceleration,
+        acceleration_new,
+    )
 
 
 def _velocity_verlet_state_update(
@@ -193,14 +264,11 @@ def _velocity_verlet_state_update(
         jnp.asarray(acceleration_current, dtype=state_arr.dtype),
         dt_arr,
     )
-    velocity_new = (
-        state_arr[:, 1]
-        + 0.5
-        * (
-            jnp.asarray(acceleration_current, dtype=state_arr.dtype)
-            + jnp.asarray(acceleration_new, dtype=state_arr.dtype)
-        )
-        * dt_arr
+    velocity_new = kick_velocities(
+        state_arr[:, 1],
+        jnp.asarray(acceleration_current, dtype=state_arr.dtype),
+        jnp.asarray(acceleration_new, dtype=state_arr.dtype),
+        dt_arr,
     )
     return state_arr.at[:, 0].set(position_new).at[:, 1].set(velocity_new)
 
@@ -210,6 +278,7 @@ def _velocity_verlet_kick_drifted(
     acceleration_current: Array,
     acceleration_new: Array,
     dt: Array,
+    order: str = "summed",
 ) -> Array:
     """:func:`_velocity_verlet_state_update` on a state already drifted.
 
@@ -230,6 +299,8 @@ def _velocity_verlet_kick_drifted(
         Acceleration at the new positions ``[N, 3]``.
     dt : Array
         Timestep.
+    order : str
+        :func:`kick_velocities`'s (:data:`DRIFT_ORDERS`; static).
 
     Returns
     -------
@@ -238,14 +309,12 @@ def _velocity_verlet_kick_drifted(
     """
     state_arr = jnp.asarray(state_drifted)
     dt_arr = jnp.asarray(dt, dtype=state_arr.dtype)
-    velocity_new = (
-        state_arr[:, 1]
-        + 0.5
-        * (
-            jnp.asarray(acceleration_current, dtype=state_arr.dtype)
-            + jnp.asarray(acceleration_new, dtype=state_arr.dtype)
-        )
-        * dt_arr
+    velocity_new = kick_velocities(
+        state_arr[:, 1],
+        jnp.asarray(acceleration_current, dtype=state_arr.dtype),
+        jnp.asarray(acceleration_new, dtype=state_arr.dtype),
+        dt_arr,
+        order,
     )
     return state_arr.at[:, 1].set(velocity_new)
 

@@ -24,6 +24,7 @@ import pytest
 
 from jaccpot.position_precision import CompensatedKDK, compensated_state, state_float64
 from jaccpot.production import ProductionRunner, load_restart
+from jaccpot.runtime.fmm_state import drift_positions, kick_velocities  # noqa: E402
 from tests.integration.strict.test_production_runner import (  # noqa: F401
     DT,
     SETTINGS,
@@ -50,13 +51,20 @@ class _KDK:
     def open_step(self, state, acceleration, dt):
         x, v = state[:, 0], state[:, 1]
         if self.order == "legacy":
+            # the expression before A3, written out
             return state.at[:, 0].set(x + v * dt + 0.5 * acceleration * dt**2)
-        return state.at[:, 0].set(x + dt * (v + (0.5 * dt) * acceleration))
+        return state.at[:, 0].set(drift_positions(x, v, acceleration, dt))
 
     def close_step(self, state_open, acceleration, acceleration_new, dt):
         dt = jnp.asarray(dt, dtype=state_open.dtype)
         v = state_open[:, 1]
-        return state_open.at[:, 1].set(v + 0.5 * (acceleration + acceleration_new) * dt)
+        if self.order == "legacy":
+            return state_open.at[:, 1].set(
+                v + 0.5 * (acceleration + acceleration_new) * dt
+            )
+        return state_open.at[:, 1].set(
+            kick_velocities(v, acceleration, acceleration_new, dt)
+        )
 
 
 def _run(state, *, settings=SETTINGS, scheme=None, num_steps=STEPS, segment=None):

@@ -35,6 +35,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jaccpot.runtime.fmm_state import drift_positions, kick_velocities  # noqa: E402
+
 N, STEPS, DT, SOFTENING = 64, 5, 0.05, 0.05
 #: the external field's spring constant
 K_EXT = 0.3
@@ -100,9 +102,9 @@ def test_the_trajectory_is_a_hand_written_scan(dtype, checkpoint):
 
         def verlet(carry, _):
             x, v, a = carry
-            x = x + dt * (v + (0.5 * dt) * a)
+            x = drift_positions(x, v, a, dt)
             a_new = step(x, m)[0] + field(x, v)
-            return (x, v + 0.5 * (a + a_new) * dt, a_new), None
+            return (x, kick_velocities(v, a, a_new, dt), a_new), None
 
         a0 = step(x0, m)[0] + field(x0, v0)
         return jax.lax.scan(verlet, (x0, v0, a0), None, length=STEPS)[0]

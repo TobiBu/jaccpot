@@ -1591,7 +1591,7 @@ class MeshSegmentRunner:
                     )
                     tail_next = (
                         _velocity_verlet_kick_drifted(
-                            tail_position, tail_acc_now, tail_acc_new, dt
+                            tail_position, tail_acc_now, tail_acc_new, dt, drift_order
                         ),
                         tail_acc_new,
                     )
@@ -1600,7 +1600,7 @@ class MeshSegmentRunner:
                 )
                 if scheme is None:
                     state_new = _velocity_verlet_kick_drifted(
-                        state_position, acc_now, acc_new, dt
+                        state_position, acc_now, acc_new, dt, drift_order
                     )
                 else:
                     state_new = scheme_close_shard(
@@ -1870,7 +1870,7 @@ class MeshSegmentRunner:
                     )
                     tail_next = (
                         _velocity_verlet_kick_drifted(
-                            tail_position, tail_acc_now, tail_acc_new, dt
+                            tail_position, tail_acc_now, tail_acc_new, dt, drift_order
                         ),
                         tail_acc_new,
                     )
@@ -1879,7 +1879,7 @@ class MeshSegmentRunner:
                 )
                 if scheme is None:
                     state_new = _velocity_verlet_kick_drifted(
-                        state_position, acc_now, acc_new, dt
+                        state_position, acc_now, acc_new, dt, drift_order
                     )
                 else:
                     state_new = scheme_close_shard(
