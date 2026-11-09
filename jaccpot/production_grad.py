@@ -548,6 +548,9 @@ class GradientPlan:
         The runner's external field.
     forward : Any
         The pre-pass's :class:`~jaccpot.production.RunResult`.
+    drift_order : str
+        The runner's ``GalaxySettings.drift_order``: the rollout drifts as the
+        pre-pass did (``"summed"``, the default since A3, or ``"legacy"``).
     """
 
     engine: Any
@@ -557,6 +560,7 @@ class GradientPlan:
     boundary: Optional[dict]
     external_fn: Optional[Callable[..., Any]]
     forward: Any
+    drift_order: str = "summed"
     _programs: dict = dataclasses.field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -751,6 +755,7 @@ class GradientPlan:
             external_args=args,
             checkpoint=checkpoint,
             inner_steps=inner_steps,
+            drift_order=self.drift_order,
         )
 
         def array(host: Any) -> Any:
@@ -1741,4 +1746,5 @@ class _Recorder:
             boundary=self.boundary,
             external_fn=self.runner.external_acceleration_fn,
             forward=forward,
+            drift_order=str(getattr(self.runner.settings, "drift_order", "summed")),
         )

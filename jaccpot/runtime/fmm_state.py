@@ -56,10 +56,13 @@ from .kernels.core import (
 )
 
 __all__ = [
+    "DRIFT_ORDERS",
     "FMMPreparedState",
     "FMMResolvedConfig",
     "TraversalExecutionConfig",
     "TreeBuilderConfig",
+    "check_drift_order",
+    "drift_positions",
 ]
 
 _STRICT_REFRESH_DIAG_MODES = frozenset(
@@ -72,6 +75,77 @@ _STRICT_REFRESH_DIAG_MODES = frozenset(
         "integrator_only",
     }
 )
+
+
+#: the drift's evaluation orders (multi-node plan A3): ``"summed"`` (the default
+#: since A3) adds the increment ``v dt + 0.5 a dt**2`` to ``x`` in ONE rounding;
+#: ``"legacy"`` evaluates ``x + v dt + 0.5 a dt**2`` left to right, as every run
+#: before A3 did (the bitwise path to their states)
+DRIFT_ORDERS = ("summed", "legacy")
+
+
+def check_drift_order(order: str) -> str:
+    """Validate a drift order (:data:`DRIFT_ORDERS`).
+
+    Parameters
+    ----------
+    order : str
+        ``"summed"`` or ``"legacy"``.
+
+    Returns
+    -------
+    str
+        ``order``.
+
+    Raises
+    ------
+    ValueError
+        For any other value.
+    """
+    if order not in DRIFT_ORDERS:
+        raise ValueError(f"drift_order must be one of {DRIFT_ORDERS}, got {order!r}")
+    return order
+
+
+def drift_positions(
+    positions: Array,
+    velocities: Array,
+    acceleration: Array,
+    dt: Array,
+    order: str = "summed",
+) -> Array:
+    """The velocity-Verlet drift: ``x + v dt + 0.5 a dt**2``.
+
+    ``order="summed"`` (the default, multi-node plan A3) sums the increment
+    first, ``x + (v dt + 0.5 a dt**2)``: ``x`` is rounded once per step. Left to
+    right (``"legacy"``), ``x + v dt`` is rounded to ``x``'s grid and then
+    ``0.5 a dt**2`` -- in a float32 state below ``x``'s last bit for most particles
+    at ``dt`` 5e-4 -- is rounded against ``x`` on its own, with the same sign along
+    an orbit: the merger probe of 2026-10-31 drifted 7x (energy) and 24x (angular
+    momentum) more than the float64 state; summed, it drifts as much as the float64
+    state (``docs/production_2026-11.md``, A3).
+
+    Parameters
+    ----------
+    positions : Array
+        ``[N, 3]`` at the step's start.
+    velocities : Array
+        ``[N, 3]`` at the step's start.
+    acceleration : Array
+        ``[N, 3]`` total acceleration there (in the positions' dtype).
+    dt : Array
+        The step.
+    order : str
+        :data:`DRIFT_ORDERS`; static.
+
+    Returns
+    -------
+    Array
+        ``[N, 3]``: the positions the step's force is evaluated at.
+    """
+    if order == "legacy":
+        return positions + velocities * dt + 0.5 * acceleration * dt**2
+    return positions + (velocities * dt + 0.5 * acceleration * dt**2)
 
 
 def _velocity_verlet_state_update(
@@ -107,10 +181,11 @@ def _velocity_verlet_state_update(
     """
     state_arr = jnp.asarray(state)
     dt_arr = jnp.asarray(dt, dtype=state_arr.dtype)
-    position_new = (
-        state_arr[:, 0]
-        + state_arr[:, 1] * dt_arr
-        + 0.5 * jnp.asarray(acceleration_current, dtype=state_arr.dtype) * dt_arr**2
+    position_new = drift_positions(
+        state_arr[:, 0],
+        state_arr[:, 1],
+        jnp.asarray(acceleration_current, dtype=state_arr.dtype),
+        dt_arr,
     )
     velocity_new = (
         state_arr[:, 1]

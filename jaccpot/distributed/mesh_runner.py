@@ -724,6 +724,7 @@ class MeshBackend:
             migration_cap=self.config.migration_cap if cap is None else int(cap),
             splitters=migration.get("splitters"),
             scheme=self.runner.scheme,
+            drift_order=str(getattr(self.runner.settings, "drift_order", "summed")),
         )
 
     def _cap(self, num_particles: int) -> int:

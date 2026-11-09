@@ -35,6 +35,8 @@ from .fmm_state import (
     _RuntimeExecutionOverrides,
     _TopologyReuseEntry,
     _velocity_verlet_kick_drifted,
+    check_drift_order,
+    drift_positions,
 )
 from .fused_provider import FusedForceProvider, require_cell_leaves
 from .fused_topology import ForceParams, FusedTopology, StepParams, _is_static
@@ -1094,6 +1096,7 @@ class StrictRunMixin(_EngineBase):
         carry_total_acceleration: bool = False,
         scheme: Any = None,
         live_rows: Optional[int] = None,
+        drift_order: str = "summed",
     ) -> tuple[Array, Optional[Any], Optional[Array]]:
         """Run endpoint-correct velocity Verlet with strict prepared-state refresh.
 
@@ -1253,6 +1256,8 @@ class StrictRunMixin(_EngineBase):
             evaluation; everything else (refresh, verdict, retry, handle) is
             unchanged. Its ``key()`` joins the compile keys. A scheme that is not
             ``rowwise`` keeps the input order (as the force-scale carry does).
+            A scheme's ``open_step`` owns the drift: ``drift_order`` does not
+            apply to it.
         live_rows : Optional[int]
             ``carry="particles"`` only. ``None`` (the default): every row is a
             tree row, every program as without it. An int ``n_b`` in ``[1, N]``:
@@ -1267,6 +1272,15 @@ class StrictRunMixin(_EngineBase):
             handle whose ``self_acceleration`` is ``None`` (a changed split) is
             continued from a fresh start force. Not with the tree-order carry
             or without the caps-only prepare.
+
+        drift_order : str
+            The built-in drift's evaluation order
+            (:data:`jaccpot.runtime.fmm_state.DRIFT_ORDERS`, static):
+            ``"summed"`` (the default since multi-node plan A3) adds the increment
+            ``v dt + 0.5 a dt**2`` to the positions in one rounding; ``"legacy"``
+            evaluates left to right, the expression of every run before A3 and the
+            bitwise path to their states (:func:`jaccpot.runtime.fmm_state.drift_positions`).
+            ``"legacy"`` joins the compile keys; the default keys are as before.
 
         Returns
         -------
@@ -1317,6 +1331,9 @@ class StrictRunMixin(_EngineBase):
                 "donate_state needs carry='particles' (the state carry donates its "
                 "prepared state instead: donate_prepared_state)"
             )
+        check_drift_order(drift_order)
+        # the compile keys' part: none for the default (its keys as before A3)
+        drift_key: tuple = () if drift_order == "summed" else (("drift", drift_order),)
         if scheme is not None:
             from jaccpot.scheme import check_scheme
 
@@ -1823,10 +1840,12 @@ class StrictRunMixin(_EngineBase):
             # the kick (where the scan has always folded it)
             dt_now = _dt(params)
             if scheme is None:
-                position_new = (
-                    state_now[:, 0]
-                    + state_now[:, 1] * dt_now
-                    + 0.5 * acceleration_now * dt_now**2
+                position_new = drift_positions(
+                    state_now[:, 0],
+                    state_now[:, 1],
+                    acceleration_now,
+                    dt_now,
+                    drift_order,
                 )
                 state_position = state_now.at[:, 0].set(position_new)
             else:
@@ -1908,10 +1927,12 @@ class StrictRunMixin(_EngineBase):
             # accelerations, masses and input indices in the NEW tree order
             dt_now = _dt(params)
             if scheme is None:
-                position_new = (
-                    state_now[:, 0]
-                    + state_now[:, 1] * dt_now
-                    + 0.5 * acceleration_now * dt_now**2
+                position_new = drift_positions(
+                    state_now[:, 0],
+                    state_now[:, 1],
+                    acceleration_now,
+                    dt_now,
+                    drift_order,
                 )
                 state_position = state_now.at[:, 0].set(position_new)
             else:
@@ -2040,6 +2061,8 @@ class StrictRunMixin(_EngineBase):
                     int(step_callback_stride),
                     # a scheme's arithmetic (the built-in's keys stay as they were)
                     *(() if scheme is None else (("scheme", scheme.key()),)),
+                    # the built-in drift's order ("summed": no part)
+                    *(drift_key if scheme is None else ()),
                 ),
                 return_history=bool(return_history),
                 step_callback=step_callback,
@@ -2090,6 +2113,7 @@ class StrictRunMixin(_EngineBase):
                     id(step_callback) if step_callback is not None else 0,
                     int(step_callback_stride),
                     donate_carry,
+                    *drift_key,
                     *prov.key(like=prepared_ref),
                 )
                 jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})

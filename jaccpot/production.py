@@ -86,6 +86,7 @@ import numpy as np
 from yggdrax import TreeDepthError
 
 from jaccpot.escapers import EscaperPolicy
+from jaccpot.runtime.fmm_state import check_drift_order
 from jaccpot.scheme import check_mesh_scheme, check_scheme, scheme_record
 
 __all__ = [
@@ -190,6 +191,18 @@ class GalaxySettings:
         between calls) is the production one.
     precision : Literal["fp32", "fp64"]
         Working precision; fp64 is the lane's validation mode.
+    drift_order : Literal["summed", "legacy"]
+        The built-in drift's evaluation order (multi-node plan A3,
+        :func:`jaccpot.runtime.fmm_state.drift_positions`): ``"summed"`` (the
+        default since A3) is ``x + (v dt + 0.5 a dt**2)``, one rounding of the
+        positions per step; ``"legacy"`` is ``x + v dt + 0.5 a dt**2`` left to right,
+        the expression of every run before A3 -- the bitwise path to their states
+        and restart files. In a float32 state the left-to-right form rounds the
+        second-order term away against ``x`` (the 2026-10-31 merger probe at
+        ``dt`` 5e-4: 7x the energy drift and 24x the angular-momentum drift of a
+        float64 state; summed: the float64 state's, at no memory cost). The
+        single-card scan, the multi-GPU mode (its escaper tail too) and the
+        gradient mode follow it; a ``scheme`` brings its own drift.
     """
 
     leaf_size: int = 64
@@ -204,6 +217,7 @@ class GalaxySettings:
     adaptive_eps: Optional[float] = 1e-4
     carry: Literal["particles", "state"] = "particles"
     precision: Literal["fp32", "fp64"] = "fp32"
+    drift_order: Literal["summed", "legacy"] = "summed"
 
 
 #: ``preset="galaxy"``.
@@ -1112,6 +1126,59 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _settings_record(settings: Any) -> dict:
+    """The settings as a restart fingerprint records them (JSON-able).
+
+    ``drift_order="legacy"`` is left out: a file written before A3 has no such
+    field and stepped the legacy drift, so a legacy run compares equal to it.
+
+    Parameters
+    ----------
+    settings : Any
+        A :class:`GalaxySettings`.
+
+    Returns
+    -------
+    dict
+        ``dataclasses.asdict(settings)``, JSON-able.
+    """
+    record = _jsonable(dataclasses.asdict(settings))
+    if record.get("drift_order") == "legacy":
+        del record["drift_order"]
+    return record
+
+
+def _drift_order_hint(written: dict, now: dict) -> str:
+    """A restore warning's hint when the settings differ in the drift order only.
+
+    Parameters
+    ----------
+    written : dict
+        The file's fingerprint.
+    now : dict
+        This run's.
+
+    Returns
+    -------
+    str
+        The hint, or ``""``.
+    """
+    a = dict(written.get("settings") or {})
+    b = dict(now.get("settings") or {})
+    if a.get("drift_order", "legacy") == b.get("drift_order", "legacy"):
+        return ""
+    a.pop("drift_order", None)
+    b.pop("drift_order", None)
+    if a != b:
+        return ""
+    return (
+        f" (the drift order: the file's {written['settings'].get('drift_order', 'legacy')!r}, "
+        f"this run's {now['settings'].get('drift_order', 'legacy')!r}; "
+        "GalaxySettings(drift_order=...) continues it bitwise -- a file written "
+        "before A3 stepped the 'legacy' drift)"
+    )
+
+
 # --------------------------------------------------------------------------
 # Built-in callbacks.
 # --------------------------------------------------------------------------
@@ -1788,6 +1855,7 @@ class ProductionRunner:
 
         # opt-in persistent compilation cache (JACCPOT_COMPILATION_CACHE_DIR)
         maybe_enable_compilation_cache()
+        check_drift_order(str(getattr(settings, "drift_order", "summed")))
         self.solver = solver
         self.engine = getattr(solver, "_impl", solver)
         self.settings = settings
@@ -2273,6 +2341,7 @@ class ProductionRunner:
                     carry_total_acceleration=True,
                     scheme=self.scheme,
                     **({} if live_now() is None else {"live_rows": live_now()}),
+                    **self._drift_kwargs(),
                 )
             except TreeDepthError as exc:
                 # the eager prepare's: say what the box is, with the outliers
@@ -2969,6 +3038,17 @@ class ProductionRunner:
             stacklevel=3,
         )
 
+    def _drift_kwargs(self) -> dict:
+        """``strict_run_v2``'s drift order: ``{}`` for the default (the call as before).
+
+        Returns
+        -------
+        dict
+            ``{"drift_order": "legacy"}`` or ``{}``.
+        """
+        order = str(getattr(self.settings, "drift_order", "summed"))
+        return {} if order == "summed" else {"drift_order": order}
+
     def _restart_due(self, segment_done: int) -> Optional[str]:
         """Write the restart if one is due after ``segment_done`` segments.
 
@@ -3312,7 +3392,8 @@ class ProductionRunner:
         if mismatches:
             warnings.warn(
                 f"restart {path}: {mismatches} differ from the run that wrote it; "
-                "the continuation is correct but not bitwise the uninterrupted run",
+                "the continuation is correct but not bitwise the uninterrupted run"
+                + _drift_order_hint(written, now),
                 stacklevel=3,
             )
         restored = {
@@ -3374,7 +3455,7 @@ class ProductionRunner:
                     "fixed_order": getattr(engine, "fixed_order", None),
                 }
             ),
-            "settings": _jsonable(dataclasses.asdict(self.settings)),
+            "settings": _settings_record(self.settings),
             "traced_params": bool(self.segment.traced_params),
             "env": env_snapshot(
                 ("JACCPOT_", "YGGDRAX_"), exclude_suffixes=("_WORKTREE",)

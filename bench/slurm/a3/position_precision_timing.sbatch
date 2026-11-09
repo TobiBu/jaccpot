@@ -1,23 +1,22 @@
 #!/bin/bash
-# A3 (multi-node plan, U2): the cost of the position-precision schemes, timed on ONE card of a dedicated node.
+# A3 (multi-node plan, U2): the summed drift (the default since A3) against the legacy order, timed on ONE card of
+# a dedicated node.
 # Written for a HoreKa accelerated node (4x A100-40GB); adapt the partition, the environment and the paths below.
 # One process at a time, on the allocation's first card only. Resumable: a row whose JSON exists is skipped.
 #
-#   sbatch bench/slurm/a3/position_precision_timing.sbatch                 # every row (~2-3 h, rough)
+#   sbatch bench/slurm/a3/position_precision_timing.sbatch                 # every row (~2 h, rough)
 #   ROWS='^geo_1e8' sbatch bench/slurm/a3/position_precision_timing.sbatch # the rows whose tag matches a regex
 #
 # Every row is bench/fused_memory_budget.py --runner (the scan through jaccpot.production.ProductionRunner, one
 # segment per call; L2's operating point: clipped Plummer, cells of 64, cell_min_level 8, p6, theta 0.8,
-# unnamed caps, arena 0.88, step = min of 3 calls of 4 steps) with --runner-scheme:
-#   builtin   the runner's built-in velocity Verlet (the default; float32 [N, 2, 3] state)
-#   summed    jaccpot.position_precision.SummedDriftKDK (float32 [N, 2, 3]; the drift's increment summed first)
-#   comp_x    CompensatedKDK() (float32 [N, 3, 3]: positions as hi + lo)
-#   comp_xv   CompensatedKDK(velocities=True) (float32 [N, 4, 3])
-# The builtin row runs first AND last (A-B-A): its two samples are the run's own noise envelope. A3's gate 3: the
-# chosen scheme's 1e8 step within +10 % of builtin's.
+# unnamed caps, arena 0.88, step = min of 3 calls of 4 steps) with --drift-order:
+#   legacy    x + v dt + 0.5 a dt**2 left to right (every run before A3; GalaxySettings(drift_order="legacy"))
+#   summed    x + (v dt + 0.5 a dt**2) (the default since A3)
+# A-B-A-B: legacy, summed, legacy_b, summed_b -- each arm's two samples are its own A-vs-A control (the run's
+# noise envelope). A3's gate 3: summed's 1e8 step within +10 % of legacy's (expected: equal; no array is added).
 #
-# Rows (tag = <mac>_<N>_<arm>[_b]):
-#   geo_*   the geometric Dehnen MAC at theta 0.8 (the bench's default; the L2 pin's 257 B/p row)
+# Rows (tag = <mac>_<N>_<arm>):
+#   geo_*   the geometric Dehnen MAC at theta 0.8 (the bench's default; the L2 pin's operating point)
 #   err_*   mac_type dehnen_error at adaptive_eps 1e-4 (preset="galaxy"'s MAC)
 #   at N = 1e8 and 2.6e5 (2**18).
 #
@@ -55,8 +54,8 @@ for n in 1e8 2p6e5; do
   case $n in 1e8) N=100000000 ;; 2p6e5) N=262144 ;; esac
   for mac in geo err; do
     case $mac in geo) M="" ;; err) M="$ERR" ;; esac
-    for arm in builtin summed comp_x comp_xv builtin_b; do
-      ROW_LIST+=("${mac}_${n}_${arm}|--n $N $COMMON $M --runner-scheme ${arm%_b}")
+    for arm in legacy summed legacy_b summed_b; do
+      ROW_LIST+=("${mac}_${n}_${arm}|--n $N $COMMON $M --drift-order ${arm%_b}")
     done
   done
 done
