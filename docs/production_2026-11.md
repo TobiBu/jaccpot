@@ -1131,3 +1131,70 @@ steps, 4-step segments), the geometric MAC on the pure-JAX near field (CPU route
 with 7 (segments 2-4), each recorded as the edge's `retries` (`SegmentEdge`, the diagnostics' `retries`). Before: leaf
 64 raised at segment 19, leaf 256 at segment 2. The default production path (CSR lane on a GPU, no exact fill) runs
 the same programs: identity below.
+
+## A3 — position precision of the float32 state (wave 5, session 1: prototype, 2026-11-09)
+
+**Finding.** The float32 state's energy drift at small `dt` was the drift's ARITHMETIC, not the state's width. The
+built-in drift `x + v dt + 0.5 a dt**2` evaluates left to right: `x + v dt` is rounded to `x`'s float32 grid, then
+`0.5 a dt**2` -- below `x`'s last bit for most particles at `dt` 5e-4 (`a dt**2 / 2` ~ 1e-7 against `ulp(5)` = 4.8e-7)
+-- is rounded against `x` on its own, with the same sign along an orbit. Summing the increment first,
+`x + (v dt + 0.5 a dt**2)`, rounds `x` once per step, unbiased, and the merger probe's drift falls to the float64
+state's.
+
+**Built** (`jaccpot/position_precision.py`, opt-in schemes through the runner's `SplitStepScheme` seam,
+`ProductionRunner(scheme=...)` / `strict_run_v2(scheme=...)`):
+- `SummedDriftKDK`: the float32 `[N, 2, 3]` state, increment summed first; the kick is the built-in's, bit for bit.
+- `CompensatedKDK(velocities=False|True)`: positions (and velocities) as a renormalised float32 pair `hi + lo`
+  (TwoSum + FastTwoSum), state `[N, 3, 3]` / `[N, 4, 3]`; rows 0 and 1 stay the float32 positions (`hi` = the float32
+  rounding of `hi + lo`, what a float64 state's cast hands the force) and velocities, so every reader is unchanged.
+  `compensated_state` / `state_float64` pack and unpack. `strict_run_v2`'s state annotation is `"n r 3"` (was
+  `"n 2 3"`; annotation only).
+- `fused_memory_budget.py --runner-scheme summed|comp_x|comp_xv`; HoreKa sbatch
+  `bench/slurm/a3/position_precision_timing.sbatch` (prepared, not run: gate 3).
+
+**Merger probe** (the 2026-10-31 IC, frac 0.2 = 46,976,206, dt 5e-4, 1600 steps to t 0.8, `preset="galaxy"`
+(`dehnen_error`), one local A100 via autocvd, jaccpot `a3ba06b2`; `mn-scratch/a3/probe/summary.md`; accuracy: 768
+targets against a float64 direct sum at the true positions, every 40 segments, the largest over the run):
+
+| state / scheme | dE/E0 (t 0.8) | dL/L0 | vs float64 state (dE, dL) | rel-L2 | p99 | max |
+| --- | --- | --- | --- | --- | --- | --- |
+| float32, built-in | 8.66e-6 | 7.60e-6 | 6.9x, 24x | 2.04e-4 | 6.19e-4 | 5.46e-3 |
+| float32, `SummedDriftKDK` | -1.24e-6 | 3.17e-7 | 1.00, 1.00 | 2.07e-4 | 6.30e-4 | 5.46e-3 |
+| `CompensatedKDK()` | -1.25e-6 | 3.17e-7 | 1.00, 1.00 | 2.01e-4 | 6.32e-4 | 5.46e-3 |
+| `CompensatedKDK(velocities=True)` | -1.25e-6 | 3.17e-7 | 1.01, 1.00 | 2.00e-4 | 6.32e-4 | 5.46e-3 |
+| float64 state (float32 force) | -1.25e-6 | 3.17e-7 | 1, 1 | 2.01e-4 | 6.32e-4 | 5.46e-3 |
+
+The float32 and float64 rows reproduce 2026-10-31's (`p_float32_dt5e-4` 8.65e-6 / 7.60e-6, `p_float64_dt5e-4`
+-1.25e-6 / 3.17e-7) to three digits. The remaining drift is the force's (the MAC's), common to every arm.
+
+**What fp64 anchors in the force kernels could buy** (U2 (a)'s kernel half): on the float64 state at t 0.8, the
+float64 direct sum at the float32-rounded positions against the exact ones differs by rel-L2 8.8e-7 (median 5.9e-8,
+p99 2.1e-6, max 9.4e-6; 768 targets): ~200x below the expansion's error. Nothing measurable.
+
+**Memory at 1e8** (`fused_memory_budget.py --runner`, L2's operating point: clipped Plummer, cells of 64, p6, theta
+0.8, unnamed caps, arena 0.88; one local A100, contended, step times NOT evidence; `mn-scratch/a3/mem/`):
+
+| scheme | geometric MAC: peak, B/p | `dehnen_error` 1e-4: peak, B/p |
+| --- | --- | --- |
+| built-in | 21.68 GiB, 232.8 | 23.70 GiB, 254.5 |
+| `SummedDriftKDK` | 21.68 GiB, 232.8 | 23.68 GiB, 254.3 |
+| `CompensatedKDK()` | 25.03 GiB, 268.8 (+36) | 27.07 GiB, 290.6 (+36) |
+| `CompensatedKDK(velocities=True)` | 27.27 GiB, 292.8 (+60; its 0.88 arena failed to preallocate) | 28.07 GiB, 301.4 (+47) |
+
+(The runner donates every segment after the first, hence below the plain bench's 257 / 279.) A residual row costs
+~3 copies of 12 B per particle at the peak, not one.
+
+**Toy** (no FMM: 2e4 orbits in a Hernquist potential, float32 force at float32 positions, coherent spin, 0.8 time
+units; `mn-scratch/a3/toy/`): at dt 5e-4 the summed drift and `CompensatedKDK()` match the float64 state (dE -8e-8, dL
+~1e-8 against float32's 6.2e-6 / 8.7e-6). At dt 2.5e-5 (a block-step rung) float32 VELOCITIES become the limit:
+summed dL 2.1e-7 and `CompensatedKDK()` 3.8e-7 against 3.5e-13 for the float64 state; only `velocities=True` follows
+it (5.4e-13).
+
+**Gates** (session 1): (1) dE/dL within 2x of the float64 state: PASS for all three schemes (1.00x); (2) B/p <= 277 at
+1e8: `SummedDriftKDK` PASS (+0), `CompensatedKDK()` 268.8 geometric / 290.6 `dehnen_error`, `velocities=True` FAIL;
+(3) 1e8 step within +10 %: HoreKa sbatch prepared (the summed drift adds no array; locally, contended, its step equals
+the built-in's to 0.5 %); (4) default path: no default-path code changed (a new module, a bench flag, an annotation),
+`provider_hlo_identity compare w5-main-cpu a3-tip-cpu` PASS 36/36.
+
+**Not done (session 2, awaiting the user's choice of design):** a `ProductionRunner` setting, restart metadata for the
+residual rows, the mesh path, the `_moments` diagnostics reading `hi + lo`, the galaxy preset switch.
