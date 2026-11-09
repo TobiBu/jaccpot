@@ -1262,3 +1262,66 @@ verification step, not a per-edge diagnostic. The runs score it at the first edg
   - The disc `dt=4`: `energy.max_abs_dE` 1.5e-3 vs 7.8e-5.
 - **These are small-N figures, not U4 evidence.** At N <= 2e5, `dehnen_error` 1e-4 gives a rel-L2 of 4e-5 to
   1.7e-4 and a p50 of 3e-5 to 9e-5. U4 is judged at the HoreKa tiers.
+
+## A3 session 2 — the summed drift is the default (wave 5, 2026-11-09)
+
+**User decision (2026-11-09, via the lead):** "summed as default"; plan U2 (a) (fp64 anchors per leaf) dropped.
+
+**What changed.**
+- `jaccpot.runtime.fmm_state.drift_positions(x, v, a, dt, order)`: `"summed"` (the default) is
+  `x + dt (v + (0.5 dt) a)`, `"legacy"` is `x + v dt + 0.5 a dt**2` left to right (every run before A3).
+- **Why this form and not session 1's `x + (v dt + 0.5 a dt**2)`.** Two products into one addition let the backend's
+  multiply-add contraction (XLA:CPU's LLVM; NVPTX) fuse either product, and which one depended on the program the
+  expression landed in: the runner's scan and nornax's `leapfrog_kdk_rollout` drifted 1 ulp apart after 5 steps (3
+  of 64 rows at 8 steps, float64). With ONE product per addition every program forms the same FMAs: bitwise over 32
+  steps. Same precision (toy, dt 5e-4: dE -8.1e-8, dL 1.1e-8 against -8.3e-8 / 1.1e-8).
+- Every drift follows `drift_order`: `strict_run_v2` (both carries), the multi-GPU `MeshSegmentRunner` (and its
+  escaper tail), `differentiable_rollout` (the gradient mode). `GalaxySettings.drift_order` (default `"summed"`) is
+  what `ProductionRunner` passes to all of them; a `scheme` brings its own (nornax's `LeapfrogKDK(drift_order=...)`).
+  The default compile keys are as before; `"legacy"` adds a part.
+- Restarts: a legacy run's fingerprint records no `drift_order`, so a file written before A3 continues BITWISE under
+  `drift_order="legacy"`; under the default it continues correctly, not bitwise, and the warning names the drift order.
+- nornax (`a3/summed-drift`): `drift_positions(..., order="summed")`, the same expression operand for operand;
+  `LeapfrogKDK(drift_order="summed")` with key `("nornax.LeapfrogKDK", 2)` -- `"legacy"` keeps the key of the scheme
+  before A3, `("nornax.LeapfrogKDK", 1)`, so its restart records still match.
+- `jaccpot.position_precision.CompensatedKDK(velocities=...)` stays opt-in (session 1's double-float32 state): it
+  follows the float64 state also at block-step `dt` (where float32 velocities limit dL), but costs 290.6 / 301.4 B/p
+  at 1e8 under `dehnen_error`: over the 277 budget, documented as a prototype.
+- A4's precision ladders: the `anchored` slot became `legacy` (`bench/accuracy/suite.py`).
+
+**Merger probe, final form** (frac 0.2 = 46,976,206, dt 5e-4, 1600 steps, t 0.8, `dehnen_error`, one local A100,
+jaccpot `6caeb981` + yggdrax main `ba82e37`):
+
+| drift | dE/E0 | dL/L0 | vs float64 state | rel-L2 / p99 / max |
+| --- | --- | --- | --- | --- |
+| summed (default) | -1.24e-6 | 3.17e-7 | 0.99x / 1.00x | 2.09e-4 / 6.30e-4 / 5.46e-3 |
+| legacy | 8.66e-6 | 7.60e-6 | 6.9x / 24x | 2.04e-4 / 6.19e-4 / 5.46e-3 |
+| float64 state (session 1) | -1.25e-6 | 3.17e-7 | 1 | 2.01e-4 / 6.32e-4 / 5.46e-3 |
+
+The legacy arm on the merged tip is BITWISE the session-1 float32 run on cc90bb6f (final state, self-gravity and f_b
+after 1600 steps): the legacy setting is the old program on GPU too, and the walk move (#514) changed no number there.
+
+**Identity** (`provider_hlo_identity`, CPU; base `a3-main83-cpu` recorded from main `83dd7575`, because #514 renamed
+the walk in the HLO and `w5-main-cpu` no longer compares -- the legacy tip against it: 0/36, every diff the walk's
+name):
+- legacy tip (`PROVIDER_HLO_DRIFT_ORDER=legacy`) against main: **PASS 36/36**;
+- summed tip against main: 2/36 identical (`eval_seam`, `eval_seam_purejax`: one force, no drift); the 34 others are
+  every variant that steps (state / particles / tree carries, chains, retries, history, callbacks, external field,
+  `g_unit`, `dehnen_error`, each with its pure-JAX twin), and each one's diff is the drift's nine ops and nothing else
+  (29 diff lines per variant).
+
+**GPU pins** (`dce_pins.py` S1, S1p, S1e, S1x, S5, R1p, main against the tip): queued behind the busy cards
+(`mn-scratch/a3/pins/`); expected: the force arrays equal, the stepped states moved.
+
+**Tests.** Unit `tests/unit/test_position_precision.py` (the orders, the compensated arithmetic, the shape guard);
+`tests/integration/strict/test_runner_position_precision.py` (the default runner IS a scheme writing the summed drift,
+the legacy setting IS the left-to-right one, bitwise; a legacy restart's record and its bitwise continuation; the
+cross-order warning; CompensatedKDK's state, accuracy and restart). The reference loops that compare bitwise with the
+runner (`test_strict_runners_on_provider.py`, `test_grad_rollout.py`, the mesh segment tests, the KDK test schemes)
+drift summed. Twenty CI shards with CI arguments (typecheck where CI sets it, forced devices) all green locally;
+peak RSS of the largest 11.9 GB (`integration-strict-grad-runner`, unchanged files), the new integration file 3.1 GB.
+`test_shards.py check` rc 0.
+
+**Timing (gate 3):** `bench/slurm/a3/position_precision_timing.sbatch`, legacy against summed, A-B-A-B, 1e8 and
+2.6e5, both MACs (prepared; the user submits). The summed drift adds no array and no op count beyond one scalar
+product; B/p at 1e8: 254.5 (legacy) against 254.3 (session 1's summed form, `dehnen_error`).
