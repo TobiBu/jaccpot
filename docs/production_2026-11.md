@@ -1167,3 +1167,31 @@ No library file changed: the default paths are untouched. A3's files were not to
 **The reference's cost.** It makes two passes over the `N * K` pairs, about 3x an fp64 direct sum on them. It is a
 verification step, not a per-edge diagnostic. The runs score it at the first edge with a force, every
 `--score-every` segments and the last edge.
+
+### The local GPU tier and its baselines (one A100, contended: functional, not timings)
+
+`bench/accuracy/local_tier.sh` ran on card 6 (picked by autocvd via `on-free-card`) with the production XLA flag,
+`dehnen_error` 1e-4, fp32, `ferrers3` and K = 2048 targets. The results are recorded as
+`bench/accuracy/baselines/local/<problem>.json` (commit 8ed89154).
+
+| problem | N | steps | dt | force rel-L2 / p50 / p99 (end) | max \|dE/E\| | max \|dL/L\| | max dP | physics |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `plummer` | 8,192 | 6400 | 0.0237 | 7.40e-05 / 3.99e-05 / 2.25e-04 | 2.2e-05 | 1.7e-04 | 3.9e-08 | r50 drift 0.020, sigma drift 0.056 |
+| `hernquist` | 8,192 | 32050 | 0.0117 | 3.85e-05 / 2.74e-05 / 3.12e-04 | 2.2e-05 | 1.9e-04 | 7.3e-08 | r50 drift 0.035, sigma drift 0.033 |
+| `nfw` | 8,192 | 31500 | 0.0186 | 1.47e-04 / 8.53e-05 / 3.51e-04 | 3.4e-06 | 1.1e-04 | 6.9e-08 | r50 drift 0.034, sigma drift 0.039 |
+| `disc_heating` | 100,000 | 500 | 0.001 | 1.49e-04 / 8.26e-05 / 4.52e-04 | 7.8e-05 | 5.2e-06 | 2.2e-09 | sigma_z^2 growth 0.044 / 0.020 / 0.034 in 75 Myr |
+| `bar` | 200,000 | 2000 | 0.001 | 1.44e-04 / 7.70e-05 / 3.78e-04 | 7.9e-05 | 6.2e-06 | 4.2e-09 | max A2 0.18 at 300 Myr (no bar yet) |
+| `merger` | 200,000 | 1600 | 0.001 | 1.57e-04 / 8.10e-05 / 4.75e-04 | 2.3e-04 | 5.9e-07 | 3.8e-09 | first pericentre 8.76 kpc at t 1.296 |
+
+- **The sphere dt rule.** The first Hernquist run used dt = t_dyn/64 = 0.059 with eps 0.02 and drifted
+  |dE| 1.9e-2. The rule is now `min(t_dyn/64, 0.05 sqrt(eps / a(eps)))`, with Hernquist eps 0.05; the drift is
+  2.2e-5.
+- **Re-runs on the same card** (production flags) are bitwise in every metric for all six problems, and `check`
+  PASSes.
+- **Perturbed runs**, checked against the baselines (gate 3 on the GPU), all FAIL:
+  - Plummer `dt=4`: `energy.max_abs_dE` 3.4e-2 vs 2.2e-5.
+  - Plummer `theta=0.95` (geometric): `force.rel_l2_start/end` 5.5e-3 / 4.3e-3 vs 7.8e-5 / 7.4e-5, p99 83x,
+    energy 5.6x.
+  - The disc `dt=4`: `energy.max_abs_dE` 1.5e-3 vs 7.8e-5.
+- **These are small-N figures, not U4 evidence.** At N <= 2e5, `dehnen_error` 1e-4 gives a rel-L2 of 4e-5 to
+  1.7e-4 and a p50 of 3e-5 to 9e-5. U4 is judged at the HoreKa tiers.
