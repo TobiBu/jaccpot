@@ -124,7 +124,8 @@ def test_walk_soa_float64_lists_equal_the_flat_walk(
 ):
     """Float64 centres force the ``soa`` node layout; the opening-angle MAC (and
     the compact kernels' separation floor) give the flat walk's pair sets."""
-    from jaccpot.pallas.mutual_walk_pallas import mutual_walk_pallas
+    from yggdrax.interactions import mutual_walk_pallas
+
     from jaccpot.runtime._mac_geometry import com_mac_geometry
 
     topo, ps, _ms, com, leaf = tree_data

@@ -420,10 +420,10 @@ import numpy as np  # noqa: E402
 
 jax.config.update("jax_enable_x64", True)
 
+import yggdrax.interactions as _mwp  # noqa: E402
 from common.gpu_guard import GpuMonitor  # noqa: E402
 from common.ic import IC_GENERATORS  # noqa: E402
 
-import jaccpot.pallas.mutual_walk_pallas as _mwp  # noqa: E402
 import jaccpot.runtime._interaction_cache as _ic  # noqa: E402
 from jaccpot import FastMultipoleMethod, ForceParams, TraversalOverrides  # noqa: E402
 from jaccpot.config import (  # noqa: E402
@@ -515,6 +515,7 @@ def _walk_info(a, k) -> dict:
     )
 
 
+# jaccpot's pallas_mutual_walk looks the yggdrax function up on every call
 _wrap(_mwp, "mutual_walk_pallas", "walk", _walk_info)
 _wrap(_ic, "_build_flat_walk_artifacts_strict_streamed", "walk+lists")
 for _name, _label in (
