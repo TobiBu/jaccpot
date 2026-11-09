@@ -142,8 +142,8 @@ def build_runner(
     )
     level = run["cell_min_level"]
     if run["mac"] == "dehnen_error":
-        if on_cpu:
-            common["use_pallas"] = True
+        if on_cpu or _CPU_MESH_SWITCHED:
+            common["use_pallas"] = True  # the CSR near field (interpret mode on a CPU)
         solver = FastMultipoleMethod(
             adaptive_eps=float(run["tol"]), advanced=base, **common
         )
@@ -186,6 +186,10 @@ def build_runner(
     return solver, runner, state_dtype
 
 
+#: set by :func:`cpu_mesh_switches` (the backend then reports "gpu")
+_CPU_MESH_SWITCHED = False
+
+
 def cpu_mesh_switches(criterion: bool) -> None:
     """The fused multi-GPU lane on forced CPU devices: the node tier's local smoke only.
 
@@ -202,8 +206,10 @@ def cpu_mesh_switches(criterion: bool) -> None:
     import jax
     import yggdrax.distributed.comm as ygg_comm
 
+    global _CPU_MESH_SWITCHED
     if jax.default_backend() != "cpu":
         return
+    _CPU_MESH_SWITCHED = True
     jax.default_backend = lambda: "gpu"
     resolve = ygg_comm.resolve_ragged_method
     ygg_comm.resolve_ragged_method = lambda method="auto": (
