@@ -15,9 +15,9 @@ are nested subsamples of one realisation.
 particles and a few steps, so each job's exact command line runs end to end on a CPU
 (the node tier's ``--devices 4`` on four forced host devices).
 
-The ``precision`` ladders carry an ``anchored`` rung: A3's anchored state, a slot until
-A3 lands (``suite.py``'s ``PRECISIONS``); the job then exits 3 and the array task is
-reported as skipped.
+The ``precision`` ladders carry a ``legacy`` rung (A3): the fp32 state under the drift
+order before A3 (``suite.py``'s ``PRECISIONS``), against ``fp32``'s summed drift. A
+precision whose entry is ``None`` (a slot) exits 3 and is reported as skipped.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ _MAC_RUNGS = [
     ("tol3e-5", ["--mac", "dehnen_error", "--tol", "3e-5"]),
 ]
 _PRECISION_RUNGS = [
-    (p, ["--precision", p]) for p in ("fp32", "fp64state", "fp64", "anchored")
+    (p, ["--precision", p]) for p in ("fp32", "fp64state", "fp64", "legacy")
 ]
 
 

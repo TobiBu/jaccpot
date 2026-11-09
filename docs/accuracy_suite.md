@@ -114,7 +114,7 @@ edge with a force, every `--score-every` segments, and the last edge. It writes 
 | `plummer_n`, `hernquist_n`, `nfw_n` | N | 1e5, 1e6, 1e7 | 1e7, 4e7 (Plummer only) |
 | `plummer_dt` | dt = t_dyn/32, /64, /128 (reference /128) | 1e6 | - |
 | `plummer_mac`, `disc_mac` | geometric theta 0.5 / 0.7 / 0.8, `dehnen_error` tol 1e-3 / 1e-4 / 3e-5 | 1e6 / 1.6e7 | disc at 6.4e7 |
-| `plummer_precision`, `disc_precision` | `fp32`, `fp64state`, `fp64`, `anchored` (A3's slot) | 1e6 / 1.6e7 | disc at 6.4e7 |
+| `plummer_precision`, `disc_precision` | `fp32`, `fp64state`, `fp64`, `legacy` (A3) | 1e6 / 1.6e7 | disc at 6.4e7 |
 | `disc_n` | N | 1e6, 4e6, 1.6e7, 6.4e7 | 6.4e7, 2e8 |
 | `disc_dt` | dt 2e-3, 1e-3, 5e-4 (reference 5e-4) | 1.6e7 | - |
 | `bar_n` | N (theta 0.7 as the 2026-10-31 ladder; `dehnen_error` at the two smallest) | 2.5e6, 1e7, 4e7 | 1e8 |
@@ -124,9 +124,12 @@ edge with a force, every `--score-every` segments, and the last edge. It writes 
 
 The galaxy ladders take per-component prefixes of one IC at the largest N, so the rungs are nested subsamples.
 
-**The precision axis.** It is keyed by a runner setting in `bench/accuracy/suite.py`'s `PRECISIONS`. The
-`anchored` entry is A3's fp64-anchor-per-leaf state. Until A3 lands that entry is `None`, and its rung exits 3
-(reported as skipped). When A3 lands, fill in its runner setting there.
+**The precision axis.** It is keyed by a runner setting in `bench/accuracy/suite.py`'s `PRECISIONS`. `fp32`
+drifts summed (`x + (v dt + 0.5 a dt**2)`, the default since A3); `legacy` is the same fp32 state with the drift
+evaluated left to right (`GalaxySettings(drift_order="legacy")`, every run before A3), which drifts 7x (energy)
+and 24x (angular momentum) more on the merger probe (`docs/production_2026-11.md`, A3). A3's plan U2 (a), an fp64
+anchor per leaf, was dropped: the drift order closes the gap at no memory cost. An entry set to `None` (a slot)
+makes its rung exit 3 (reported as skipped).
 
 ## 4. Baseline and check
 
