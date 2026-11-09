@@ -91,7 +91,9 @@ def test_the_drift_order_is_what_steps():
     assert _same(summed.state, _run(s32, scheme=_KDK("summed")).state)
     assert _same(legacy.state, _run(s32, scheme=_KDK("legacy")).state)
     assert not _same(summed.state, legacy.state)
-    with pytest.raises(ValueError, match="drift_order"):
+    # an unknown order: ValueError from the runner, or (JACCPOT_RUNTIME_TYPECHECK=1)
+    # the settings' Literal annotation's TypeCheckError first
+    with pytest.raises((ValueError, TypeError), match="drift_order"):
         ProductionRunner(
             _solver(), settings=dataclasses.replace(SETTINGS, drift_order="kahan")
         )
