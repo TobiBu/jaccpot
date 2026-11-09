@@ -97,10 +97,16 @@ def test_the_reference_is_the_fp64_direct_sum(law: ForceLaw) -> None:
     acc64, pot64, accld = _host_reference(x, m, t, law)
     rel_pot = np.abs(ref.potential - pot64) / np.abs(pot64)
     assert rel_pot.max() < 1e-14, rel_pot.max()
-    # against an extended-precision sum of the same fp64 terms: ~1 ulp
+    # against an extended-precision sum of numpy's fp64 terms: a few ulp. XLA:CPU may
+    # contract the pair term's products into FMAs depending on the host's codegen, so
+    # its terms can differ from numpy's by an ulp: 1.9-2.8e-16 on an AMD EPYC 7452,
+    # 4.7e-16 / 6.5e-16 on a GitHub runner. A naive fp64 sum of the same terms is at
+    # 1.5-1.7e-15, so the bound still separates the exact summation from it; the
+    # summation's order independence is gated bitwise in the tests below.
     err_ld = np.abs(ref.acceleration.astype(np.longdouble) - accld)
     scale = np.max(np.abs(accld), axis=1, keepdims=True)
-    assert float(np.max(err_ld / scale)) < 4e-16
+    err = float(np.max(err_ld / scale))
+    assert err < 1e-15, err
 
 
 def _layout(x: np.ndarray, m: np.ndarray, seed: int, pad: int) -> tuple:
