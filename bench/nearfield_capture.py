@@ -86,7 +86,8 @@ def _wrapped(*args, **kw):
 
 _nf.nearfield_leafpair_csr_sorted_direct_pallas = _wrapped
 
-import jaccpot.pallas.mutual_walk_pallas as _mwp  # noqa: E402
+# the walk lives in yggdrax; jaccpot's pallas_mutual_walk looks it up on every call
+import yggdrax.interactions as _mwp  # noqa: E402
 
 _walk_orig = _mwp.mutual_walk_pallas
 _walk_done = {"traced": False, "saved": False}

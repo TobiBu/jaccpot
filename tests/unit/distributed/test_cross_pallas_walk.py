@@ -243,7 +243,7 @@ def test_the_receiver_walk_emits_the_same_sets(two_domains, pallas_walk):
 
 def test_a_walk_cut_off_at_max_rounds_is_flagged(two_domains):
     """CONTROL for the new flag: stopping with pairs still queued is an overflow."""
-    from jaccpot.pallas.mutual_walk_pallas import mutual_walk_pallas
+    from yggdrax.interactions import mutual_walk_pallas
 
     me, _ = two_domains
     kw = dict(

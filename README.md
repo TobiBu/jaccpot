@@ -538,7 +538,9 @@ runs as Pallas on sm_80+ (`jaccpot/pallas/`):
   it serves the chunked M2L lanes, so on one GPU it acts only with the CSR M2L off,
   `JACCPOT_STATIC_STRICT_FUSED_M2L_CSR=0`, and otherwise on the multi-GPU mesh lane);
 - **the rest of the fused strict lane's step:** the dual-tree walk, one launch per
-  wavefront round (`mutual_walk_pallas.py`), the directed pair CSR
+  wavefront round (yggdrax's `mutual_walk_pallas`, `yggdrax/pallas/mutual_walk.py`,
+  called through `jaccpot.runtime._interaction_cache.pallas_mutual_walk`, which
+  passes the `JACCPOT_WALK_*` switches), the directed pair CSR
   (`csr_place.py`), the COM MAC radii (`com_radii_leaf.py`), leaf P2M
   (`p2m_real_leaf.py`), the M2M / L2L cascades (`cascade_real_lanes.py`,
   `cascade_real_level.py`) and L2P (`l2p_real.py`).

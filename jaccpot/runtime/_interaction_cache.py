@@ -30,7 +30,7 @@ from yggdrax.interactions import (
 )
 from yggdrax.tree import Tree
 
-from jaccpot._env import env_flag, env_float
+from jaccpot._env import env_choice, env_flag, env_float, env_int
 from jaccpot._jax_compat import Tracer
 from jaccpot._searchsorted import searchsorted_method
 
@@ -53,6 +53,8 @@ __all__ = [
     "flat_walk_list_limit",
     "flat_walk_list_limit_message",
     "pair_policy_cache_identity",
+    "pallas_mutual_walk",
+    "pallas_walk_settings",
     "strict_walk_backend",
     "TargetSortedFarPairs",
     "far_pair_targets",
@@ -1282,9 +1284,10 @@ def strict_walk_backend() -> str:
     """Walk implementation of the strict flat lane (plan sub-10ms Phase 2).
 
     ``JACCPOT_STATIC_STRICT_FUSED_WALK``: ``"pallas"`` (one Pallas launch per
-    round, :func:`jaccpot.pallas.mutual_walk_pallas.mutual_walk_pallas`) or
+    round, yggdrax's ``mutual_walk_pallas`` through :func:`pallas_mutual_walk`) or
     ``"flat"`` (yggdrax ``dual_tree_walk_mutual``). Unset: ``"pallas"`` wherever
-    the kernel lowers (an Ampere+ GPU; plan sub-10ms Phase 6, 2026-09-11),
+    the kernel lowers (an Ampere+ GPU, yggdrax's
+    ``pallas_mutual_walk_supported``; plan sub-10ms Phase 6, 2026-09-11),
     ``"flat"`` elsewhere.
 
     Returns
@@ -1301,15 +1304,68 @@ def strict_walk_backend() -> str:
     if raw is None:
         if env_flag("JACCPOT_WALK_PALLAS_INTERPRET", False):
             return "pallas"
-        from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
+        from yggdrax.interactions import pallas_mutual_walk_supported
 
-        return "pallas" if pallas_m2l_real_csr_supported() else "flat"
+        return "pallas" if pallas_mutual_walk_supported() else "flat"
     raw = raw.strip().lower()
     if raw not in ("flat", "pallas"):
         raise ValueError(
             f"JACCPOT_STATIC_STRICT_FUSED_WALK={raw!r}; expected 'flat' or 'pallas'"
         )
     return raw
+
+
+def pallas_walk_settings() -> dict[str, Any]:
+    """jaccpot's ``JACCPOT_WALK_*`` settings of yggdrax's Pallas walk, as its kwargs.
+
+    yggdrax reads no environment: the walk takes these as keyword arguments, and
+    jaccpot keeps its switches by reading them here on every call.
+
+    * ``JACCPOT_WALK_PALLAS_INTERPRET`` -> ``interpret`` (default off): Pallas
+      interpret mode, the CPU tests' walk.
+    * ``JACCPOT_WALK_NODE_LAYOUT`` -> ``node_layout`` (``"record"``, or ``"soa"``).
+    * ``JACCPOT_WALK_MAX_PROGRAMS`` -> ``max_programs`` (2048): programs per round.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``interpret``, ``node_layout`` and ``max_programs``.
+    """
+    return {
+        "interpret": env_flag("JACCPOT_WALK_PALLAS_INTERPRET", False),
+        "node_layout": env_choice(
+            "JACCPOT_WALK_NODE_LAYOUT", "record", ("soa", "record")
+        ),
+        "max_programs": env_int("JACCPOT_WALK_MAX_PROGRAMS", 2048, minimum=1),
+    }
+
+
+def pallas_mutual_walk(*args: Any, **kwargs: Any) -> Any:
+    """yggdrax's ``mutual_walk_pallas`` with :func:`pallas_walk_settings`.
+
+    Every jaccpot call of the Pallas walk goes through here. The walk runs under the
+    ``fmm_walk`` named scope, the stage the trace analysis
+    (``bench/analyse_trace_by_stage.py``) credits it to. The yggdrax function is
+    looked up on each call, so a bench or test that wraps
+    ``yggdrax.interactions.mutual_walk_pallas`` sees every call.
+
+    Parameters
+    ----------
+    *args : Any
+        ``mutual_walk_pallas``'s positional arguments (children, centres, radii,
+        theta, root).
+    **kwargs : Any
+        Its keyword arguments, except the three :func:`pallas_walk_settings` sets.
+
+    Returns
+    -------
+    Any
+        The walk's ``PallasWalkResult``.
+    """
+    from yggdrax import interactions as _yi
+
+    with jax.named_scope("fmm_walk"):
+        return _yi.mutual_walk_pallas(*args, **pallas_walk_settings(), **kwargs)
 
 
 def _lex_sorted(
@@ -2073,11 +2129,9 @@ def _build_flat_walk_artifacts_strict_streamed(
         if walk_backend == "pallas":
             # plan sub-10ms Phase 2: one Pallas launch per wavefront round with
             # atomic slot counters; same pair SETS as the flat walk (pinned by
-            # tests/unit/runtime/test_mutual_walk_pallas.py), emission order
+            # yggdrax's tests/unit/test_mutual_walk_pallas.py), emission order
             # nondeterministic -> the rows below are sorted by (target, source).
-            from jaccpot.pallas.mutual_walk_pallas import mutual_walk_pallas
-
-            walk = mutual_walk_pallas(
+            walk = pallas_mutual_walk(
                 left_full,
                 right_full,
                 centers,
@@ -2088,7 +2142,6 @@ def _build_flat_walk_artifacts_strict_streamed(
                 far_cap=far_cap,
                 near_cap=near_cap,
                 node_active=node_active,
-                interpret=env_flag("JACCPOT_WALK_PALLAS_INTERPRET", False),
                 separation_floor=floor,
                 **(
                     {}
