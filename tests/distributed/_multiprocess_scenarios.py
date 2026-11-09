@@ -167,7 +167,7 @@ class KDK:
 
     def open_step(self, state, acceleration, dt):
         return state.at[:, 0].set(
-            state[:, 0] + state[:, 1] * dt + 0.5 * acceleration * dt**2
+            state[:, 0] + (state[:, 1] * dt + 0.5 * acceleration * dt**2)
         )
 
     def close_step(self, state_open, acceleration, acceleration_new, dt):

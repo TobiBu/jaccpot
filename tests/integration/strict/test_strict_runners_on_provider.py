@@ -227,7 +227,7 @@ def test_a_user_written_scan_over_the_provider_is_the_particle_carry():
 
     def verlet(carry, m):
         x, v, a, aux = carry
-        x = x + v * dt + 0.5 * a * dt**2
+        x = x + (v * dt + 0.5 * a * dt**2)
         a_new, aux = prov.step(x, m, aux=aux)
         return (x, v + 0.5 * (a + a_new) * dt, a_new, aux), None
 

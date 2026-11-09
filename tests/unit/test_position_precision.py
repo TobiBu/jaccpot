@@ -1,9 +1,10 @@
-"""``jaccpot.position_precision`` (multi-node plan A3): the schemes' arithmetic.
+"""The drift's order and ``jaccpot.position_precision`` (multi-node plan A3).
 
 No force here (``tests/integration/strict/test_runner_position_precision.py`` runs
-them in the production runner): the compensated drift keeps ~48 bits of position
-under jit, the summed drift is the built-in's terms summed first, the kicks are
-the built-in's bit for bit, and the packing round-trips.
+them in the production runner): the built-in drift sums its increment first
+(``"legacy"`` is the expression before A3), the compensated drift keeps ~48 bits of
+position under jit, its kick is the built-in's bit for bit, and the packing
+round-trips.
 """
 
 from __future__ import annotations
@@ -15,11 +16,16 @@ import pytest
 
 from jaccpot.position_precision import (
     CompensatedKDK,
-    SummedDriftKDK,
     compensated_state,
     state_float64,
 )
-from jaccpot.runtime.fmm_state import _velocity_verlet_kick_drifted
+from jaccpot.runtime.fmm_state import (
+    DRIFT_ORDERS,
+    _velocity_verlet_kick_drifted,
+    _velocity_verlet_state_update,
+    check_drift_order,
+    drift_positions,
+)
 from jaccpot.scheme import SplitStepScheme, check_mesh_scheme, check_scheme
 
 N = 64
@@ -38,14 +44,34 @@ def _acc(seed: int = 1) -> np.ndarray:
     return np.random.default_rng(seed).normal(size=(N, 3)) * 30.0
 
 
-def test_the_schemes_are_rowwise_split_step_schemes():
-    for scheme in (SummedDriftKDK(), CompensatedKDK(), CompensatedKDK(True)):
+def test_the_drift_orders():
+    """``"summed"`` (the default) adds the increment in one rounding; ``"legacy"``
+    is the expression before A3, left to right; they differ in float32."""
+    st = jnp.asarray(_state64(), jnp.float32)
+    acc = jnp.asarray(_acc(), jnp.float32)
+    dt = jnp.float32(DT)
+    x, v = st[:, 0], st[:, 1]
+    summed = np.asarray(drift_positions(x, v, acc, dt))
+    legacy = np.asarray(drift_positions(x, v, acc, dt, "legacy"))
+    assert np.array_equal(summed, np.asarray(x + (v * dt + 0.5 * acc * dt**2)))
+    assert np.array_equal(legacy, np.asarray(x + v * dt + 0.5 * acc * dt**2))
+    assert not np.array_equal(summed, legacy)
+    assert DRIFT_ORDERS == ("summed", "legacy")
+    assert check_drift_order("legacy") == "legacy"
+    with pytest.raises(ValueError, match="drift_order"):
+        check_drift_order("kahan")
+    # the full update drifts summed
+    full = np.asarray(_velocity_verlet_state_update(st, acc, acc, dt))
+    assert np.array_equal(full[:, 0], summed)
+
+
+def test_the_compensated_schemes_are_rowwise_split_step_schemes():
+    for scheme in (CompensatedKDK(), CompensatedKDK(True)):
         assert isinstance(scheme, SplitStepScheme)
         assert check_scheme(scheme) is scheme
         assert check_mesh_scheme(scheme) is scheme
         assert scheme.rowwise
-    keys = {s.key() for s in (SummedDriftKDK(), CompensatedKDK(), CompensatedKDK(True))}
-    assert len(keys) == 3
+    assert CompensatedKDK().key() != CompensatedKDK(True).key()
 
 
 @pytest.mark.parametrize("velocities", [False, True])
@@ -72,6 +98,13 @@ def test_packing_round_trips(velocities):
         compensated_state(packed)
 
 
+class _Builtin:
+    """The built-in drift as a scheme's ``open_step`` (for :func:`_drift_many`)."""
+
+    def open_step(self, state, acc, dt):
+        return state.at[:, 0].set(drift_positions(state[:, 0], state[:, 1], acc, dt))
+
+
 def _drift_many(scheme, state, acc, dt=DT):
     """``STEPS`` drifts (no kicks) under one jit: the residual must survive XLA."""
 
@@ -89,7 +122,8 @@ def test_the_compensated_drift_keeps_the_bits_float32_drops():
     """Dyadic velocities, accelerations and dt: every increment ``v dt + a dt**2 / 2``
     is exact in float32 however XLA contracts it, so the exact position after
     ``STEPS`` drifts is known; the compensated pair holds it exactly, the float32
-    state (summed drift) loses the increment's low bits at every step."""
+    state (the built-in summed drift) loses the increment's low bits at every
+    step."""
     rng = np.random.default_rng(3)
     dt = 2.0**-11
     x0 = (rng.uniform(-8.0, 8.0, (N, 3)) + 5.0).astype(np.float32).astype(np.float64)
@@ -103,7 +137,7 @@ def test_the_compensated_drift_keeps_the_bits_float32_drops():
         CompensatedKDK(), jnp.asarray(compensated_state(state)), acc, dt
     )
     got_c = state_float64(packed)[:, 0]
-    got_s = _drift_many(SummedDriftKDK(), jnp.asarray(state, jnp.float32), acc, dt)
+    got_s = _drift_many(_Builtin(), jnp.asarray(state, jnp.float32), acc, dt)
     err_s = np.max(np.abs(got_s[:, 0].astype(np.float64) - want))
     assert np.array_equal(got_c, want)
     assert err_s > 1e-7, err_s
@@ -115,26 +149,10 @@ def test_the_compensated_drift_keeps_the_bits_float32_drops():
     )
 
 
-def test_the_summed_drift_is_the_builtin_terms_summed_first():
-    st = jnp.asarray(_state64(), jnp.float32)
-    acc = jnp.asarray(_acc(), jnp.float32)
-    dt = jnp.float32(DT)
-    got = np.asarray(SummedDriftKDK().open_step(st, acc, dt))
-    x, v = st[:, 0], st[:, 1]
-    assert np.array_equal(got[:, 0], np.asarray(x + (v * dt + 0.5 * acc * dt**2)))
-    assert np.array_equal(got[:, 1], np.asarray(v))
-
-
-@pytest.mark.parametrize(
-    "scheme", [SummedDriftKDK(), CompensatedKDK()], ids=["summed", "compensated_x"]
-)
-def test_the_kick_is_the_builtin_kick(scheme):
+def test_the_kick_is_the_builtin_kick():
+    scheme = CompensatedKDK()
     s64 = _state64()
-    st = (
-        jnp.asarray(compensated_state(s64))
-        if isinstance(scheme, CompensatedKDK)
-        else jnp.asarray(s64, jnp.float32)
-    )
+    st = jnp.asarray(compensated_state(s64))
     a0 = jnp.asarray(_acc(1), jnp.float32)
     a1 = jnp.asarray(_acc(2), jnp.float32)
     dt = jnp.float32(DT)
