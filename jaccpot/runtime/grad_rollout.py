@@ -132,6 +132,7 @@ from beartype.typing import Callable
 from jax.custom_derivatives import CustomVJPPrimal, SymbolicZero
 from jaxtyping import Array
 
+from .fmm_state import check_drift_order, drift_positions, kick_velocities
 from .fused_topology import (
     GRAD_FAIL_MASK,
     OVERFLOW_FAIL_MASK,
@@ -770,12 +771,13 @@ def differentiable_rollout(
     inner_steps: Optional[int] = None,
     start_aux: Optional[Callable[[Any, Any], Any]] = None,
     ad_mode: Optional[str] = None,
+    drift_order: str = "summed",
 ) -> RolloutResult:
     """``num_steps`` velocity-Verlet steps over ``step_fn``, differentiably.
 
     Each step is the production particle carry's, expression for expression::
 
-        x = x + v * dt + 0.5 * a * dt**2
+        x = x + dt * (v + (0.5 * dt) * a)   # drift_order="summed" (the default)
         a_new, aux = step_fn(x, masses, params, aux)
         a_new = a_new + external_fn(stack([x, v]), external_args)   # if a field
         v = v + 0.5 * (a + a_new) * dt
@@ -864,6 +866,10 @@ def differentiable_rollout(
         then be ``None`` or ``"step"`` (the default, which in forward mode means
         the same plain scan); ``"nested"`` and ``"offload"`` (reverse-pass
         storage schedules) are refused. Static.
+    drift_order : str
+        The drift's evaluation order (:data:`~jaccpot.runtime.fmm_state.DRIFT_ORDERS`,
+        static): ``"summed"`` (the default since A3) or ``"legacy"`` (the
+        expression before A3): the production carry's under the same setting.
 
     Returns
     -------
@@ -884,6 +890,7 @@ def differentiable_rollout(
     """
     from .grad_options import ad_mode_override, resolve_ad_mode
 
+    check_drift_order(drift_order)
     if resolve_ad_mode(ad_mode) == "forward":
         if checkpoint not in (None, "step"):
             raise ValueError(
@@ -907,6 +914,7 @@ def differentiable_rollout(
                 checkpoint=None,
                 inner_steps=inner_steps,
                 start_aux=start_aux,
+                drift_order=drift_order,
             )
     return _rollout(
         step_fn,
@@ -923,6 +931,7 @@ def differentiable_rollout(
         checkpoint=checkpoint,
         inner_steps=inner_steps,
         start_aux=start_aux,
+        drift_order=drift_order,
     )
 
 
@@ -942,6 +951,7 @@ def _rollout(
     checkpoint: Optional[str],
     inner_steps: Optional[int],
     start_aux: Optional[Callable[[Any, Any], Any]],
+    drift_order: str = "summed",
 ) -> RolloutResult:
     """:func:`differentiable_rollout` in the mode installed (its arguments).
 
@@ -974,6 +984,8 @@ def _rollout(
     inner_steps : Optional[int]
         As :func:`differentiable_rollout`.
     start_aux : Optional[Callable[[Any, Any], Any]]
+        As :func:`differentiable_rollout`.
+    drift_order : str
         As :func:`differentiable_rollout`.
 
     Returns
@@ -1062,12 +1074,13 @@ def _rollout(
         # only if the field reads velocities), so the reverse pass needs x and
         # the aux, not the whole carry
         a_new, aux_out = force(x, v, aux_in, c)
-        return v + 0.5 * (a + a_new) * consts.join(c)[1], a_new, aux_out
+        v_new = kick_velocities(v, a, a_new, consts.join(c)[1], drift_order)
+        return v_new, a_new, aux_out
 
     def drift(x: Array, v: Array, a: Array, c: tuple) -> Array:
         # strict_run_v2's `_advance`: the same expression, in the same order
         dt_c = consts.join(c)[1]
-        return x + v * dt_c + 0.5 * a * dt_c**2
+        return drift_positions(x, v, a, dt_c, drift_order)
 
     start_force = force
     if start_aux is not None:

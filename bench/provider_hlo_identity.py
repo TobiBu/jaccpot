@@ -703,6 +703,18 @@ def _env(pairs: tuple):
                 os.environ[k] = val
 
 
+def _drift_kw() -> dict:
+    """``strict_run_v2``'s drift order from ``PROVIDER_HLO_DRIFT_ORDER`` (A3).
+
+    Returns
+    -------
+    dict
+        ``{}`` for the default (``"summed"``), else ``{"drift_order": ...}``.
+    """
+    order = os.environ.get("PROVIDER_HLO_DRIFT_ORDER", "summed")
+    return {} if order == "summed" else {"drift_order": order}
+
+
 def _run_variant(name: str, setup: Setup, cap: Capture) -> dict:
     """Run one variant on a fresh solver; return its record (arrays in ``cap``)."""
     import jax
@@ -798,6 +810,9 @@ def _run_variant(name: str, setup: Setup, cap: Capture) -> dict:
                     carry=call.carry,
                     donate_prepared_state=call.donate_prepared_state,
                     donate_state=call.donate_state,
+                    # A3: the legacy drift (record --env PROVIDER_HLO_DRIFT_ORDER=legacy)
+                    # must reproduce a tag recorded before A3, program for program
+                    **_drift_kw(),
                 )
                 jax.effects_barrier()
                 # digest now: the next call may donate what this one returned

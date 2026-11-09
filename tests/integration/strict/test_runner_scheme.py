@@ -29,6 +29,7 @@ import numpy as np
 import pytest
 
 from jaccpot.production import ProductionRunner, SegmentConfig, load_restart
+from jaccpot.runtime.fmm_state import drift_positions, kick_velocities  # noqa: E402
 from jaccpot.scheme import SplitStepScheme, check_scheme, scheme_record
 from tests.integration.strict.test_production_runner import (  # noqa: F401
     DT,
@@ -62,12 +63,14 @@ class _KDK:
     def open_step(self, state, acceleration, dt):
         dt = self._dt(dt)
         x, v = state[:, 0], state[:, 1]
-        return state.at[:, 0].set(x + v * dt + 0.5 * acceleration * dt**2)
+        return state.at[:, 0].set(drift_positions(x, v, acceleration, dt))
 
     def close_step(self, state_open, acceleration, acceleration_new, dt):
         dt = jnp.asarray(self._dt(dt), dtype=state_open.dtype)
         v = state_open[:, 1]
-        return state_open.at[:, 1].set(v + 0.5 * (acceleration + acceleration_new) * dt)
+        return state_open.at[:, 1].set(
+            kick_velocities(v, acceleration, acceleration_new, dt)
+        )
 
 
 #: one segment of all the steps: one scan program per runner (the segment edges are

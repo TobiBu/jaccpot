@@ -110,7 +110,9 @@ dt = jnp.asarray(1e-3, x0.dtype)
 
 def verlet(carry, m):
     x, v, a, aux = carry
-    x = x + v * dt + 0.5 * a * dt**2
+    # the increment first: one rounding of x per step (the runner's drift since A3,
+    # jaccpot.runtime.fmm_state.drift_positions; docs/production.md, "The drift order")
+    x = x + dt * (v + (0.5 * dt) * a)
     a_new, aux = prov.step(x, m, aux=aux)
     return (x, v + 0.5 * (a + a_new) * dt, a_new, aux), None
 
@@ -357,6 +359,11 @@ same fused lane in float64, correct and selectable, with its time and memory rec
 but no budget (user decision D3). Nothing a caller does today changes: the preset still
 defaults to float32.
 
+- **A float32 state needs the summed drift, not a float64 state.** The energy drift a
+  float32 state showed at small `dt` (the 2026-10-31 merger: 7x the float64 state's) was
+  the drift's left-to-right rounding; summed (the default since A3), the float32 state
+  conserves as the float64 state does at no memory cost (`docs/production.md`, "The drift
+  order").
 - **The state keeps its own dtype.** A float64 state under the float32 force works: the
   refresh casts positions and masses to float32, the force is cast up at the scatter, and
   the drift, kick, f_b and external field stay float64. Before S2 the tree-order carry

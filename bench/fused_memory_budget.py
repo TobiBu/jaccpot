@@ -303,9 +303,19 @@ def _args() -> argparse.Namespace:
     ap.add_argument(
         "--runner-scheme",
         default="builtin",
-        choices=("builtin", "nornax_kdk"),
+        choices=("builtin", "nornax_kdk", "comp_x", "comp_xv"),
         help="with --runner: the integration scheme (multi-node plan I1): the "
-        "runner's built-in KDK, or nornax.schemes.LeapfrogKDK (needs nornax)",
+        "runner's built-in KDK, or nornax.schemes.LeapfrogKDK (needs nornax); A3's "
+        "jaccpot.position_precision.CompensatedKDK: comp_x / comp_xv (the state "
+        "packed by compensated_state)",
+    )
+    ap.add_argument(
+        "--drift-order",
+        default="summed",
+        choices=("summed", "legacy"),
+        help="the built-in drift's evaluation order (A3): summed (the default "
+        "since A3) or legacy (left to right, the expression before A3); "
+        "strict_run_v2(drift_order=...) / GalaxySettings(drift_order=...)",
     )
     ap.add_argument(
         "--runner-resume",
@@ -954,6 +964,7 @@ def run_budget(result: dict) -> None:
             **({} if ARGS.no_donate else {"donate_prepared_state": True}),
             **({"donate_state": True} if ARGS.donate_state else {}),
             **force_kw,
+            **_drift_kw(),
         )
         jax.block_until_ready(out[0])
         return out
@@ -1036,6 +1047,17 @@ def run_budget(result: dict) -> None:
     _accuracy(result, pos, mass, soft, a_host)
 
 
+def _drift_kw() -> dict:
+    """``strict_run_v2``'s ``drift_order`` (A3): ``{}`` for the default.
+
+    Returns
+    -------
+    dict
+        ``{}`` or ``{"drift_order": "legacy"}``.
+    """
+    return {} if ARGS.drift_order == "summed" else {"drift_order": ARGS.drift_order}
+
+
 def _run_through_runner(result: dict, solver, state0, masses, dt, ext, saved) -> None:
     """``--runner``: the scan phase through ``jaccpot.production.ProductionRunner``.
 
@@ -1052,6 +1074,14 @@ def _run_through_runner(result: dict, solver, state0, masses, dt, ext, saved) ->
         from nornax.schemes import LeapfrogKDK
 
         scheme = LeapfrogKDK()
+    elif ARGS.runner_scheme != "builtin":
+        from jaccpot.position_precision import CompensatedKDK, compensated_state
+
+        velocities = ARGS.runner_scheme == "comp_xv"
+        scheme = CompensatedKDK(velocities=velocities)
+        state0 = jnp.asarray(
+            compensated_state(state0, velocities=velocities), state0.dtype
+        )
     result["runner_scheme"] = ARGS.runner_scheme
     s = int(ARGS.steps)
     targets = [1, 1 + s] + [1 + s * (2 + i) for i in range(ARGS.reps)]
@@ -1076,6 +1106,7 @@ def _run_through_runner(result: dict, solver, state0, masses, dt, ext, saved) ->
             adaptive_eps=(
                 None if ARGS.adaptive_eps is None else float(ARGS.adaptive_eps)
             ),
+            drift_order=str(ARGS.drift_order),
         ),
         segment=segment,
         external_acceleration_fn=ext,
@@ -1334,6 +1365,7 @@ def run_drift(result: dict) -> None:
                 return_prepared_state=False,
                 add_external=ext is not None,
                 external_acceleration_fn=ext,
+                **_drift_kw(),
             )
             jax.block_until_ready(state)
             done = mark
@@ -1384,6 +1416,7 @@ def main() -> int:
     result = dict(
         mode=ARGS.mode,
         n=ARGS.n,
+        drift_order=ARGS.drift_order,
         ic=ARGS.ic,
         seed=ARGS.seed,
         leaf=ARGS.leaf,

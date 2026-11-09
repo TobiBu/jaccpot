@@ -21,6 +21,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jaccpot.distributed import multiprocess as mp
+from jaccpot.runtime.fmm_state import drift_positions, kick_velocities  # noqa: E402
 
 AXIS = "gpus"
 
@@ -167,12 +168,12 @@ class KDK:
 
     def open_step(self, state, acceleration, dt):
         return state.at[:, 0].set(
-            state[:, 0] + state[:, 1] * dt + 0.5 * acceleration * dt**2
+            drift_positions(state[:, 0], state[:, 1], acceleration, dt)
         )
 
     def close_step(self, state_open, acceleration, acceleration_new, dt):
         return state_open.at[:, 1].set(
-            state_open[:, 1] + 0.5 * (acceleration + acceleration_new) * dt
+            kick_velocities(state_open[:, 1], acceleration, acceleration_new, dt)
         )
 
 

@@ -25,6 +25,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jaccpot.runtime.fmm_state import drift_positions, kick_velocities  # noqa: E402
+
 pytest.importorskip("yggdrax.distributed.partition", reason="needs sfc_repartition")
 
 from jaccpot.distributed.segment import DirectMeshForce  # noqa: E402
@@ -54,12 +56,12 @@ class KDK:
 
     def open_step(self, state, acceleration, dt):
         return state.at[:, 0].set(
-            state[:, 0] + state[:, 1] * dt + 0.5 * acceleration * dt**2
+            drift_positions(state[:, 0], state[:, 1], acceleration, dt)
         )
 
     def close_step(self, state_open, acceleration, acceleration_new, dt):
         return state_open.at[:, 1].set(
-            state_open[:, 1] + 0.5 * (acceleration + acceleration_new) * dt
+            kick_velocities(state_open[:, 1], acceleration, acceleration_new, dt)
         )
 
 

@@ -18,8 +18,9 @@ with a force, every ``--score-every`` segments and the last edge.
 
 Precision axis (``--precision``): ``fp32`` (fp32 state and force, production),
 ``fp64state`` (fp64 state, fp32 force: plan U2 (b)), ``fp64`` (fp64 state and force:
-the lane's validation mode), ``anchored`` (A3's fp64 anchor per leaf + fp32 offsets;
-:data:`PRECISIONS` maps it to the runner setting once A3 lands).
+the lane's validation mode), ``legacy`` (the fp32 state with the drift evaluated left to
+right, ``GalaxySettings(drift_order="legacy")``: every run before A3; ``fp32`` drifts
+summed, the default since A3).
 
 ``--perturb dt=4|theta=0.95|tol=1e-2`` changes the run WITHOUT changing the recorded
 comparable config (it is recorded under ``perturbation``): a stand-in for a code
@@ -55,10 +56,10 @@ PRECISIONS: dict = {
     "fp32": ("float32", "fp32", {}),
     "fp64state": ("float64", "fp32", {}),
     "fp64": ("float64", "fp64", {}),
-    # A3 (wave 5): the fp64 anchor per leaf + fp32 offsets. Fill in its runner
-    # setting here when it lands (e.g. {"position_anchors": True}); until then the
-    # ladders' "anchored" rung is refused with this message.
-    "anchored": None,
+    # A3 (wave 5): the summed drift is the default (``fp32``); ``legacy`` is the
+    # fp32 state under the drift order before A3 (plan U2 became a drift-order fix,
+    # not anchors: docs/production_2026-11.md, A3)
+    "legacy": ("float32", "fp32", {"drift_order": "legacy"}),
 }
 
 
@@ -107,7 +108,7 @@ def build_runner(
     Raises
     ------
     NotImplementedError
-        For the ``anchored`` precision before A3 lands.
+        For a precision whose :data:`PRECISIONS` entry is ``None`` (a slot).
     """
     import jax
 
@@ -123,8 +124,8 @@ def build_runner(
     prec = PRECISIONS[run["precision"]]
     if prec is None:
         raise NotImplementedError(
-            "precision 'anchored' is A3's anchored state: set its runner setting in "
-            "bench/accuracy/suite.py PRECISIONS once A3 lands"
+            f"precision {run['precision']!r} has no runner setting yet "
+            "(bench/accuracy/suite.py PRECISIONS)"
         )
     state_dtype, working, extra = prec
     on_cpu = jax.default_backend() == "cpu"
@@ -542,8 +543,8 @@ def cmd_run(a: argparse.Namespace) -> int:
         num_steps,
         mesh,
     )
-    if exec_cfg["precision"] == "anchored" and PRECISIONS["anchored"] is None:
-        _log("precision 'anchored' (A3) is not available yet: rung skipped")
+    if PRECISIONS[exec_cfg["precision"]] is None:
+        _log(f"precision {exec_cfg['precision']!r} is not available yet: rung skipped")
         return 3
     solver, runner, state_dtype = build_runner(cfg, exec_cfg, mesh, callbacks=(probe,))
     if a.dry_run:

@@ -111,6 +111,7 @@ from jaccpot.distributed.fused import AXIS_NAME, reduce_flag_across_mesh
 from jaccpot.distributed.multiprocess import host_copy as mp_host_copy
 from jaccpot.distributed.multiprocess import host_value, mesh_sum, put_host_copy
 from jaccpot.runtime.dtypes import require_x64
+from jaccpot.runtime.fmm_state import check_drift_order
 from jaccpot.scheme import scheme_close_shard, scheme_open_shard
 
 __all__ = [
@@ -538,7 +539,9 @@ def _total_acceleration(
     return jnp.where(live_rows[:, None], acc, jnp.zeros((), acc.dtype))
 
 
-def _tail_drifted(tail_state: Array, tail_acc: Array, dt: Array) -> Array:
+def _tail_drifted(
+    tail_state: Array, tail_acc: Array, dt: Array, drift_order: str = "summed"
+) -> Array:
     """The escaper tail's drift, the bound rows' association (one device).
 
     Parameters
@@ -549,13 +552,19 @@ def _tail_drifted(tail_state: Array, tail_acc: Array, dt: Array) -> Array:
         ``(cap_e, 3)`` its total acceleration.
     dt : Array
         The step.
+    drift_order : str
+        :func:`jaccpot.runtime.fmm_state.drift_positions`'s order.
 
     Returns
     -------
     Array
         ``(cap_e, 2, 3)`` at the drifted positions.
     """
-    position = tail_state[:, 0] + tail_state[:, 1] * dt + 0.5 * tail_acc * dt**2
+    from jaccpot.runtime.fmm_state import drift_positions
+
+    position = drift_positions(
+        tail_state[:, 0], tail_state[:, 1], tail_acc, dt, drift_order
+    )
     return tail_state.at[:, 0].set(position)
 
 
@@ -1021,6 +1030,11 @@ class MeshSegmentRunner:
         replaces the drift and the kick of every segment step on each device's
         rows (:func:`jaccpot.scheme.check_mesh_scheme`: rowwise, or with a mesh
         form). Its ``key()`` joins the segment programs' compile keys.
+    drift_order : str
+        The built-in drift's order, the escaper tail's too
+        (:func:`jaccpot.runtime.fmm_state.drift_positions`): ``"summed"`` (the
+        default since A3) or ``"legacy"`` (the bitwise path to runs before A3;
+        joins the compile keys).
 
     Raises
     ------
@@ -1044,6 +1058,7 @@ class MeshSegmentRunner:
         migration_cap: Any = "auto",
         splitters: Any = None,
         scheme: Any = None,
+        drift_order: str = "summed",
     ) -> None:
         from jaccpot.distributed.rollout import _mesh_devices
         from jaccpot.scheme import check_mesh_scheme
@@ -1059,6 +1074,9 @@ class MeshSegmentRunner:
         self.force = force
         #: the integration scheme (``None``: the built-in KDK expressions)
         self.scheme = check_mesh_scheme(scheme)
+        #: the built-in drift's order (``jaccpot.runtime.fmm_state.DRIFT_ORDERS``);
+        #: the escaper tail's too
+        self.drift_order = check_drift_order(drift_order)
         #: mac_type='dehnen_error': f_b rides the carry (the force says so)
         self.scale_carry = bool(getattr(force, "scale_carry", False))
         self.external_acceleration_fn = external_acceleration_fn
@@ -1135,6 +1153,7 @@ class MeshSegmentRunner:
         migrate: bool = False,
         migration_cap: Any = "auto",
         scheme: Any = None,
+        drift_order: str = "summed",
     ) -> "MeshSegmentRunner":
         """A runner on the fused lane's force (the template route).
 
@@ -1180,6 +1199,8 @@ class MeshSegmentRunner:
             As in the constructor.
         scheme : Any
             As in the constructor.
+        drift_order : str
+            As in the constructor.
 
         Returns
         -------
@@ -1219,6 +1240,7 @@ class MeshSegmentRunner:
             migrate=migrate,
             migration_cap=migration_cap,
             scheme=scheme,
+            drift_order=drift_order,
         )
 
     # ------------------------------------------------------------------
@@ -1314,6 +1336,12 @@ class MeshSegmentRunner:
                 ()
                 if self.scheme is None or kind != "segment"
                 else (("scheme", self.scheme.key()),)
+            ),
+            # the built-in drift's order: no part for the default (keys as before)
+            *(
+                ()
+                if getattr(self, "drift_order", "summed") == "summed"
+                else (("drift", self.drift_order),)
             ),
         )
         # the escaper tail: its programs only while it holds an escaper (the key
@@ -1484,7 +1512,10 @@ class MeshSegmentRunner:
             dt, params) -> (state, acceleration, f_b, ok, bits, needs, done)``,
             ``f_b`` donated with the state.
         """
-        from jaccpot.runtime.fmm_state import _velocity_verlet_kick_drifted
+        from jaccpot.runtime.fmm_state import (
+            _velocity_verlet_kick_drifted,
+            drift_positions,
+        )
         from jaccpot.runtime.fused_topology import overflow_ok
 
         # locals, not ``self`` (see _build_start)
@@ -1498,6 +1529,7 @@ class MeshSegmentRunner:
         coupling_G = self.coupling_G if tail else None
         nfb = 1 if scale_carry else 0
         scheme = getattr(self, "scheme", None)  # a stand-in runner has none
+        drift_order = getattr(self, "drift_order", "summed")
 
         def segment(
             state0: Array,
@@ -1522,8 +1554,8 @@ class MeshSegmentRunner:
                 state_now, acc_now, ok, bits, needs, done = carry[:6]
                 # strict_run_v2's `_advance`: drift, force, kick of the drifted state
                 if scheme is None:
-                    position_new = (
-                        state_now[:, 0] + state_now[:, 1] * dt + 0.5 * acc_now * dt**2
+                    position_new = drift_positions(
+                        state_now[:, 0], state_now[:, 1], acc_now, dt, drift_order
                     )
                     state_position = state_now.at[:, 0].set(position_new)
                 else:
@@ -1542,7 +1574,9 @@ class MeshSegmentRunner:
                 if tail_rows:
                     assert coupling_G is not None
                     tail_now, tail_acc_now = carry[6 + nfb :]
-                    tail_position = _tail_drifted(tail_now, tail_acc_now, dt)
+                    tail_position = _tail_drifted(
+                        tail_now, tail_acc_now, dt, drift_order
+                    )
                     acc_self, tail_acc_new = _with_coupling(
                         acc_self,
                         state_position[:, 0, :],
@@ -1557,7 +1591,7 @@ class MeshSegmentRunner:
                     )
                     tail_next = (
                         _velocity_verlet_kick_drifted(
-                            tail_position, tail_acc_now, tail_acc_new, dt
+                            tail_position, tail_acc_now, tail_acc_new, dt, drift_order
                         ),
                         tail_acc_new,
                     )
@@ -1566,7 +1600,7 @@ class MeshSegmentRunner:
                 )
                 if scheme is None:
                     state_new = _velocity_verlet_kick_drifted(
-                        state_position, acc_now, acc_new, dt
+                        state_position, acc_now, acc_new, dt, drift_order
                     )
                 else:
                     state_new = scheme_close_shard(
@@ -1733,7 +1767,10 @@ class MeshSegmentRunner:
             flat and donated, the rest replicated.
         """
         from jaccpot.distributed.migration import migrate_shard
-        from jaccpot.runtime.fmm_state import _velocity_verlet_kick_drifted
+        from jaccpot.runtime.fmm_state import (
+            _velocity_verlet_kick_drifted,
+            drift_positions,
+        )
         from jaccpot.runtime.fused_topology import overflow_ok
 
         # locals, not ``self`` (see _build_start)
@@ -1749,6 +1786,7 @@ class MeshSegmentRunner:
         coupling_G = self.coupling_G if tail else None
         nfb = 1 if scale_carry else 0
         scheme = getattr(self, "scheme", None)  # a stand-in runner has none
+        drift_order = getattr(self, "drift_order", "summed")
 
         def segment(
             state0: Array,
@@ -1771,8 +1809,8 @@ class MeshSegmentRunner:
                 ok, bits, needs, done, need_m, moved_m = carry[5:11]
                 fb_now = carry[11] if scale_carry else None
                 if scheme is None:
-                    position_new = (
-                        state_now[:, 0] + state_now[:, 1] * dt + 0.5 * acc_now * dt**2
+                    position_new = drift_positions(
+                        state_now[:, 0], state_now[:, 1], acc_now, dt, drift_order
                     )
                     state_position = state_now.at[:, 0].set(position_new)
                 else:
@@ -1815,7 +1853,9 @@ class MeshSegmentRunner:
                 if tail_rows:
                     assert coupling_G is not None
                     tail_now, tail_acc_now = carry[11 + nfb :]
-                    tail_position = _tail_drifted(tail_now, tail_acc_now, dt)
+                    tail_position = _tail_drifted(
+                        tail_now, tail_acc_now, dt, drift_order
+                    )
                     acc_self, tail_acc_new = _with_coupling(
                         acc_self,
                         state_position[:, 0, :],
@@ -1830,7 +1870,7 @@ class MeshSegmentRunner:
                     )
                     tail_next = (
                         _velocity_verlet_kick_drifted(
-                            tail_position, tail_acc_now, tail_acc_new, dt
+                            tail_position, tail_acc_now, tail_acc_new, dt, drift_order
                         ),
                         tail_acc_new,
                     )
@@ -1839,7 +1879,7 @@ class MeshSegmentRunner:
                 )
                 if scheme is None:
                     state_new = _velocity_verlet_kick_drifted(
-                        state_position, acc_now, acc_new, dt
+                        state_position, acc_now, acc_new, dt, drift_order
                     )
                 else:
                     state_new = scheme_close_shard(

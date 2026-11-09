@@ -228,6 +228,8 @@ def test_the_settings_are_the_production_ones():
         adaptive_eps=1e-4,
         carry="particles",
         precision="fp32",
+        # A3: the summed drift (x + dt (v + 0.5 dt a)); "legacy" is the order before A3
+        drift_order="summed",
     )
     with pytest.raises(dataclasses.FrozenInstanceError):
         GALAXY_SETTINGS.theta = 0.6  # type: ignore[misc]

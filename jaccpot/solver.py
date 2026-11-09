@@ -1916,7 +1916,7 @@ class FastMultipoleMethod:
     def strict_run_v2(
         self: "FastMultipoleMethod",
         *,
-        state: Float[Array, "n 2 3"],
+        state: Float[Array, "n r 3"],
         masses: Float[Array, "n"],
         dt: Union[float, Array],
         num_steps: int,
@@ -1944,6 +1944,7 @@ class FastMultipoleMethod:
         carry_total_acceleration: bool = False,
         scheme: Any = None,
         live_rows: Optional[int] = None,
+        drift_order: Literal["summed", "legacy"] = "summed",
     ) -> tuple[Array, Optional[Any], Optional[Array]]:
         """Strict V2 segmented runner with raw tensor API.
 
@@ -1960,9 +1961,11 @@ class FastMultipoleMethod:
 
         Parameters
         ----------
-        state : Float[Array, 'n 2 3']
+        state : Float[Array, 'n r 3']
             Packed integrator state ``[N, 2, 3]``: positions and velocities
-            stacked on axis 1.
+            stacked on axis 1. A ``scheme`` may carry more rows after them
+            (:class:`jaccpot.position_precision.CompensatedKDK`: ``[N, 3, 3]`` /
+            ``[N, 4, 3]``); rows 0 and 1 stay the positions and velocities.
         masses : Float[Array, 'n']
             Particle masses ``[N]``.
         dt : Union[float, Array]
@@ -2056,6 +2059,12 @@ class FastMultipoleMethod:
             ``ProductionRunner(escapers=...)`` passes) -- the first ``n_b`` rows are
             the tree, the rest escapers on the tree rows' monopole (see the impl
             docstring).
+        drift_order : Literal["summed", "legacy"]
+            The built-in drift's evaluation order (multi-node plan A3):
+            ``"summed"`` (the default) is ``x + dt (v + 0.5 dt a)``, one rounding
+            of ``x`` per step; ``"legacy"`` is ``x + v dt + 0.5 a dt**2`` left to
+            right, the bitwise path to runs before A3. Not with a ``scheme`` (its
+            ``open_step`` is the drift).
 
         Returns
         -------
@@ -2092,6 +2101,7 @@ class FastMultipoleMethod:
             carry_total_acceleration=bool(carry_total_acceleration),
             scheme=scheme,
             live_rows=None if live_rows is None else int(live_rows),
+            drift_order=str(drift_order),
         )
 
     def strict_fused_prepared_eval_fn(
