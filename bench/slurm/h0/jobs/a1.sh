@@ -7,6 +7,7 @@
 # shellcheck source=_prologue.sh
 source "$H0_JACCPOT/bench/slurm/h0/jobs/_prologue.sh"
 h0_need_preflight a1
+h0_with_cpu_platform
 export ROWS=${ROWS:-'^((stall|merger)_(net|floor|geo07)|err_.*)$'}
 if [ "${SMOKE:-}" = 1 ]; then
   # a tiny restart of the production runner (dehnen_error, the galaxy settings), one row per pattern

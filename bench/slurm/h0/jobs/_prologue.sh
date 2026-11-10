@@ -43,3 +43,8 @@ h0_tiny_restart() {
     --runner-restart-at 3 --out "$1.json" > "$1.log" 2>&1 || { echo "h0_tiny_restart: failed (see $1.log)" >&2; return 1; }
   [ -s "$1" ] || { echo "h0_tiny_restart: no restart written (see $1.log)" >&2; return 1; }
 }
+# h0_with_cpu_platform: the stall bench's build probe is a jax.debug.callback, which needs a CPU device: keep
+# "cpu" in JAX_PLATFORMS when the caller narrowed it (unset, jax lists every platform)
+h0_with_cpu_platform() {
+  case ",${JAX_PLATFORMS:-}," in ,,|*,cpu,*) ;; *) export JAX_PLATFORMS=$JAX_PLATFORMS,cpu ;; esac
+}

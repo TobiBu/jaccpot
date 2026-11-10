@@ -131,7 +131,8 @@ else
   skip_entry mesc "no data: $SGR_IC"
 fi
 if [ -s "$A1_BAR_RESTART" ] && [ -s "$A1_MERGER_RESTART" ]; then
-  entry a1 env CUDA_VISIBLE_DEVICES="$FIRST_CARD" bash -c "$(declare -f a1_entry h0_tiny_restart); N=$N OUT=$OUT H0_PY=$H0_PY a1_entry"
+  entry a1 env CUDA_VISIBLE_DEVICES="$FIRST_CARD" bash -c "$(declare -f a1_entry h0_tiny_restart h0_with_cpu_platform); \
+    h0_with_cpu_platform; N=$N OUT=$OUT H0_PY=$H0_PY a1_entry"
 else
   skip_entry a1 "no data: the 1e8 restarts under $H0_DATA/big"
 fi
