@@ -28,6 +28,8 @@ source "$H0_DIR/site.env"
 # shellcheck source=pins.env
 source "$H0_DIR/pins.env"
 export H0_ROOT H0_ACCOUNT H0_PARTITION H0_GPUS_PER_NODE
+# the pins, for provenance.py
+export H0_YGGDRAX_COMMIT H0_NORNAX_COMMIT H0_MIMIRAX_COMMIT H0_ODISSEO_COMMIT H0_YGGDRAX_PRE104_FILE_COMMIT
 
 if [ -z "${H0_SKIP_MODULES:-}" ] && [ -n "${H0_MODULES:-}" ]; then
   # shellcheck disable=SC2086
