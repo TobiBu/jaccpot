@@ -65,15 +65,15 @@ skip_entry() {  # name reason
   echo "skipped ($2)" > "$OUT/status/$1"
   echo "--- preflight entry $1: skipped ($2)"
 }
-fwd_entry() {  # the forward job's program kinds, incl. the reverse (value_and_grad) and the demonstrator
+fwd_entry() {  # the forward job's program kinds, incl. the reverse (value_and_grad; GPU only) and the demonstrator
   local T=bench/forward_mode_timing.py D=bench/forward_mode_demonstrator.py X=()
   [ "${SMOKE:-}" = 1 ] && X=(--cpu-interpret)
   env XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 "$H0_PY" $T "${X[@]}" --n "$N" \
     --steps 2 --program jacfwd --k 2 --reps 1 --out "$OUT/forward/jacfwd.json" \
     && env XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 JACCPOT_FORWARD_TANGENT_GROUP=1 \
       "$H0_PY" $T "${X[@]}" --n "$N" --steps 2 --program jacfwd --k 2 --reps 1 --out "$OUT/forward/group.json" \
-    && env XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 "$H0_PY" $T "${X[@]}" --n "$N" \
-      --steps 2 --program vgrad --reps 1 --out "$OUT/forward/vgrad.json" \
+    && { [ "${SMOKE:-}" = 1 ] || env XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 "$H0_PY" $T \
+      --n "$N" --steps 2 --program vgrad --reps 1 --out "$OUT/forward/vgrad.json"; } \
     && env XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 "$H0_PY" $D "${X[@]}" --n "$N" \
       --check --steps 2 --out "$OUT/forward/demo.json"
 }
@@ -92,7 +92,10 @@ entry pins env DCE_PINS_SMOKE_N=$((N < 8192 ? 8192 : N)) "$H0_PY" bench/dce_pins
 entry scaling env SMOKE_N=$N TIERS=weak REPS=1 OUT="$OUT/scaling" bash bench/slurm/multigpu_scaling.sbatch
 entry scaling_mp env SMOKE_N=$N TIERS=mp REPS=1 MATRIX_ROWS='^mp_(P8e6_de_1c_sp|P8e6_de_[24]c_mp|D2.5e7_de_[24]c_(sp|mp))_a$' \
   OUT="$OUT/scaling_mp" bash bench/slurm/multigpu_scaling.sbatch
-entry grad env SMOKE_N=$N H0_SMOKE_INTERPRET=all ROWS='^(s8_8e6|r_8e6_T1_fwd|r_8e6_T1_grad_step|r_8e6_T16_grad_nested|r_8e6_T1_grad_offload)$' PY="$H0_PY" OUT="$OUT/grad" \
+# the rollout gradient's step / nested modes: on the GPU only (their XLA:CPU compiles need 50-156 GB, track H0)
+GRAD_ROWS='^(s8_8e6|r_8e6_T1_fwd|r_8e6_T1_grad_step|r_8e6_T16_grad_nested|r_8e6_T1_grad_offload)$'
+[ "${SMOKE:-}" = 1 ] && GRAD_ROWS='^(s8_8e6|r_8e6_T1_fwd)$'
+entry grad env SMOKE_N=$N H0_SMOKE_INTERPRET=all ROWS="$GRAD_ROWS" PY="$H0_PY" OUT="$OUT/grad" \
   bash bench/slurm/grad_rollout_timing.sbatch
 entry s1b env SIZES=$N REPS=1 INNER=1 OUT="$OUT/s1b" bash bench/slurm/s1b_mosaic_l2p.sbatch
 entry auto env H0_SMOKE_INTERPRET=all CUDA_VISIBLE_DEVICES="$FIRST_CARD" XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 \
