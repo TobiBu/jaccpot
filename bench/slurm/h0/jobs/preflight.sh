@@ -102,7 +102,10 @@ entry auto env H0_SMOKE_INTERPRET=all CUDA_VISIBLE_DEVICES="$FIRST_CARD" XLA_PYT
   "$H0_PY" "$H0_MIMIRAX/bench/s10_fused_shooting.py" --task timing --n "$((N < 20000 ? N : 20000))" --steps 5 \
   --reps 1 --segments 2 --only seggrad --start-force adjoint --cell-min-level auto --out "$OUT/auto_seg.json"
 entry forward env CUDA_VISIBLE_DEVICES="$FIRST_CARD" H0_SMOKE_INTERPRET=all bash -c "$(declare -f fwd_entry); N=$N OUT=$OUT SMOKE=${SMOKE:-} H0_PY=$H0_PY fwd_entry"
-entry mgrad env SMOKE_N=$N REPS=1 MAX_CARDS="$GPN" H0_SMOKE_INTERPRET=all ROWS='^(weak_P2e5pc_(solo|2c|4c)|check_P_s0_2c)$' \
+# the smoke: an XLA:CPU gradient compile outlasts the matrix's 1 h row timeout on a loaded host
+MGRAD_TIMEOUT=
+[ "${SMOKE:-}" = 1 ] && MGRAD_TIMEOUT=14400
+entry mgrad env SMOKE_N=$N REPS=1 MAX_CARDS="$GPN" ROW_TIMEOUT="$MGRAD_TIMEOUT" H0_SMOKE_INTERPRET=all ROWS='^(weak_P2e5pc_(solo|2c|4c)|check_P_s0_2c)$' \
   PY="$H0_PY" OUT="$OUT/mgrad" bash bench/slurm/multigpu_grad.sbatch
 entry a3 env CUDA_VISIBLE_DEVICES="$FIRST_CARD" "$H0_PY" bench/fused_memory_budget.py --n "$N" --caps unnamed --prealloc 0.88 \
   --no-analysis --ic plummer_clipped --skip-eval --steps 4 --reps 1 --runner --mac-type dehnen_error --adaptive-eps 1e-4 \
