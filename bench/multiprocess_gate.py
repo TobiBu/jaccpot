@@ -11,7 +11,9 @@ One entry point for both arms, launched by SLURM (``bench/slurm/m2g/``) or by ha
   one card takes that card (``multiprocess.slurm_bound_device_ids``). Each
   process passes only its id range (``ProcessLocalParticles``).
 
-Both build the same Plummer sphere (``--n-per-gpu`` per card, seeded), the
+Both build the same Plummer sphere (``--n-per-gpu`` per card, seeded; or, with
+``--ic disc``, a prefix of the 25M disc + bulge IC ``--disc-ic`` at ``--n`` particles,
+its masses rescaled, as ``bench/multigpu_segment_gate.py`` takes it), the
 production preset (``galaxy``: leaf 64, p6, ``dehnen_error`` at 1e-4; ``--mac
 dehnen`` for the other MAC), migration on, a repartition before every segment
 after the first, the energy at every edge, and run it ``--repeats`` times in the
@@ -61,12 +63,34 @@ def _args() -> argparse.Namespace:
     run.add_argument("--arm", choices=("sp", "mp"), required=True)
     run.add_argument("--out", required=True)
     run.add_argument("--n-per-gpu", type=float, default=2e6)
+    run.add_argument("--ic", choices=("plummer", "disc"), default="plummer")
+    run.add_argument(
+        "--n",
+        type=float,
+        default=None,
+        help="total particles (default: --n-per-gpu times the devices); --ic disc needs it",
+    )
+    run.add_argument(
+        "--disc-ic",
+        default=os.environ.get(
+            "DISC_IC", "/export/scratch/tbuck/odisseo_ic/disk_bulge_25m.npz"
+        ),
+        help="--ic disc: the 25M disc + bulge .npz (state0, mass, G_code, rdisk_code)",
+    )
+    run.add_argument(
+        "--softening",
+        type=float,
+        default=None,
+        help="default: 1e-3 (Plummer), the disc formula 0.5 rdisk / sqrt(N / 1e5) (disc)",
+    )
     run.add_argument(
         "--mac", choices=("dehnen_error", "dehnen"), default="dehnen_error"
     )
     run.add_argument("--segments", type=int, default=3)
     run.add_argument("--steps", type=int, default=4, help="steps per segment")
-    run.add_argument("--dt", type=float, default=2e-3)
+    run.add_argument(
+        "--dt", type=float, default=None, help="default 2e-3 (Plummer), 5e-4 (disc)"
+    )
     run.add_argument("--repeats", type=int, default=2)
     run.add_argument("--no-migrate", action="store_true")
     run.add_argument("--deterministic", action="store_true")
@@ -139,7 +163,27 @@ def _plummer(num: int, seed: int) -> tuple:
     return draw(num, seed)
 
 
-def _runner(mesh):
+def _disc(num: int) -> tuple:
+    """``(state, mass, G, softening)``: a prefix of the shuffled disc + bulge IC.
+
+    As ``bench/multigpu_segment_gate.py`` takes it: the first ``num`` rows, their
+    masses times ``N_all / num`` (the same galaxy), ``G_code``, and the softening
+    formula ``0.5 rdisk / sqrt(num / 1e5)`` unless ``--softening`` is given.
+    """
+    with np.load(ARGS.disc_ic) as ic:
+        n_all = int(ic["state0"].shape[0])
+        if num > n_all:
+            raise SystemExit(f"--n {num} > the disc IC's {n_all} rows")
+        state = np.asarray(ic["state0"][:num], np.float32)
+        mass = np.asarray(ic["mass"][:num], np.float64) * (n_all / num)
+        g = float(ic["G_code"]) if "G_code" in ic.files else 1.0
+        soft = float(0.5 * float(ic["rdisk_code"]) / np.sqrt(num / 1e5))
+    if ARGS.softening is not None:
+        soft = ARGS.softening
+    return state, mass.astype(np.float32), g, soft
+
+
+def _runner(mesh, g: float = 1.0, softening: float = 1e-3):
     import dataclasses
 
     from jaccpot import FastMultipoleMethod
@@ -152,14 +196,14 @@ def _runner(mesh):
     )
 
     if ARGS.mac == "dehnen_error":
-        solver = FastMultipoleMethod(preset="galaxy", G=1.0, softening=1e-3)
+        solver = FastMultipoleMethod(preset="galaxy", G=g, softening=softening)
         settings = GALAXY_SETTINGS
     else:
         base = FastMultipoleMethod(preset="galaxy").advanced
         solver = FastMultipoleMethod(
             preset="galaxy",
-            G=1.0,
-            softening=1e-3,
+            G=g,
+            softening=softening,
             advanced=dataclasses.replace(base, mac_type="dehnen"),
         )
         settings = GalaxySettings(mac_type="dehnen", adaptive_eps=None)
@@ -187,7 +231,10 @@ def run() -> None:
     me = jax.process_index()
     mesh = mp.global_mesh()
     ndev = int(np.asarray(mesh.devices).size)
-    num = int(ARGS.n_per_gpu) * ndev
+    num = int(ARGS.n) if ARGS.n is not None else int(ARGS.n_per_gpu) * ndev
+    if ARGS.ic == "disc" and ARGS.n is None:
+        raise SystemExit("--ic disc needs --n (the total particle count)")
+    dt = ARGS.dt if ARGS.dt is not None else (5e-4 if ARGS.ic == "disc" else 2e-3)
     record: dict = {
         "arm": ARGS.arm,
         "process": me,
@@ -198,15 +245,21 @@ def run() -> None:
         "env": {k: os.environ.get(k) for k in _SLURM_KEYS},
         "xla_flags": os.environ.get("XLA_FLAGS"),
         "num_particles": num,
+        "ic": ARGS.ic,
         "mac": ARGS.mac,
         "segments": ARGS.segments,
         "steps": ARGS.steps,
-        "dt": ARGS.dt,
+        "dt": dt,
         "smi_before": _smi(),
         "runs": [],
     }
     t0 = time.perf_counter()
-    state, mass = _plummer(num, seed=11)
+    if ARGS.ic == "disc":
+        state, mass, g, soft = _disc(num)
+    else:
+        state, mass = _plummer(num, seed=11)
+        g, soft = 1.0, (1e-3 if ARGS.softening is None else ARGS.softening)
+    record.update(G=g, softening=soft)
     if mp.is_multiprocess():
         lo, hi = mp.local_id_range(num, mesh)
         s, m = mp.ProcessLocalParticles(state[lo:hi], mass[lo:hi], num), None
@@ -214,10 +267,10 @@ def run() -> None:
         s, m = state, mass
     record["ic_s"] = time.perf_counter() - t0
     del state, mass
-    runner = _runner(mesh)
+    runner = _runner(mesh, g, soft)
     for repeat in range(ARGS.repeats):
         begun = time.perf_counter()
-        res = runner.run(s, m, dt=ARGS.dt, num_steps=ARGS.steps * ARGS.segments)
+        res = runner.run(s, m, dt=dt, num_steps=ARGS.steps * ARGS.segments)
         wall = time.perf_counter() - begun
         record["runs"].append(
             {

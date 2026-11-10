@@ -112,6 +112,18 @@ def _args(argv=None) -> argparse.Namespace:
         "--retry-failed", action="store_true", help="rerun rows that ran and failed"
     )
     p.add_argument("--summary", action="store_true", help="only rebuild SUMMARY.md")
+    p.add_argument(
+        "--smoke-n",
+        type=int,
+        default=None,
+        help="a smoke test of the rows' commands: every row at this N (rows that then "
+        "coincide run once; bench/slurm/h0)",
+    )
+    p.add_argument(
+        "--rows",
+        default=None,
+        help="a regex: only the rows whose tag matches (the bundle's preflight)",
+    )
     return p.parse_args(argv)
 
 
@@ -141,7 +153,7 @@ def matrix(args: argparse.Namespace, ncards: int) -> tuple[list[dict], dict]:
             return
         solo = "solo" in extra
         gate = ["--mode", "solo" if solo else "mesh", "--ndev", "1" if solo else str(k)]
-        gate += ["--ic", ic, "--n", str(int(n))]
+        gate += ["--ic", ic, "--n", str(int(args.smoke_n or n))]
         gate += list(preset if base is None else base)
         gate += ["--reps", str(reps or args.reps)]
         if ic == "disc" and args.disc_ic:
@@ -152,6 +164,8 @@ def matrix(args: argparse.Namespace, ncards: int) -> tuple[list[dict], dict]:
             aliases[tag] = seen[key]
             return
         seen[key] = tag
+        if args.rows and not re.search(args.rows, tag):
+            return
         rows.append(dict(tag=tag, tier=tier, cards=k, gate_args=gate, env=env or {}))
 
     if "weak" in tiers:
