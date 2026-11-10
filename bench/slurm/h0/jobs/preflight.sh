@@ -84,6 +84,7 @@ a1_entry() {  # a tiny restart, then the stall bench on it (the restore rows' al
 }
 a4_entry() {  # one shrunk rung of a sphere ladder (no IC needed), as a4's tasks run it
   local cmd
+  export A4_PY=$H0_PY   # the rung's command line names $A4_PY (bench/slurm/a4/_prologue.sh exports it)
   cmd=$(A4_SMOKE=1 "$H0_PY" -m bench.accuracy.suite ladder plummer_n --tier horeka-1card --root "$OUT/a4" --index 0) \
     && A4_SMOKE=1 eval "$cmd"
 }
