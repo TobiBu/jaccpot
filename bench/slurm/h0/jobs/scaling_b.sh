@@ -5,6 +5,9 @@
 source "$H0_JACCPOT/bench/slurm/h0/jobs/_prologue.sh"
 h0_need_preflight scaling
 export TIERS=ab REPS=${REPS:-2}
-if [ "${SMOKE:-}" = 1 ]; then export SMOKE_N=2048 REPS=1; fi
+if [ "${SMOKE:-}" = 1 ]; then
+  # one MAC: the geometric rows differ from these in --mac alone (the other jobs' smokes run it)
+  export SMOKE_N=2048 REPS=1 MATRIX_ROWS=${MATRIX_ROWS:-'^ab_.*_de_[24]c_(on|off)_a$'}
+fi
 OUT=$OUT/matrix bash bench/slurm/multigpu_scaling.sbatch
 h0_done
