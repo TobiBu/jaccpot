@@ -11,7 +11,7 @@
 # theta 0.7, the Sgr production run's; and the galaxy preset's dehnen_error), 6 segments x 10 steps,
 # energy at every edge; plus the escaper row with the energy every 10th edge (the edge cost without
 # the per-edge energy). Step time, edge time, peak bytes per card.
-export MESC_JOB=node1
+export MESC_JOB=${MESC_JOB:-node1}   # the HoreKa bundle's job sets mesc_node1
 # shellcheck source=_prologue.sh
 source "${MESC_JACCPOT:-$SLURM_SUBMIT_DIR}/bench/slurm/mesc/_prologue.sh"
 MP=(--ntasks="$GPN" --ntasks-per-node="$GPN" --cpus-per-task=$((CPN / GPN)) --gres=gpu:"$GPN")

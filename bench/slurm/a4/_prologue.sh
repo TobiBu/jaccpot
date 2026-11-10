@@ -21,6 +21,12 @@ export A4_PY A4_IC A4_OUT A4_RUN
 mkdir -p "$A4_OUT"
 cd "$A4_JACCPOT"
 echo "=== A4 ${A4_LADDER:-job} task ${SLURM_ARRAY_TASK_ID:-0} on $(hostname) $(date -Is) (slurm job ${SLURM_JOB_ID:-none})"
+# run as the HoreKa bundle's job "a4": stop at once when its preflight found the entry broken
+if [ -n "${A4_PREFLIGHT:-}" ] && [ -f "$A4_PREFLIGHT" ] && [ "$(cat "$A4_PREFLIGHT")" != ok ] \
+  && [ "${A4_TIER:-}" != summary ]; then
+  echo "A4: the bundle's preflight found entry a4 broken ($(cat "$A4_PREFLIGHT")); not spending the node" >&2
+  exit 3
+fi
 
 # a4_task LADDER TIER INDEX: one rung; skipped when its result exists (a resubmit resumes); then a
 # check against the baseline when A4_BASELINES has one. Exit 0 also for the A3 'anchored' slot (rc 3).

@@ -34,6 +34,8 @@
 # Compile times: leave JACCPOT_COMPILATION_CACHE_DIR UNSET for this job (a warm cache makes compile_s a cache
 # load); set CACHE=<dir> only to re-run rows whose compile you do not need.
 #
+# On HoreKa this runs as job "forward" of the bundle (bench/slurm/h0/README.md: one checkout, one setup, every job).
+#
 #SBATCH --job-name=jaccpot-forward-mode-timing
 #SBATCH --partition=accelerated
 #SBATCH --nodes=1
@@ -52,6 +54,9 @@ OUT=${OUT:-${WORKSPACE:-$HOME}/forward-mode-timing-$(date +%Y%m%d)}
 ROWS=${ROWS:-.}                                           # a regex over the row tags
 PY=${PY:-python}
 REPS=${REPS:-5}
+# SMOKE_N: every row at this N (bench/slurm/h0/submit_all.sh SMOKE=1, a CPU test of the commands); FWD_EXTRA:
+# arguments for every row (the smoke's --cpu-interpret)
+nn() { echo "${SMOKE_N:-$1}"; }
 if [ -n "${CACHE:-}" ]; then export JACCPOT_COMPILATION_CACHE_DIR=$CACHE; else unset JACCPOT_COMPILATION_CACHE_DIR; fi
 
 # one card of the exclusive node; the others stay idle
@@ -62,13 +67,13 @@ mkdir -p "$OUT/rows" "$OUT/logs"
 cd "$JACCPOT"
 git rev-parse HEAD > "$OUT/jaccpot_commit.txt" 2>/dev/null || true
 
-T=bench/forward_mode_timing.py
-D=bench/forward_mode_demonstrator.py
+T="bench/forward_mode_timing.py ${FWD_EXTRA:-}"
+D="bench/forward_mode_demonstrator.py ${FWD_EXTRA:-}"
 BFC="XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION=0.95"
 
 # tag | allocator env | script and arguments (the row's JSON is $OUT/rows/<tag>.json)
 ROW_LIST=()
-N=25000000
+N=$(nn 25000000)
 ROW_LIST+=(
   "t_2p5e7_forward|$BFC|$T --n $N --steps 16 --program forward --reps $REPS"
   "t_2p5e7_jvp|$BFC|$T --n $N --steps 16 --program jvp --reps $REPS"
@@ -88,14 +93,14 @@ ROW_LIST+=(
   "t_2p5e7_vgrad|$BFC|$T --n $N --steps 16 --program vgrad --reps $REPS"
   "tpp_2p5e7|$BFC|$T --n $N --tpp-sweep --tpp-k 8 --reps $REPS"
 )
-N=100000000
+N=$(nn 100000000)
 ROW_LIST+=(
   "t_1e8_forward|$BFC|$T --n $N --steps 16 --program forward --reps 3"
   "t_1e8_jvp|$BFC|$T --n $N --steps 16 --program jvp --reps 3"
   "t_1e8_jacfwd_k8_dpp1|$BFC|$T --n $N --steps 16 --program jacfwd --k 8 --directions-per-pass 1 --reps 2"
-  "demo_2p5e7_check_T4|$BFC|$D --n 25000000 --check --steps 4"
-  "demo_2p5e7_T200|$BFC|$D --n 25000000 --steps 200"
-  "demo_1e8_T200_dpp1|$BFC|$D --n 100000000 --steps 200 --directions-per-pass 1"
+  "demo_2p5e7_check_T4|$BFC|$D --n $(nn 25000000) --check --steps 4"
+  "demo_2p5e7_T200|$BFC|$D --n $(nn 25000000) --steps ${DEMO_STEPS:-200}"
+  "demo_1e8_T200_dpp1|$BFC|$D --n $(nn 100000000) --steps ${DEMO_STEPS:-200} --directions-per-pass 1"
 )
 
 for row in "${ROW_LIST[@]}"; do

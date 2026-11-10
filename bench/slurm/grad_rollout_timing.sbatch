@@ -30,6 +30,8 @@
 #                   T=16 offload inner 4 (cuda_async: BFC could not place its 25.9 GiB block beside the
 #                   outputs; that row's time includes the async allocator's own cost).
 #
+# On HoreKa this runs as job "grad" of the bundle (bench/slurm/h0/README.md: one checkout, one setup, every job).
+#
 #SBATCH --job-name=jaccpot-grad-rollout-timing
 #SBATCH --partition=accelerated
 #SBATCH --nodes=1

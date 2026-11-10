@@ -20,6 +20,8 @@
 #   err_*   mac_type dehnen_error at adaptive_eps 1e-4 (preset="galaxy"'s MAC)
 #   at N = 1e8 and 2.6e5 (2**18).
 #
+# On HoreKa this runs as job "a3" of the bundle (bench/slurm/h0/README.md: one checkout, one setup, every job).
+#
 #SBATCH --job-name=jaccpot-a3-position-precision
 #SBATCH --partition=accelerated
 #SBATCH --nodes=1
@@ -31,11 +33,13 @@
 
 set -euo pipefail
 
-# --- adapt: a python with jax 0.11.2 (CUDA 12), yggdrax main and THIS jaccpot checkout (the A3 branch)
+# --- adapt: a python with jax 0.11.2 (CUDA 12), yggdrax main and THIS jaccpot checkout (main: A3 merged)
 PY=${PY:-python}
 JACCPOT_A3=${JACCPOT_A3:-$PWD}
 OUT=${OUT:-${WORKSPACE:-$HOME}/a3-position-precision-$(date +%Y%m%d)}
 ROWS=${ROWS:-.}
+# SMOKE_N: every row at this N (bench/slurm/h0/submit_all.sh SMOKE=1, a CPU test of the commands)
+nn() { echo "${SMOKE_N:-$1}"; }
 
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES%%,*}
 export XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
@@ -51,7 +55,7 @@ ERR="--mac-type dehnen_error --adaptive-eps 1e-4"
 
 ROW_LIST=()
 for n in 1e8 2p6e5; do
-  case $n in 1e8) N=100000000 ;; 2p6e5) N=262144 ;; esac
+  case $n in 1e8) N=$(nn 100000000) ;; 2p6e5) N=$(nn 262144) ;; esac
   for mac in geo err; do
     case $mac in geo) M="" ;; err) M="$ERR" ;; esac
     for arm in legacy summed legacy_b summed_b; do

@@ -6,6 +6,10 @@
 #   sbatch bench/slurm/multigpu_scaling.sbatch                 # the whole matrix (~90 rows, hours)
 #   TIERS=ab,strong sbatch bench/slurm/multigpu_scaling.sbatch # a subset; a resubmission
 #                                                              # continues where the last stopped
+#   TIERS=mp ...                                               # N processes x 1 GPU vs 1 x N (srun steps:
+#                                                              # submit with --ntasks-per-node=4)
+# On HoreKa this runs as jobs "scaling_a", "scaling_b" and "scaling_mp" of the bundle (bench/slurm/h0/README.md).
+# MATRIX_ROWS: a regex over the row tags (the bundle's preflight and smoke).
 #SBATCH --job-name=jaccpot-mesh-scaling
 #SBATCH --partition=accelerated
 #SBATCH --nodes=1
@@ -35,6 +39,7 @@ python bench/multigpu_scaling_matrix.py \
     --reps "${REPS:-2}" \
     --disc-ic "$DISC_IC" \
     ${MEMORY_PER_CARD:+--memory-per-card "$MEMORY_PER_CARD"} \
+    ${MATRIX_ROWS:+--rows "$MATRIX_ROWS"} \
     ${SMOKE_N:+--smoke-n "$SMOKE_N"}     # SMOKE_N: bench/slurm/h0 (every row at that N)
 # the single-card timing pins on the same node, for the record's 1-card column:
 # python bench/dce_pins.py record --pins L1,L2,L3 --tag horeka-L --root "$OUT/pins"
