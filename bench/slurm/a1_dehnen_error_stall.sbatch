@@ -24,6 +24,17 @@
 #   err_<N>_<arm>      fused_memory_budget.py at the L sizes under dehnen_error, floor off and on: the floor's
 #                      own cost where it does not bind (8e6 clipped Plummer, 25M disc, 1e8 clipped Plummer)
 #
+# On HoreKa this runs as job "a1" of the bundle (bench/slurm/h0/README.md): A1 is merged, so the bundle runs the
+# net / floor / geo07 rows and the err rows from its one checkout (main) and leaves out the base arm (it needs a
+# pre-A1 checkout) and the L pins (job "pins" has them). stage_data.sh stages the restarts.
+#
+# Allocator of the restore rows (stall_*, merger_*): XLA_PYTHON_CLIENT_ALLOCATOR=cuda_async by default
+# (A1_RESTORE_ALLOC overrides; "bfc" = the BFC allocator, not preallocated, the old setting): A1 found that a 1e8
+# restore on BFC could not place the runner's 14.9 GiB temporary with the build probe on (both A1 and the frozen
+# run's code), and that cuda_async places it (docs/production_2026-11.md, section A1, "Restoring at 1e8"). The
+# row's time then includes the async allocator's own cost. The restarts were written before A3: the
+# continuation steps the summed drift (today's default) and the restore warns that the drift order differs.
+#
 # The restart files (copy them to $DATA first, ~4.7 GB each):
 #   /export/scratch/tbuck/bar-2026-10-31/stall_a/restart_3.npz          -> $DATA/bar_restart_3.npz
 #   /export/scratch/tbuck/merger-2026-10-31/s1_main/restart_final_136.npz -> $DATA/merger_restart_136.npz
@@ -39,8 +50,8 @@
 
 set -euo pipefail
 
-# --- adapt: pythons with jax 0.11.2 (CUDA 12) and yggdrax main; jaccpot main in PY_BASE's env, the A1 branch in
-# PY_A1's (JACCPOT_A1: that checkout, whose bench/ scripts both arms run)
+# --- adapt: pythons with jax 0.11.2 (CUDA 12) and yggdrax main; a pre-A1 jaccpot in PY_BASE's env, main (A1 merged)
+# in PY_A1's (JACCPOT_A1: that checkout, whose bench/ scripts both arms run)
 PY_BASE=${PY_BASE:-python}
 PY_A1=${PY_A1:-python}
 JACCPOT_A1=${JACCPOT_A1:-$PWD}
@@ -48,6 +59,15 @@ JACCPOT_BASE=${JACCPOT_BASE:-$JACCPOT_A1/../jaccpot-main}
 DATA=${DATA:-${WORKSPACE:-$HOME}/a1-data}
 OUT=${OUT:-${WORKSPACE:-$HOME}/a1-dehnen-error-stall-$(date +%Y%m%d)}
 ROWS=${ROWS:-.}
+# SMOKE_N: the err rows at this N (bench/slurm/h0/submit_all.sh SMOKE=1); STALL_RESTART / MERGER_RESTART: other
+# restart files (the smoke's tiny one); STALL_STEPS / MERGER_STEPS: the restore rows' steps
+nn() { echo "${SMOKE_N:-$1}"; }
+STALL_RESTART=${STALL_RESTART:-$DATA/bar_restart_3.npz}
+MERGER_RESTART=${MERGER_RESTART:-$DATA/merger_restart_136.npz}
+case ${A1_RESTORE_ALLOC:-cuda_async} in
+  bfc) RESTORE_ENV="XLA_PYTHON_CLIENT_PREALLOCATE=false" ;;
+  *) RESTORE_ENV="XLA_PYTHON_CLIENT_ALLOCATOR=${A1_RESTORE_ALLOC:-cuda_async} XLA_PYTHON_CLIENT_PREALLOCATE=false" ;;
+esac
 
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES%%,*}
 export XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
@@ -66,8 +86,8 @@ F="$JACCPOT_A1/bench/fused_memory_budget.py"
 ROW_LIST=()
 for case in stall merger; do
   case $case in
-    stall) R=$DATA/bar_restart_3.npz; K=10 ;;
-    merger) R=$DATA/merger_restart_136.npz; K=5 ;;
+    stall) R=$STALL_RESTART; K=${STALL_STEPS:-10} ;;
+    merger) R=$MERGER_RESTART; K=${MERGER_STEPS:-5} ;;
   esac
   ROW_LIST+=(
     "${case}_base|$PY_BASE|$S --restart $R --steps $K --arm error"
@@ -79,9 +99,9 @@ done
 ERR="--caps unnamed --prealloc 0.88 --no-analysis --mac-type dehnen_error --adaptive-eps 1e-4 --skip-eval --steps 4 --reps 3"
 for n in 8e6 2p5e7 1e8; do
   case $n in
-    8e6) N=8000000; IC="--ic plummer_clipped" ;;
-    2p5e7) N=25000000; IC="--ic disc --softening 1.5e-3 --softening-kernel ferrers3" ;;
-    1e8) N=100000000; IC="--ic plummer_clipped" ;;
+    8e6) N=$(nn 8000000); IC="--ic plummer_clipped" ;;
+    2p5e7) N=$(nn 25000000); IC="--ic disc --softening 1.5e-3 --softening-kernel ferrers3" ;;
+    1e8) N=$(nn 100000000); IC="--ic plummer_clipped" ;;
   esac
   ROW_LIST+=(
     "err_${n}_net|$PY_A1|$F --n $N $IC $ERR --env JACCPOT_STRICT_CARRY=particles --out $OUT/rows/err_${n}_net.json"
@@ -96,7 +116,8 @@ for row in "${ROW_LIST[@]}"; do
   echo "=== $tag $(date -Is)"
   case $tag in
     err_*) (cd "$OUT" && $py $args) > "$OUT/logs/$tag.log" 2>&1 || echo "FAILED $tag" ;;
-    *) (cd "$OUT" && $py $args --out "$OUT/rows/$tag.json") > "$OUT/logs/$tag.log" 2>&1 || echo "FAILED $tag" ;;
+    # shellcheck disable=SC2086
+    *) (cd "$OUT" && env $RESTORE_ENV $py $args --out "$OUT/rows/$tag.json") > "$OUT/logs/$tag.log" 2>&1 || echo "FAILED $tag" ;;
   esac
 done
 
