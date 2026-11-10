@@ -1,5 +1,8 @@
 # M1: momentum of the multi-GPU runner at scale, local vs cross part (prepared, not run)
 
+**On HoreKa these are jobs `m1_node1` and `m1_node2` of the bundle: `bench/slurm/h0/README.md` is the guide
+(`submit_all.sh --only m1_node1,m1_node2`). This file says what the arms measure.**
+
 Track M1 of the multi-node accuracy plan (`~/.claude/plans/multinode-accuracy-dev-plan.md`, jaccpot #173). The local
 record (`docs/production_2026-11.md`, `## M1`) found NO cross-domain momentum gap: every cross pair is evaluated on
 both of its devices from bitwise-identical shipped multipoles, centres and particles, as one card evaluates each of
@@ -14,12 +17,12 @@ H0's environment (`bench/slurm/h0/`: `site.env`, `setup_env.sh` once, `provenanc
 draw a bulge + disc IC themselves (seeded; `--ic plummer` for a Plummer sphere).
 
 ```bash
-bash bench/slurm/m1/submit.sh --dry-run
-bash bench/slurm/m1/submit.sh            # node1 and node2; or: submit.sh node1
+bash bench/slurm/h0/submit_all.sh --dry-run --only m1_node1,m1_node2
+bash bench/slurm/h0/submit_all.sh --only m1_node1,m1_node2      # bench/slurm/m1/submit.sh forwards here
 ```
 
-Results: `$H0_ROOT/m1/<run id>/<job>/SUMMARY.md` and every arm's `result.json`. Send back
-`tar czf m1.tgz -C $H0_ROOT/m1/<run id> .` (small).
+Results: `$H0_ROOT/runs/<run id>/m1_node1/SUMMARY.md` (and `m1_node2/`) and every arm's `result.json`;
+`collect.sh` puts them in the bundle's tarball.
 
 ## The jobs
 
