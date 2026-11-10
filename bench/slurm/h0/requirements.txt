@@ -1,6 +1,7 @@
-# H0 bundle: the exact Python packages of the local comparison venv (/export/scratch/tbuck/jax0112-venv,
-# pip freeze 2026-11-03), runtime packages only; equinox/diffrax/lineax/optimistix (nornax's) from the local
-# overlay the runs import them from. setup_env.sh installs them with --no-deps, then runs pip check.
+# HoreKa bundle: the exact Python packages of the local comparison venv (/export/scratch/tbuck/jax0112-venv,
+# pip freeze 2026-11-03; re-checked 2026-11-10 by H1: unchanged, and every sibling main's pyproject is
+# satisfied), runtime packages only; equinox/diffrax/lineax/optimistix (nornax's) from the local overlay the
+# runs import them from. setup_env.sh installs them with --no-deps, then runs pip check.
 absl-py==2.5.0
 beartype==0.22.9
 jax==0.11.2
