@@ -25,19 +25,34 @@ sources at ``M`` massless points instead, with the topology untouched:
    distance of the group's closest possible member. A node is used if it is accepted and every
    ancestor was rejected (pointer doubling over the parent array, so the
    criterion need not be monotone); a leaf whose ancestors were all rejected and
-   that is rejected itself is a near leaf. Dense over groups x nodes, chunked in
-   blocks of groups; the lists are compacted to the plan's fixed capacities.
+   that is rejected itself is a near leaf. The walk is dense over groups x nodes
+   (O(groups x nodes) work), run in blocks of groups sized so a block's masks fit
+   ``_WALK_BUDGET_BYTES``; each block's accepted pairs are scattered into FLAT
+   (group, node) far and (group, leaf) near lists at a running offset, whose
+   lengths are the plan's TOTAL capacities.
 4. **Far:** M2P per point -- M2L of the used nodes onto the point itself, L2P at
    zero offset (the lane's own real-basis operators); a local expansion about the
    group centre would add a group-radius truncation error to every contribution,
-   coherently, which eq (16a)'s per-interaction control does not bound. **Near:** the softened pair kernel of the
-   engine (:func:`~jaccpot.softening.masked_pair_factors`) over the near leaves'
-   particles; a point on top of a source gets the kernel's finite value.
+   coherently, which eq (16a)'s per-interaction control does not bound.
+   **Near:** the softened pair kernel of the engine
+   (:func:`~jaccpot.softening.masked_pair_factors`) over the near leaves'
+   particles; a point on top of a source gets the kernel's finite value. Both
+   run ``plan.pair_chunk`` pairs at a time and scatter-add into the points.
 
 Everything is traced and static-shaped: the :class:`TargetPlan` (group size,
-far/near capacities) is the only static input, so moving points recompile
-nothing. An overflow of either capacity is reported (``ok``, ``needs``), never
-silent; :func:`plan_target_points` sizes the capacities eagerly.
+total far/near capacities, chunk) is the only static input, so moving points
+recompile nothing. An overflow of either capacity is reported (``ok``,
+``needs``), never silent; :func:`plan_target_points` sizes the capacities
+eagerly.
+
+**Memory** is bounded by the flat lists (8 bytes per capacity entry), one walk
+block (``_WALK_BUDGET_BYTES``) and one chunk of evaluation temporaries
+(``pair_chunk x group_size`` M2P pairs of ~7 KB at p6, and as many near pairs x
+``leaf_cap`` slots of ~30 B) -- not by groups x the WORST group's needs. The first
+version gave every group the worst group's capacity: galaxy points next to a
+cluster needed ~1e3 cluster nodes, and 31,250 galaxy groups x 32 points x 1e3
+nodes x 7 KB asked for 14.9 GiB on an A100 (2026-11-11). The scatter-add makes the
+GPU sums order-nondeterministic at round-off (the CPU's are deterministic).
 
 Accuracy: the far field is M2P, so the error per accepted node is the
 multipole's own truncation, which the criterion bounds (eq 16a) or the opening
@@ -52,7 +67,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -77,6 +92,14 @@ _TINY = 1e-24
 class TargetPlan:
     """Static shapes of a target evaluation: a compile key, never traced.
 
+    The capacities are TOTALS over all groups -- the walk's accepted (group,
+    node) far pairs and (group, leaf) near pairs, compacted into flat lists --
+    so a few groups that need many pairs (points inside a dense source region)
+    do not make every group pay for them. Memory is bounded by
+    ``far_capacity + near_capacity`` index pairs, the walk's
+    ``group_block x nodes`` masks and one ``pair_chunk`` of evaluation
+    temporaries (:func:`target_memory_estimate`).
+
     Attributes
     ----------
     num_points : int
@@ -84,25 +107,35 @@ class TargetPlan:
     group_size : int
         Points per target group.
     far_capacity : int
-        Far (M2L) source nodes per group.
+        Total far (M2P) (group, node) pairs.
     near_capacity : int
-        Near (P2P) source leaves per group.
+        Total near (P2P) (group, leaf) pairs.
     group_block : int
-        Groups walked together (memory: ``group_block x nodes`` booleans).
+        Upper bound on the groups walked together; the evaluation lowers it so
+        the walk's masks stay within ``_WALK_BUDGET_BYTES`` (a large tree walks
+        one group at a time).
+    pair_chunk : int
+        Pairs evaluated together.
     """
 
     num_points: int
     group_size: int = 32
-    far_capacity: int = 256
-    near_capacity: int = 64
+    far_capacity: int = 4096
+    near_capacity: int = 1024
     group_block: int = 64
+    pair_chunk: int = 128
 
     def __post_init__(self) -> None:
-        for name in ("num_points", "group_size", "far_capacity", "near_capacity"):
+        for name in (
+            "num_points",
+            "group_size",
+            "far_capacity",
+            "near_capacity",
+            "group_block",
+            "pair_chunk",
+        ):
             if int(getattr(self, name)) < 1:
                 raise ValueError(f"TargetPlan.{name} must be >= 1")
-        if int(self.group_block) < 1:
-            raise ValueError("TargetPlan.group_block must be >= 1")
 
     @property
     def num_groups(self) -> int:
@@ -115,25 +148,31 @@ class TargetPlan:
         Parameters
         ----------
         needs : Any
-            ``(far, near)`` the largest counts a group needed.
+            ``(far, near)`` total pair counts an evaluation needed.
         headroom : float
             Multiplier on the needs.
 
         Returns
         -------
         TargetPlan
-            The same plan with capacities ``max(old, ceil8(need * headroom))``.
+            The same plan with capacities ``max(old, need * headroom)``, rounded
+            up to a multiple of ``pair_chunk``.
         """
         far, near = (int(v) for v in np.asarray(needs).reshape(-1)[:2])
+        chunk = int(self.pair_chunk)
         return dataclasses.replace(
             self,
-            far_capacity=max(int(self.far_capacity), _ceil8(far * headroom)),
-            near_capacity=max(int(self.near_capacity), _ceil8(near * headroom)),
+            far_capacity=max(int(self.far_capacity), _ceil_to(far * headroom, chunk)),
+            near_capacity=max(
+                int(self.near_capacity), _ceil_to(near * headroom, chunk)
+            ),
         )
 
 
 class TargetField(NamedTuple):
     """What a target evaluation returns (in the points' order and dtype).
+
+    ``needs`` are TOTALS over the groups (see :class:`TargetPlan`).
 
     Attributes
     ----------
@@ -146,7 +185,7 @@ class TargetField(NamedTuple):
         nodes as monopoles): the next evaluation's ``force_scale`` under
         ``dehnen_error`` (``None`` unless asked).
     needs : Array
-        ``int32 [2]``: the largest far / near count any group needed.
+        ``int32 [2]``: the total far / near pair counts the walk accepted.
     ok : Array
         Boolean scalar: both counts fit the plan (the result is then complete).
     """
@@ -158,20 +197,52 @@ class TargetField(NamedTuple):
     ok: Array
 
 
-def _ceil8(value: float) -> int:
-    """``value`` rounded up to a multiple of 8, at least 8.
+def _ceil_to(value: Union[int, float], multiple: int) -> int:
+    """``value`` rounded up to a multiple of ``multiple``, at least one multiple.
 
     Parameters
     ----------
-    value : float
+    value : Union[int, float]
         A count.
+    multiple : int
+        The granularity.
 
     Returns
     -------
     int
         The rounded count.
     """
-    return max(8, int(8 * math.ceil(float(value) / 8.0)))
+    m = max(1, int(multiple))
+    return max(m, int(m * math.ceil(float(value) / m)))
+
+
+#: bytes the walk's per-block masks may take (``group_block x nodes`` rows of a
+#: few words each): a large tree walks fewer groups at a time
+_WALK_BUDGET_BYTES = 256 * 2**20
+#: measured temporaries per (group, node) entry of the walk (``mem_new.py``)
+_WALK_BYTES_PER_ENTRY = 64
+
+
+def _walk_block(plan: "TargetPlan", nodes: int) -> int:
+    """Groups walked together: ``plan.group_block`` capped by the walk budget.
+
+    Parameters
+    ----------
+    plan : TargetPlan
+        The plan.
+    nodes : int
+        Source tree nodes.
+
+    Returns
+    -------
+    int
+        A power of two in ``[1, plan.group_block]``.
+    """
+    fit = max(1, _WALK_BUDGET_BYTES // max(1, int(nodes) * _WALK_BYTES_PER_ENTRY))
+    block = 1
+    while block * 2 <= min(int(plan.group_block), fit):
+        block *= 2
+    return block
 
 
 def target_mac_type(engine: Any, mac: Optional[str] = None) -> str:
@@ -460,18 +531,87 @@ def _walk_masks(
     return far, near
 
 
-def _evaluate_group(
+def _far_chunk(
     src: _SourceTables,
-    points: Array,
-    valid: Array,
-    threshold: Optional[Array],
+    groups: Array,
+    gvalid: Array,
+    grp: Array,
+    node: Array,
     *,
-    plan: TargetPlan,
-    mac: str,
-    theta: float,
-    theta_max: float,
-    floor: float,
     order: int,
+    G: float,
+    eps2_plummer: float,
+    want_scale: bool,
+) -> tuple[Array, Array, Array]:
+    """M2P of one chunk of (group, node) far pairs at the groups' points.
+
+    Parameters
+    ----------
+    src : _SourceTables
+        The source tree.
+    groups : Array
+        ``[groups, G, 3]`` the points.
+    gvalid : Array
+        ``[groups, G]`` live points.
+    grp : Array
+        ``[C]`` group per pair.
+    node : Array
+        ``[C]`` source node per pair (``nodes``: padding).
+    order : int
+        Expansion order.
+    G : float
+        Gravitational constant.
+    eps2_plummer : float
+        The Plummer-equivalent softening squared (eq 16b's monopole term).
+    want_scale : bool
+        Also eq (16b)'s force scale.
+
+    Returns
+    -------
+    tuple[Array, Array, Array]
+        ``[C, G, 3]`` acceleration, ``[C, G]`` potential, ``[C, G]`` force scale.
+    """
+    from jaccpot.operators.m2l_real_rot_scale import m2l_rot_scale_real_batch
+    from jaccpot.operators.real_p2m_l2p import evaluate_local_real_with_grad
+
+    dtype = src.radius.dtype
+    nodes = int(src.radius.shape[0])
+    chunk = int(grp.shape[0])
+    gsize = int(groups.shape[1])
+    pts = groups[grp]  # [C, G, 3]
+    live = (node < nodes)[:, None] & gvalid[grp]  # [C, G]
+    centres = src.centers[node]  # [C, 3]
+    deltas = pts - centres[:, None, :]
+    deltas = jnp.where(live[..., None], deltas, jnp.ones_like(deltas))
+    mult = jnp.broadcast_to(
+        src.multipoles[node][:, None, :], (chunk, gsize, src.multipoles.shape[1])
+    )
+    locals_ = m2l_rot_scale_real_batch(
+        mult.reshape(chunk * gsize, -1), deltas.reshape(chunk * gsize, 3), order=order
+    )
+    zero = jnp.zeros((3,), dtype)
+    grad, phi = jax.vmap(
+        lambda loc: evaluate_local_real_with_grad(loc, zero, order=int(order))
+    )(locals_)
+    gconst = jnp.asarray(G, dtype)
+    acc = jnp.where(live[..., None], -gconst * grad.reshape(chunk, gsize, 3), 0.0)
+    pot = jnp.where(live, -gconst * phi.reshape(chunk, gsize), 0.0)
+    scale = jnp.zeros((chunk, gsize), dtype)
+    if want_scale:
+        r2 = jnp.sum((pts - centres[:, None, :]) ** 2, axis=-1) + jnp.asarray(
+            eps2_plummer, dtype
+        )
+        scale = jnp.where(live, gconst * src.mass[node][:, None] / r2, 0.0)
+    return acc, pot, scale
+
+
+def _near_chunk(
+    src: _SourceTables,
+    groups: Array,
+    gvalid: Array,
+    grp: Array,
+    leaf: Array,
+    *,
     leaf_cap: int,
     G: float,
     soft_params: Array,
@@ -479,31 +619,21 @@ def _evaluate_group(
     eps2_plummer: float,
     want_potential: bool,
     want_scale: bool,
-) -> tuple[Array, Array, Array, Array]:
-    """One group's ``(acc [G,3], pot [G], f_b [G], counts [2])``.
+) -> tuple[Array, Array, Array]:
+    """Softened P2P of one chunk of (group, leaf) near pairs.
 
     Parameters
     ----------
     src : _SourceTables
         The source tree.
-    points : Array
-        ``[G, 3]`` the group's points (padding repeats a live point).
-    valid : Array
-        ``[G]`` live points.
-    threshold : Optional[Array]
-        The group's eq (16a) threshold.
-    plan : TargetPlan
-        Static capacities.
-    mac : str
-        The criterion.
-    theta : float
-        The geometric opening angle.
-    theta_max : float
-        Eq (16a)'s convergence bound.
-    floor : float
-        The walk's separation floor.
-    order : int
-        Expansion order.
+    groups : Array
+        ``[groups, G, 3]`` the points.
+    gvalid : Array
+        ``[groups, G]`` live points.
+    grp : Array
+        ``[C]`` group per pair.
+    leaf : Array
+        ``[C]`` source leaf (node id) per pair (``nodes``: padding, empty).
     leaf_cap : int
         Particles per leaf at most.
     G : float
@@ -521,92 +651,134 @@ def _evaluate_group(
 
     Returns
     -------
-    tuple[Array, Array, Array, Array]
-        Acceleration, potential, force scale, and the far / near counts.
+    tuple[Array, Array, Array]
+        ``[C, G, 3]`` acceleration, ``[C, G]`` potential, ``[C, G]`` force scale.
     """
-    from jaccpot.operators.m2l_real_rot_scale import m2l_rot_scale_real_batch
-    from jaccpot.operators.real_p2m_l2p import evaluate_local_real_with_grad
     from jaccpot.softening import masked_pair_factors
 
     dtype = src.radius.dtype
-    nodes = int(src.radius.shape[0])
-    lo = jnp.min(jnp.where(valid[:, None], points, jnp.inf), axis=0)
-    hi = jnp.max(jnp.where(valid[:, None], points, -jnp.inf), axis=0)
-    centre = 0.5 * (lo + hi)
-    rad = jnp.sqrt(
-        jnp.max(jnp.where(valid, jnp.sum((points - centre) ** 2, axis=1), 0.0))
-    )
-    far, near = _walk_masks(
-        src,
-        centre,
-        rad,
-        threshold,
-        mac=mac,
-        theta=theta,
-        theta_max=theta_max,
-        floor=floor,
-        order=order,
-    )
-    counts = jnp.stack([jnp.sum(far), jnp.sum(near)]).astype(jnp.int32)
-    far_ids = jnp.nonzero(far, size=int(plan.far_capacity), fill_value=nodes)[0]
-    near_ids = jnp.nonzero(near, size=int(plan.near_capacity), fill_value=nodes)[0]
-
-    # ---- far: M2P per point (M2L onto the point, L2P at zero offset) --------
-    # A local expansion about the GROUP's centre would add its truncation error
-    # (the group radius over the distance, to the power p + 1) to every source
-    # node's contribution, coherently: measured 5e-4 rel at eps 1e-4 on sparse
-    # groups, whatever the source nodes. Per point, only the multipoles' own
-    # truncation remains, which the criterion above bounds.
-    mult = src.multipoles[far_ids]
-    centres = src.centers[far_ids]
-    live = far_ids < nodes
-
-    def m2p(x: Array) -> tuple[Array, Array]:
-        deltas = x[None, :] - centres
-        deltas = jnp.where(live[:, None], deltas, jnp.ones_like(deltas))
-        locals_ = m2l_rot_scale_real_batch(mult, deltas, order=int(order))
-        local = jnp.sum(jnp.where(live[:, None], locals_, 0.0), axis=0)
-        grad, phi = evaluate_local_real_with_grad(
-            local, jnp.zeros((3,), dtype), order=int(order)
-        )
-        return grad, phi
-
-    grad, phi = jax.vmap(m2p)(points)
-    gconst = jnp.asarray(G, dtype)
-    acc = -gconst * grad
-    pot = -gconst * phi
-    scale = jnp.zeros(points.shape[:1], dtype)
-    if want_scale:
-        dc = src.centers[far_ids][None, :, :] - points[:, None, :]
-        r2c = jnp.sum(dc * dc, axis=-1) + jnp.asarray(eps2_plummer, dtype)
-        scale = gconst * jnp.sum(
-            jnp.where(live[None, :], src.mass[far_ids][None, :] / r2c, 0.0), axis=1
-        )
-
-    # ---- near: softened pairs with the near leaves' particles ---------------
-    start = src.ranges[near_ids, 0]
-    count = src.ranges[near_ids, 1] - start + 1
+    pts = groups[grp]  # [C, G, 3]
+    start = src.ranges[leaf, 0]
+    count = src.ranges[leaf, 1] - start + 1
     slot = jnp.arange(int(leaf_cap), dtype=jnp.int32)
-    sidx = (start[:, None] + slot[None, :]).reshape(-1)
-    slive = (slot[None, :] < count[:, None]).reshape(-1)
+    sidx = start[:, None] + slot[None, :]  # [C, L]
+    slive = slot[None, :] < count[:, None]
     sidx = jnp.where(slive, sidx, 0)
-    spos = src.positions[sidx]
+    spos = src.positions[sidx]  # [C, L, 3]
     smas = jnp.where(slive, src.masses[sidx], 0.0)
-    dx = points[:, None, :] - spos[None, :, :]
+    dx = pts[:, :, None, :] - spos[:, None, :, :]  # [C, G, L, 3]
     r2 = jnp.sum(dx * dx, axis=-1)
-    active = slive[None, :] & valid[:, None]
+    active = slive[:, None, :] & gvalid[grp][:, :, None]
     g, psi, _ = masked_pair_factors(
         r2, active, soft_params, kernel, potential=want_potential
     )
-    acc = acc - gconst * jnp.sum((smas[None, :] * g)[..., None] * dx, axis=1)
+    gconst = jnp.asarray(G, dtype)
+    w = smas[:, None, :] * g
+    acc = -gconst * jnp.sum(w[..., None] * dx, axis=2)
+    pot = jnp.zeros(r2.shape[:2], dtype)
     if want_potential:
-        pot = pot - gconst * jnp.sum(smas[None, :] * psi, axis=1)
+        pot = -gconst * jnp.sum(smas[:, None, :] * psi, axis=2)
+    scale = jnp.zeros(r2.shape[:2], dtype)
     if want_scale:
         r2s = jnp.where(active, r2 + jnp.asarray(eps2_plummer, dtype), 1.0)
-        scale = scale + gconst * jnp.sum(
-            jnp.where(active, smas[None, :] / r2s, 0.0), axis=1
-        )
-    return acc, pot, scale, counts
+        scale = gconst * jnp.sum(jnp.where(active, smas[:, None, :] / r2s, 0.0), axis=2)
+    return acc, pot, scale
+
+
+def _compact_pairs(
+    src: _SourceTables,
+    centres: Array,
+    radii: Array,
+    thresholds: Array,
+    live_groups: Array,
+    *,
+    block: int,
+    far_cap: int,
+    near_cap: int,
+    walk: dict,
+) -> tuple[Array, Array, Array, Array, Array]:
+    """The walk over every group, compacted into flat (group, node) pair lists.
+
+    One sequential scan over blocks of ``block`` groups: each block's masks
+    (``[block, nodes]``) are ranked and scattered into the flat lists at the
+    running offset, so memory is the lists plus one block's masks.
+
+    Parameters
+    ----------
+    src : _SourceTables
+        The source tree.
+    centres : Array
+        ``[groups, 3]`` group centres (groups padded to a multiple of ``block``).
+    radii : Array
+        ``[groups]`` group radii.
+    thresholds : Array
+        ``[groups]`` eq (16a) thresholds (unused by the geometric criterion).
+    live_groups : Array
+        ``[groups]`` groups with a live point.
+    block : int
+        Groups per scan step.
+    far_cap : int
+        Far list length.
+    near_cap : int
+        Near list length.
+    walk : dict
+        :func:`_walk_masks`'s static keywords.
+
+    Returns
+    -------
+    tuple[Array, Array, Array, Array, Array]
+        Far groups, far nodes, near groups, near leaves (padding: group 0,
+        node ``nodes``), and ``int32 [2]`` the total counts.
+    """
+    nodes = int(src.radius.shape[0])
+    ngroups = int(centres.shape[0])
+    nblocks = ngroups // int(block)
+    node_ids = jnp.arange(nodes, dtype=jnp.int32)
+
+    def masks(c: Array, r: Array, t: Array, ok: Array) -> tuple[Array, Array]:
+        far, near = _walk_masks(src, c, r, t, **walk)
+        return far & ok, near & ok
+
+    def body(carry: tuple, xs: tuple) -> tuple[tuple, None]:
+        fg, fn, ng, nn, off = carry
+        gid, c, r, t, ok = xs
+        far, near = jax.vmap(masks)(c, r, t, ok)  # [B, nodes]
+
+        def place(mask, start, cap, lst_g, lst_n):
+            cnt = jnp.sum(mask, axis=1, dtype=jnp.int32)
+            first = start + jnp.cumsum(cnt) - cnt  # [B]
+            rank = jnp.cumsum(mask, axis=1, dtype=jnp.int32) - 1
+            pos = jnp.where(mask, first[:, None] + rank, cap).reshape(-1)
+            lst_g = lst_g.at[pos].set(
+                jnp.broadcast_to(gid[:, None], mask.shape).reshape(-1), mode="drop"
+            )
+            lst_n = lst_n.at[pos].set(
+                jnp.broadcast_to(node_ids[None, :], mask.shape).reshape(-1),
+                mode="drop",
+            )
+            return lst_g, lst_n, start + jnp.sum(cnt, dtype=jnp.int32)
+
+        fg, fn, f_end = place(far, off[0], far_cap, fg, fn)
+        ng, nn, n_end = place(near, off[1], near_cap, ng, nn)
+        return (fg, fn, ng, nn, jnp.stack([f_end, n_end])), None
+
+    gids = jnp.arange(ngroups, dtype=jnp.int32).reshape(nblocks, block)
+    init = (
+        jnp.zeros((far_cap,), jnp.int32),
+        jnp.full((far_cap,), nodes, jnp.int32),
+        jnp.zeros((near_cap,), jnp.int32),
+        jnp.full((near_cap,), nodes, jnp.int32),
+        jnp.zeros((2,), jnp.int32),
+    )
+    xs = (
+        gids,
+        centres.reshape(nblocks, block, 3),
+        radii.reshape(nblocks, block),
+        thresholds.reshape(nblocks, block),
+        live_groups.reshape(nblocks, block),
+    )
+    (fg, fn, ng, nn, totals), _ = jax.lax.scan(body, init, xs)
+    return fg, fn, ng, nn, totals
 
 
 def evaluate_target_points(
@@ -621,6 +793,11 @@ def evaluate_target_points(
     mac: Optional[str] = None,
 ) -> TargetField:
     """The field of ``topology``'s sources at ``points``; traced or eager.
+
+    Three passes, every one memory-bounded: the walk, block by block, compacted
+    into flat (group, node) far and (group, leaf) near lists of the plan's
+    total capacities; then the far pairs (M2P) and the near pairs (softened
+    P2P), ``plan.pair_chunk`` at a time, scatter-added into the groups' points.
 
     Parameters
     ----------
@@ -656,6 +833,8 @@ def evaluate_target_points(
         If ``points`` is not ``[plan.num_points, 3]``, or ``dehnen_error`` has no
         ``force_scale``.
     """
+    from jaccpot.softening import resolve_softening_kernel, softening_params
+
     engine = provider.engine
     mac_name = target_mac_type(engine, mac)
     pts_in = jnp.asarray(points)
@@ -673,10 +852,12 @@ def evaluate_target_points(
     order = int(provider.max_order)
     src = _source_tables(engine, topology, order=order, mac=mac_name)
     dtype = src.radius.dtype
+    nodes = int(src.radius.shape[0])
+    block = _walk_block(plan, nodes)
     pts = pts_in.astype(dtype)
     m = int(plan.num_points)
     gsize = int(plan.group_size)
-    ngroups = plan.num_groups
+    ngroups = -(-plan.num_groups // block) * block
     pad = ngroups * gsize - m
     perm = _morton_order(pts)
     sorted_pts = pts[perm]
@@ -687,6 +868,16 @@ def evaluate_target_points(
         )
     groups = sorted_pts.reshape(ngroups, gsize, 3)
     gvalid = valid.reshape(ngroups, gsize)
+    live_groups = jnp.any(gvalid, axis=1)
+    lo = jnp.min(jnp.where(gvalid[..., None], groups, jnp.inf), axis=1)
+    hi = jnp.max(jnp.where(gvalid[..., None], groups, -jnp.inf), axis=1)
+    centres = jnp.where(live_groups[:, None], 0.5 * (lo + hi), 0.0)
+    radii = jnp.sqrt(
+        jnp.max(
+            jnp.where(gvalid, jnp.sum((groups - centres[:, None, :]) ** 2, -1), 0.0),
+            axis=1,
+        )
+    )
     if mac_name == "dehnen_error":
         fb = jnp.asarray(force_scale, dtype)[perm]
         if pad:
@@ -698,35 +889,82 @@ def evaluate_target_points(
         )
     else:
         thr = jnp.zeros((ngroups,), dtype)
-    from jaccpot.softening import resolve_softening_kernel, softening_params
-
+    chunk = int(plan.pair_chunk)
+    far_cap = _ceil_to(int(plan.far_capacity), chunk)
+    near_cap = _ceil_to(int(plan.near_capacity), chunk)
+    fg, fn, ng, nn, totals = _compact_pairs(
+        src,
+        centres,
+        radii,
+        thr,
+        live_groups,
+        block=block,
+        far_cap=far_cap,
+        near_cap=near_cap,
+        walk=dict(
+            mac=mac_name,
+            theta=float(provider.theta_value),
+            theta_max=float(getattr(engine, "mac_theta_max", 1.0)),
+            floor=float(engine._walk_separation_floor()),
+            order=order,
+        ),
+    )
     kernel = resolve_softening_kernel(getattr(engine, "softening_kernel", None))
     eps = float(engine.softening)
-    statics = dict(
-        plan=plan,
-        mac=mac_name,
-        theta=float(provider.theta_value),
-        theta_max=float(getattr(engine, "mac_theta_max", 1.0)),
-        floor=float(engine._walk_separation_floor()),
-        order=order,
-        leaf_cap=int(topology.prepared.max_leaf_size),
-        G=float(engine.G),
-        soft_params=softening_params(kernel, eps, dtype),
-        kernel=kernel,
-        eps2_plummer=eps * eps,
-        want_potential=bool(potential),
-        want_scale=bool(return_force_scale),
-    )
+    want_scale = bool(return_force_scale)
+    want_pot = bool(potential)
+    zeros3 = jnp.zeros((ngroups, gsize, 3), dtype)
+    zeros1 = jnp.zeros((ngroups, gsize), dtype)
 
-    def one(args: tuple) -> tuple:
-        gp, gv, gt = args
-        return _evaluate_group(src, gp, gv, gt, **statics)
+    def accumulate(carry: tuple, grp: Array, out: tuple) -> tuple:
+        a, p, f = carry
+        da, dp, df = out
+        a = a.at[grp].add(da)
+        p = p.at[grp].add(dp) if want_pot else p
+        f = f.at[grp].add(df) if want_scale else f
+        return a, p, f
 
-    acc, pot, scale, counts = jax.lax.map(
-        one, (groups, gvalid, thr), batch_size=min(int(plan.group_block), ngroups)
+    def far_body(carry: tuple, xs: tuple) -> tuple[tuple, None]:
+        grp, node = xs
+        out = _far_chunk(
+            src,
+            groups,
+            gvalid,
+            grp,
+            node,
+            order=order,
+            G=float(engine.G),
+            eps2_plummer=eps * eps,
+            want_scale=want_scale,
+        )
+        return accumulate(carry, grp, out), None
+
+    def near_body(carry: tuple, xs: tuple) -> tuple[tuple, None]:
+        grp, leaf = xs
+        out = _near_chunk(
+            src,
+            groups,
+            gvalid,
+            grp,
+            leaf,
+            leaf_cap=int(topology.prepared.max_leaf_size),
+            G=float(engine.G),
+            soft_params=softening_params(kernel, eps, dtype),
+            kernel=kernel,
+            eps2_plummer=eps * eps,
+            want_potential=want_pot,
+            want_scale=want_scale,
+        )
+        return accumulate(carry, grp, out), None
+
+    carry = (zeros3, zeros1, zeros1)
+    carry, _ = jax.lax.scan(
+        far_body, carry, (fg.reshape(-1, chunk), fn.reshape(-1, chunk))
     )
-    needs = jnp.max(counts, axis=0)
-    ok = (needs[0] <= int(plan.far_capacity)) & (needs[1] <= int(plan.near_capacity))
+    (acc, pot, scale), _ = jax.lax.scan(
+        near_body, carry, (ng.reshape(-1, chunk), nn.reshape(-1, chunk))
+    )
+    ok = (totals[0] <= far_cap) & (totals[1] <= near_cap)
     inv = jnp.argsort(perm)
     out_dtype = pts_in.dtype
 
@@ -737,7 +975,7 @@ def evaluate_target_points(
         acc=back(acc, (3,)),
         potential=back(pot, ()) if potential else None,
         force_scale=back(scale, ()) if return_force_scale else None,
-        needs=needs,
+        needs=totals,
         ok=ok,
     )
 
@@ -805,6 +1043,7 @@ def plan_target_points(
     headroom: float = 1.5,
     force_scale: Optional[Array] = None,
     group_block: int = 64,
+    pair_chunk: int = 128,
     max_rounds: int = 4,
 ) -> TargetPlan:
     """Size a :class:`TargetPlan` eagerly from the points' current needs.
@@ -829,7 +1068,9 @@ def plan_target_points(
         As in :func:`evaluate_target_points` (``dehnen_error``); ``None`` there
         bootstraps it with a geometric pass.
     group_block : int
-        Groups walked together.
+        Upper bound on the groups walked together.
+    pair_chunk : int
+        Pairs evaluated together.
     max_rounds : int
         Re-plans before giving up.
 
@@ -846,9 +1087,8 @@ def plan_target_points(
     plan = TargetPlan(
         num_points=int(jnp.shape(points)[0]),
         group_size=int(group_size),
-        far_capacity=8,
-        near_capacity=8,
         group_block=int(group_block),
+        pair_chunk=int(pair_chunk),
     )
     if target_mac_type(provider.engine) == "dehnen_error" and force_scale is None:
         for _ in range(int(max_rounds)):

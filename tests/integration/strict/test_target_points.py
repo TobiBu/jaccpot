@@ -240,3 +240,42 @@ def test_plan_rejects_points_of_another_count(lane):
         lane["prov"].target_field(
             lane["topo"], lane["pts"][:-1], lane["plan"], force_scale=lane["fb"]
         )
+
+
+def test_capacities_are_totals_so_a_dense_clump_costs_only_its_own_pairs(lane):
+    """A few points inside the sources and many far outside: the plan's capacities
+    are TOTALS, so the far groups do not pay for the clump's near/far lists, and
+    the compiled temporaries stay at one walk block plus one pair chunk (the first
+    version gave every group the worst group's capacities: 14.9 GiB at 1e6 points
+    on an A100, 2026-11-11)."""
+    from jaccpot.runtime.target_points import evaluate_target_points
+
+    rng = np.random.default_rng(5)
+    pts = np.concatenate(
+        [0.02 * rng.normal(size=(32, 3)), rng.uniform(4.0, 6.0, size=(4064, 3))]
+    )
+    pts = jnp.asarray(pts, jnp.float32)
+    prov, topo = lane["prov"], lane["topo"]
+    fb = None
+    if lane["mac"] == "dehnen_error":
+        from jaccpot.runtime.target_points import bootstrap_target_force_scale
+
+        probe = prov.plan_targets(topo, pts)
+        fb, _ = bootstrap_target_force_scale(prov, topo, pts, plan=probe)
+    plan = prov.plan_targets(topo, pts, force_scale=fb)
+    field = prov.target_field(topo, pts, plan, force_scale=fb)
+    assert bool(field.ok)
+    needs = np.asarray(field.needs)
+    # 127 far groups accept a handful of nodes each; one clump group needs many
+    assert needs[0] < 127 * 64 and needs[1] < plan.near_capacity + 1
+    compiled = (
+        jax.jit(
+            lambda t, p, f: evaluate_target_points(
+                prov, t, p, plan=plan, force_scale=f
+            ).acc
+        )
+        .lower(topo, pts, fb)
+        .compile()
+    )
+    temp = compiled.memory_analysis().temp_size_in_bytes
+    assert temp < 256 * 2**20, temp
