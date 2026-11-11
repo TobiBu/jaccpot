@@ -8,7 +8,7 @@
 #SBATCH --output=mesc-node2-%j.out
 # MESC over TWO nodes: the full unclipped 1e8 Sgr IC as 8 processes x 1 GPU with escapers, against the
 # clipped control, both MACs (as node1; 6 segments x 10 steps, energy at every edge).
-export MESC_JOB=node2
+export MESC_JOB=${MESC_JOB:-node2}   # the HoreKa bundle's job sets mesc_node2
 # shellcheck source=_prologue.sh
 source "${MESC_JACCPOT:-$SLURM_SUBMIT_DIR}/bench/slurm/mesc/_prologue.sh"
 NT=$((2 * GPN))

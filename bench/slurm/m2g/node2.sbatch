@@ -11,7 +11,7 @@
 # momentum at every edge, and the collectives probe at 8 (exact, and the float psum vs the mesh-order
 # fold). The last step is the #398 barrier probe ACROSS nodes: the NCCL ragged fallback with
 # use_barrier_with_nccl at its jax-0.11 default (on), under a 5-minute timeout (M4's re-check).
-export M2G_JOB=node2
+export M2G_JOB=${M2G_JOB:-node2}   # the HoreKa bundle's job sets m2g_node2
 # shellcheck source=_prologue.sh
 source "${M2G_JACCPOT:-$SLURM_SUBMIT_DIR}/bench/slurm/m2g/_prologue.sh"
 N=${M2G_N_PER_GPU:-2e6}

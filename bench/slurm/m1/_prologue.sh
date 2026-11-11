@@ -12,6 +12,9 @@ h0_provenance "$OUT"
 cd "$M1_JACCPOT"
 BENCH="$H0_PY bench/mesh_cross_momentum.py"
 GPN=${H0_GPUS_PER_NODE:-4}
+# SMOKE_N_PER_GPU / M1_SEGMENT_STEPS: the CPU smoke's tiny arms (bench/slurm/h0/submit_all.sh SMOKE=1)
+nn() { echo "${SMOKE_N_PER_GPU:-$1}"; }
+M1_STEPS=(${M1_SEGMENT_STEPS:+--steps "$M1_SEGMENT_STEPS"})
 CPN=${SLURM_CPUS_ON_NODE:-76}
 # every step its own coordinator port (jax derives one port from SLURM_JOB_ID otherwise)
 M1_PORT=${M1_PORT:-$((20000 + ${SLURM_JOB_ID:-0} % 20000))}
@@ -26,7 +29,7 @@ arm() {
   next_port
   echo "--- $name: srun ${srun_args[*]} -- ${bench_args[*]} (port $M1_PORT) $(date -Is)"
   local t0=$SECONDS
-  if srun "${srun_args[@]}" $BENCH "${bench_args[@]}" --out "$OUT/$name" > "$OUT/$name.log" 2>&1; then
+  if srun "${srun_args[@]}" $BENCH "${bench_args[@]}" "${M1_STEPS[@]}" --out "$OUT/$name" > "$OUT/$name.log" 2>&1; then
     echo "    ok $((SECONDS - t0)) s"
   else
     echo "    FAILED rc $? after $((SECONDS - t0)) s (tail of $OUT/$name.log):"; tail -20 "$OUT/$name.log"

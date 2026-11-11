@@ -1,5 +1,9 @@
 # M2G: the multi-process runtime on HoreKa (prepared, not run)
 
+**On HoreKa these are jobs `m2g_node1` and `m2g_node2` of the bundle: `bench/slurm/h0/README.md` is the guide
+(one checkout of main, `setup_env.sh`, `submit_all.sh --only m2g_node1,m2g_node2`). This file says what the arms
+measure.**
+
 Track M2G of the multi-node accuracy plan (`~/.claude/plans/multinode-accuracy-dev-plan.md`): the
 multi-GPU runner (`ProductionRunner(mesh=MeshRunConfig(...))`) as one process per GPU under
 `jax.distributed`, against one process driving every GPU of the node. The local gate (2 processes x
@@ -14,15 +18,14 @@ venv and pinned siblings (`setup_env.sh`, once), its `provenance.py`. No staged 
 their Plummer spheres themselves (seeded).
 
 ```bash
-git checkout m2/multiprocess-gpu         # (or the branch the lead merged it into)
-bash bench/slurm/h0/setup_env.sh         # once, if H0's setup has not run in this H0_ROOT
-bash bench/slurm/m2g/submit.sh --dry-run
-bash bench/slurm/m2g/submit.sh           # node1 and node2; or: submit.sh node1
+# main (M2G is merged); setup_env.sh once (bench/slurm/h0/README.md)
+bash bench/slurm/h0/submit_all.sh --dry-run --only m2g_node1,m2g_node2
+bash bench/slurm/h0/submit_all.sh --only m2g_node1,m2g_node2     # bench/slurm/m2g/submit.sh forwards here
 ```
 
-Results: `$H0_ROOT/m2g/<run id>/<job>/SUMMARY.md`, with every arm's `result_p<rank>.json` (walls per
-run and per edge, peaks, the SLURM / CUDA environment each task saw) and every `compare_*.json`.
-Send back `tar czf m2g.tgz --exclude='*.npy' -C $H0_ROOT/m2g/<run id> .` (a few MB).
+Results: `$H0_ROOT/runs/<run id>/m2g_node1/SUMMARY.md` (and `m2g_node2/`), with every arm's
+`result_p<rank>.json` (walls per run and per edge, peaks, the SLURM / CUDA environment each task saw) and every
+`compare_*.json`. `bench/slurm/h0/collect.sh` puts them in the bundle's one tarball.
 
 ## The jobs
 
@@ -32,7 +35,7 @@ Send back `tar czf m2g.tgz --exclude='*.npy' -C $H0_ROOT/m2g/<run id> .` (a few 
 | `node2` | 2 x 4, exclusive | collectives probe at 8 processes; both MACs at 2e6 per GPU (1.6e7), each twice (A-vs-A across nodes); the barrier probe across nodes (below) | 2:00 |
 
 Each `srun` step is skipped when its outputs exist, so a resubmission into the same run
-(`M2G_RUN=$H0_ROOT/m2g/<run id> bash bench/slurm/m2g/submit.sh node1`) resumes.
+(`H0_RUN_ID=<run id> bash bench/slurm/h0/submit_all.sh --only m2g_node1`) resumes.
 
 ### How each process gets its GPU (read from jax 0.11.2's code)
 

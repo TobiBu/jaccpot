@@ -171,6 +171,7 @@ def main() -> int:
             "yggdrax": _git(env.get("H0_YGGDRAX", "")),
             "nornax": _git(env.get("H0_NORNAX", "")),
             "mimirax": _git(env.get("H0_MIMIRAX", "")),
+            "Odisseo": _git(env.get("H0_ODISSEO", "")),
         },
         "pins": {
             k: env.get(k)
@@ -178,6 +179,7 @@ def main() -> int:
                 "H0_YGGDRAX_COMMIT",
                 "H0_NORNAX_COMMIT",
                 "H0_MIMIRAX_COMMIT",
+                "H0_ODISSEO_COMMIT",
                 "H0_YGGDRAX_PRE104_FILE_COMMIT",
             )
         },

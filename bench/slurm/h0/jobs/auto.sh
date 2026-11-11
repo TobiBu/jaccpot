@@ -24,6 +24,9 @@ row() {  # tag args...
   local tag=$1; shift
   local json=$OUT/rows/$tag.json
   if [ -s "$json" ]; then echo "skip $tag (done)"; return; fi
+  # the smoke runs each argument pattern once: an r2 row repeats its r1's arguments (an XLA:CPU gradient
+  # compile of 1-2 h and ~240 GB each on a loaded host)
+  if [ "${SMOKE:-}" = 1 ] && [[ $tag == *_r2 ]]; then echo "skip $tag (smoke: same arguments as r1)"; return; fi
   echo "=== $tag  $(date -Is)"
   local start=$SECONDS
   # shellcheck disable=SC2086

@@ -1,4 +1,4 @@
-"""H0 bundle: one ``SUMMARY.md`` and one ``rows.jsonl`` for a run directory.
+"""HoreKa bundle: one ``SUMMARY.md`` and one ``rows.jsonl`` for a run directory.
 
     python bench/slurm/h0/summarize.py RUN_DIR        # (collect.sh calls it)
 
@@ -7,7 +7,10 @@ run or did not finish is reported as such) and writes:
 
 * ``RUN_DIR/SUMMARY.md`` -- a table per job, the derived numbers (A-vs-A spreads, the
   #104 cost at 1e8, strong / weak scaling, the 4-card ceiling, auto vs level 8) and the
-  sanity row against the local single-card pins (``local_reference.json``);
+  sanity row against the local single-card pins (``local_reference.json``); for the jobs
+  folded in by track H1 (scaling_mp, forward, mgrad, escaper, a1, a3, m1_*, m2g_*,
+  mesc_*, a4) each job's own summary (the matrix's or track's ``SUMMARY.md``, the bench's
+  ``summary.txt``) or a table of its rows;
 * ``RUN_DIR/rows.jsonl`` -- one JSON object per row, each with its job's provenance
   header (commits, jax, node, GPU, driver) under ``"provenance"``.
 
@@ -28,9 +31,31 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 JACCPOT = HERE.parents[2]
 LOCAL_REFERENCE = HERE / "local_reference.json"
-#: the local tags the sanity row compares with (the newest single-card path: #104 + #485)
-SANITY_TAGS = ("ab-new-20261030", "ab-base-b-20261030")
-JOBS = ("preflight", "pins", "auto", "s1b", "grad", "scaling_a", "scaling_b")
+#: the local tags the sanity row compares with (local_reference.json: the bundle's pins, track H1)
+SANITY_TAGS = ("h1-L-main", "h1-L-main-b")
+#: every job of submit_all.sh, in its order
+JOBS = (
+    "preflight",
+    "pins",
+    "auto",
+    "s1b",
+    "grad",
+    "scaling_a",
+    "scaling_mp",
+    "scaling_b",
+    "forward",
+    "mgrad",
+    "escaper",
+    "a1",
+    "a3",
+    "m1_node1",
+    "m1_node2",
+    "m2g_node1",
+    "m2g_node2",
+    "mesc_node1",
+    "mesc_node2",
+    "a4",
+)
 
 
 def _load(path: Path):
@@ -108,9 +133,13 @@ def section_provenance(o: Out, run: Path, provs: dict) -> None:
         d = run / job
         b = _provenance_brief(provs.get(job))
         status = (
-            "done"
-            if (d / "DONE").exists()
-            else ("not run" if not d.exists() else "INCOMPLETE")
+            "skipped: " + (d / "SKIPPED").read_text().strip()[:80]
+            if (d / "SKIPPED").exists()
+            else (
+                "done"
+                if (d / "DONE").exists()
+                else ("not run" if not d.exists() else "INCOMPLETE")
+            )
         )
         short = lambda s: (s or "-")[:10]  # noqa: E731
         rows.append(
@@ -683,6 +712,158 @@ def section_auto(o: Out, run: Path, prov) -> None:
     o()
 
 
+def _json_rows(o: Out, job: str, d: Path, prov) -> list:
+    """Every ``*.json`` row under ``d`` into rows.jsonl; ``[(tag, row)]``."""
+    out = []
+    for path in sorted(d.glob("*.json")) if d.is_dir() else []:
+        row = _load(path)
+        if row is None:
+            continue
+        out.append((path.stem, row))
+        o.row(job, job, {"tag": path.stem, "row": row}, prov)
+    return out
+
+
+def section_folded(o: Out, run: Path, provs: dict) -> None:
+    """The jobs track H1 folded into the bundle: each job's own summary, or its rows."""
+    o("## 8. The jobs folded in by H1")
+    o()
+    d = run / "scaling_mp" / "matrix"
+    section_text(
+        o,
+        "### scaling_mp: N processes x 1 GPU vs 1 process x N GPUs (`multigpu_scaling_matrix.py --tiers mp`)",
+        d / "SUMMARY.md",
+    )
+    for path in [d / "rows_mp.jsonl"] if (d / "rows_mp.jsonl").exists() else []:
+        for line in path.read_text().splitlines():
+            if line.strip():
+                o.row("scaling_mp", "mp", json.loads(line), provs.get("scaling_mp"))
+    d = run / "forward" / "timing"
+    section_text(
+        o,
+        "### forward: forward mode (`forward_mode_timing.py --summarize`)",
+        d / "summary.txt",
+    )
+    _json_rows(o, "forward", d / "rows", provs.get("forward"))
+    d = run / "mgrad" / "matrix"
+    section_text(
+        o,
+        "### mgrad: WP-G multi-GPU gradients (`multigpu_grad_matrix.py --summary`)",
+        d / "SUMMARY.md",
+    )
+    _json_rows(o, "mgrad", d, provs.get("mgrad"))
+    # escaper: one card, 1e8 Sgr
+    rows = _json_rows(
+        o, "escaper", run / "escaper" / "timing" / "rows", provs.get("escaper")
+    )
+    o("### escaper: escapers on / off at 1e8, one card (`escaper_timing.py`)")
+    o()
+    if rows:
+        o.table(
+            ["row", "N", "step s", "edge s", "peak GiB", "peak B/p", "escapers"],
+            [
+                [
+                    tag,
+                    r.get("n", "-"),
+                    _f(r.get("step_s"), "{:.3f}"),
+                    _f(r.get("edge_s"), "{:.3f}"),
+                    _f((r.get("peak_bytes") or 0) / 2**30),
+                    _f(r.get("peak_bytes_per_particle"), "{:.1f}"),
+                    _f(r.get("escapers"), "{}"),
+                ]
+                for tag, r in rows
+            ],
+        )
+    else:
+        o("_no rows_")
+        o()
+    # a1: the restore rows and the err rows
+    rows = _json_rows(o, "a1", run / "a1" / "stall" / "rows", provs.get("a1"))
+    o(
+        "### a1: the dehnen_error stall from the 1e8 restarts (`dehnen_error_stall.py`, `fused_memory_budget.py`)"
+    )
+    o()
+    if rows:
+        table = []
+        for tag, r in rows:
+            segs = [
+                x.get("wall_s")
+                for x in r.get("segments", [])
+                if x.get("wall_s") is not None
+            ]
+            step = r.get("step_ms") or {}
+            table.append(
+                [
+                    tag,
+                    _f(r.get("total_s")),
+                    _f(statistics.median(segs[1:]) if len(segs) > 1 else None),
+                    _f(max(segs) if segs else None),
+                    _f(step.get("min")),
+                    _f(
+                        max(r.get("peak_bytes") or [0]) / 2**30
+                        if isinstance(r.get("peak_bytes"), list)
+                        else r.get("final_peak_gib")
+                    ),
+                ]
+            )
+        o.table(
+            [
+                "row",
+                "total s",
+                "median step s (after the first)",
+                "max step s",
+                "err rows: step ms min",
+                "peak GiB",
+            ],
+            table,
+        )
+    else:
+        o("_no rows_")
+        o()
+    rows = _json_rows(o, "a3", run / "a3" / "timing" / "rows", provs.get("a3"))
+    o(
+        "### a3: summed vs legacy drift (`fused_memory_budget.py --runner --drift-order`)"
+    )
+    o()
+    if rows:
+        table = []
+        for tag, r in rows:
+            n = r.get("n") or (r.get("config") or {}).get("n") or 0
+            peak = r.get("final_peak_gib") or r.get("peak_after_scan_gib") or 0.0
+            st = r.get("step_ms") or {}
+            table.append(
+                [
+                    tag,
+                    n,
+                    _f(st.get("min"), "{:.1f}"),
+                    _f(st.get("median"), "{:.1f}"),
+                    _f(peak),
+                    _f(peak * 2**30 / n if n else None, "{:.1f}"),
+                ]
+            )
+        o.table(["row", "N", "step ms min", "step ms median", "peak GiB", "B/p"], table)
+    else:
+        o("_no rows_")
+        o()
+    for job in (
+        "m1_node1",
+        "m1_node2",
+        "m2g_node1",
+        "m2g_node2",
+        "mesc_node1",
+        "mesc_node2",
+    ):
+        section_text(
+            o,
+            f"### {job} (`bench/slurm/{job.split('_')[0]}/summarize.py`)",
+            run / job / "SUMMARY.md",
+        )
+    for tier in ("horeka-1card", "horeka-node"):
+        path = run / "a4" / f"SUMMARY-{tier}.md"
+        if path.exists():
+            section_text(o, f"### a4: accuracy suite, tier {tier}", path)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("run", type=Path)
@@ -690,7 +871,7 @@ def main() -> int:
     run = args.run.resolve()
     provs = {job: _load(run / job / "provenance.json") for job in JOBS}
     o = Out()
-    o(f"# H0 HoreKa baseline: {run.name}")
+    o(f"# HoreKa bundle run: {run.name}")
     o()
     o(
         f"Run directory `{run}`. Written by `bench/slurm/h0/summarize.py`. Timings are from exclusive nodes; "
@@ -703,6 +884,7 @@ def main() -> int:
     section_grad(o, run, provs.get("grad"))
     section_s1b(o, run, provs.get("s1b"))
     section_auto(o, run, provs.get("auto"))
+    section_folded(o, run, provs)
     (run / "SUMMARY.md").write_text("\n".join(o.lines) + "\n")
     with open(run / "rows.jsonl", "w") as fh:
         for r in o.rows:

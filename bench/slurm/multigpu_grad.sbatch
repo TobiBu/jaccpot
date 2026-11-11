@@ -9,6 +9,9 @@
 #                                                              # the last stopped (RETRY_FAILED=1: failed rows too)
 #   python bench/multigpu_grad_matrix.py --out-dir $OUT --summary   # the table again
 #
+# On HoreKa this runs as job "mgrad" of the bundle (bench/slurm/h0/README.md: one checkout, one setup, every job).
+# ROWS (a regex over the tags), SMOKE_N (every row at that N), MAX_CARDS: the bundle's preflight and smoke.
+#
 # Tiers (bench/multigpu_grad_matrix.py's docstring has the rows): weak (2e5 ... 1.6e7 per card on solo / 1 /
 # 2 / 4 cards), strong (1.6e7 Plummer + disc, 5e7 Plummer), memory (2e7 ... 5e7 per card on 4 cards, jax.grad
 # only, stops at the first failure), check (accuracy at 2.6e5 vs the single card and an fp64 direct sum).
@@ -61,4 +64,7 @@ $PY bench/multigpu_grad_matrix.py \
     --disc-ic "$DISC_IC" \
     ${MEMORY_PER_CARD:+--memory-per-card "$MEMORY_PER_CARD"} \
     ${ROW_TIMEOUT:+--timeout "$ROW_TIMEOUT"} \
-    ${RETRY_FAILED:+--retry-failed}
+    ${RETRY_FAILED:+--retry-failed} \
+    ${ROWS:+--rows "$ROWS"} \
+    ${SMOKE_N:+--smoke-n "$SMOKE_N"} \
+    ${MAX_CARDS:+--max-cards "$MAX_CARDS"}

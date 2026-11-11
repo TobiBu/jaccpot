@@ -24,9 +24,24 @@ weak       4e6 Plummer particles per card on 1 / 2 / 4 cards, migrating
 memory     Plummer at 1e7, 2e7, 3e7, 4e7 (``--memory-per-card``) particles per card on every card,
            migrating, 3 segments of 4 steps; stops at the first row that fails
            (out of memory) and records it
+mp         the production multi-GPU path as N processes x 1 GPU (``jaccpot.distributed.
+           multiprocess``, M2) next to ONE process driving the same N GPUs, on 1 / 2 / 4
+           cards: Plummer 8e6 and the 25M disc + bulge (each MAC), Plummer 4e6 per card
+           (the first MAC); ``bench/multiprocess_gate.py run --arm sp|mp`` (the production
+           runner, ``ProductionRunner(mesh=MeshRunConfig(...))``, migration on: its default;
+           3 segments x 4 steps, two repeats in the process: the second is warm), launched as
+           a SLURM step (``srun``, M2G's pattern: ``--ntasks=k --ntasks-per-node=k
+           --gres=gpu:k``, every task sees the step's cards and jax gives task ``l`` card
+           ``l``) or, without SLURM, by ``bench/slurm/h0/local_srun.py`` (the same variables,
+           local processes); interleaved sp / mp, ``--reps`` repetitions
 =========  ==========================================================================
 
-Outputs under ``--out-dir``: ``TAG.json`` (the gate's record), ``TAG.log``,
+The ab / strong / weak / memory rows drive ``MeshSegmentRunner`` directly, so ``--migrate``
+(on) and its absence (off) mean what they say; the production runner's ``MeshRunConfig``
+migrates by default, which the mp tier's rows inherit.
+
+Outputs under ``--out-dir``: ``TAG.json`` (the gate's record; an mp-tier row: the directory
+``TAG/`` with every process's ``result_p<rank>.json``), ``TAG.log``,
 ``TAG.smi.txt`` (``nvidia-smi`` before and after: a row with another process on its
 cards is labelled ``contended`` in the summary), ``rows.jsonl`` and ``SUMMARY.md``.
 ``--dry-run`` prints the commands; ``--summary`` rebuilds the summary from what is
@@ -47,6 +62,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -56,6 +74,9 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 GATE = HERE / "multigpu_segment_gate.py"
+#: the mp tier's entry point (both arms) and the local stand-in for ``srun``
+MP_GATE = HERE / "multiprocess_gate.py"
+LOCAL_SRUN = HERE / "slurm" / "h0" / "local_srun.py"
 AUTOTUNER_OFF = "--xla_gpu_experimental_enable_fusion_autotuner=false"
 #: ``jaccpot.distributed.fused.RAGGED_EXCHANGE_XLA_FLAGS``, spelled out so the driver
 #: needs no jax (the flags must reach the gate's process before jax starts)
@@ -64,7 +85,7 @@ RAGGED_FLAGS = (
     "--xla_gpu_allow_ragged_all_to_all_nccl_send_recv_fallback=true "
     "--xla_gpu_experimental_ragged_all_to_all_use_barrier_with_nccl=false"
 )
-TIERS = ("ab", "strong", "weak", "memory")
+TIERS = ("ab", "strong", "weak", "memory", "mp")
 #: the summary's "cards free" column, from the row's nvidia-smi record (none: unknown)
 _FREE = {True: "no (contended)", False: "yes"}
 
@@ -99,6 +120,11 @@ def _args() -> argparse.Namespace:
         default=None,
         help="a smoke test of the rows' commands: every row at this N; with "
         "JAX_PLATFORMS=cpu on forced host devices (bench/slurm/h0)",
+    )
+    p.add_argument(
+        "--rows",
+        default=None,
+        help="a regex: only the rows whose tag matches (the bundle's preflight)",
     )
     return p.parse_args()
 
@@ -207,7 +233,63 @@ def _matrix(args: argparse.Namespace, ncards: int) -> list[dict]:
                 "--segments",
                 "3",
             )
+    if "mp" in tiers:
+        reps = "abcdefgh"[: args.reps]
+        configs = (
+            ("plummer", 8e6, False, macs),
+            ("plummer", 4e6, True, macs[:1]),  # per card: weak scaling
+            ("disc", 2.5e7, False, macs),
+        )
+        for k in (1, 2, 4):
+            if k > ncards:
+                continue
+            arms = ("sp",) if k == 1 else ("sp", "mp")
+            for ic, n, per_card, mlist in configs:
+                total = n * k if per_card else n
+                name = f"{ic[0].upper()}{_short(n)}{'pc' if per_card else ''}"
+                for mac in mlist:
+                    for rep in reps:
+                        for arm in arms:
+                            tag = f"mp_{name}_{abbrev[mac]}_{k}c_{arm}_{rep}"
+                            gate = ["run", "--arm", arm, "--mac", mac]
+                            gate += ["--n", str(int(args.smoke_n or total))]
+                            if ic == "disc":
+                                # the L3 pin's 25M disc + bulge softening
+                                gate += ["--ic", "disc", "--softening", "1.5e-3"]
+                                if args.disc_ic:
+                                    gate += ["--disc-ic", args.disc_ic]
+                            gate += ["--out", str(args.out_dir / tag)]
+                            rows.append(
+                                dict(tag=tag, cards=k, gate_args=gate, launch=arm)
+                            )
     return rows
+
+
+def _done(row: dict, out_dir: Path) -> bool:
+    """The row's record exists (an mp-tier row: process 0's result)."""
+    if row.get("launch"):
+        return (out_dir / row["tag"] / "result_p0.json").exists()
+    return (out_dir / f"{row['tag']}.json").exists()
+
+
+def _launcher(row: dict) -> list[str]:
+    """An mp-tier row's step launcher: ``srun`` under SLURM, else local_srun.py."""
+    k = int(row["cards"])
+    cpus = int(os.environ.get("SLURM_CPUS_ON_NODE") or os.cpu_count() or k)
+    srun = shutil.which("srun")
+    head = [srun] if srun else [sys.executable, str(LOCAL_SRUN)]
+    if row["launch"] == "sp":
+        opts = ["--ntasks=1", f"--cpus-per-task={cpus}"]
+    else:
+        opts = [f"--ntasks={k}", f"--ntasks-per-node={k}"]
+        opts += [f"--cpus-per-task={max(cpus // k, 1)}"]
+    return head + ["--nodes=1", f"--gres=gpu:{k}", *opts]
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 def _smi(devices: list[str]) -> dict:
@@ -254,10 +336,19 @@ def _run_row(row: dict, devices: list[str], args: argparse.Namespace) -> dict:
         XLA_FLAGS=(env.get("XLA_FLAGS", "") + " " + flags).strip(),
     )
     if _on_cpu():
-        # CPU: the row's cards are forced host devices; no card is named
+        # CPU: the row's cards are forced host devices; no card is named (an mp-tier
+        # row's launcher sets each task's own count)
         env["CUDA_VISIBLE_DEVICES"] = ""
-        env["XLA_FLAGS"] += f" --xla_force_host_platform_device_count={row['cards']}"
-    cmd = [sys.executable, str(GATE), *row["gate_args"], "--out", str(out)]
+        if not row.get("launch"):
+            env[
+                "XLA_FLAGS"
+            ] += f" --xla_force_host_platform_device_count={row['cards']}"
+    if row.get("launch"):
+        # one step: process 0's host is the coordinator (a free port of this host)
+        env["JAX_COORDINATOR_PORT"] = str(_free_port())
+        cmd = [*_launcher(row), sys.executable, str(MP_GATE), *row["gate_args"]]
+    else:
+        cmd = [sys.executable, str(GATE), *row["gate_args"], "--out", str(out)]
     if args.dry_run:
         print(f"CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']} {' '.join(cmd)}")
         return dict(tag=row["tag"], dry_run=True)
@@ -345,6 +436,97 @@ def _row_summary(tag: str, out_dir: Path, index: dict) -> dict:
     return r
 
 
+def _mp_row_summary(tag: str, out_dir: Path) -> dict:
+    """An mp-tier row: the warm repeat's step time, retries and peaks of every process."""
+    results = [
+        json.loads(p.read_text())
+        for p in sorted((out_dir / tag).glob("result_p*.json"))
+    ]
+    r0 = results[0]
+    warm = r0["runs"][-1]
+    walls = [e["wall_s"] for e in warm["edges"] if e.get("wall_s") is not None]
+    steps = int(r0.get("steps") or 1)
+    peaks = [b for r in results for b in r.get("peak_bytes", [])]
+    ndev = len(r0.get("devices") or []) or 1
+    n = int(r0["num_particles"])
+    smi_path = out_dir / f"{tag}.smi.txt"
+    smi = json.loads(smi_path.read_text()) if smi_path.exists() else {}
+    return dict(
+        tag=tag,
+        arm=r0["arm"],
+        processes=int(r0["processes"]),
+        ndev=ndev,
+        ic=r0.get("ic", "plummer"),
+        n=n,
+        mac=r0["mac"],
+        # the warm repeat's segments after the first (that one starts the run)
+        step_ms=(
+            1e3 * float(np.median(walls[1:] if len(walls) > 1 else walls)) / steps
+            if walls
+            else None
+        ),
+        warm_wall_s=warm.get("wall_s"),
+        retries=sum(int(x) for x in warm.get("retries", [])),
+        peak_gib=max(peaks) / 2**30 if peaks else None,
+        bpp=max(peaks) / (n / ndev) if peaks else None,
+        contended=smi.get("contended"),
+    )
+
+
+def _mp_summary(out_dir: Path) -> list[str]:
+    """The mp tier's table and the mp / sp step ratios (empty without mp rows)."""
+    rows = []
+    for d in sorted(p for p in out_dir.glob("mp_*") if p.is_dir()):
+        if not (d / "result_p0.json").exists():
+            continue
+        try:
+            rows.append(_mp_row_summary(d.name, out_dir))
+        except (KeyError, ValueError, IndexError, json.JSONDecodeError) as exc:
+            rows.append(dict(tag=d.name, error=repr(exc)))
+    if not rows:
+        return []
+    with open(out_dir / "rows_mp.jsonl", "w") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+    lines = [
+        "",
+        "## mp tier: N processes x 1 GPU (mp) vs 1 process x N GPUs (sp), the production runner",
+        "",
+        "| row | arm | processes | cards | N | MAC | warm step ms | warm run s | retries "
+        "| peak GiB (max process) | peak B/p per card | cards free |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for r in rows:
+        if "error" in r:
+            lines.append(f"| {r['tag']} | unreadable: {r['error']} |")
+            continue
+        lines.append(
+            f"| {r['tag']} | {r['arm']} | {r['processes']} | {r['ndev']} | {r['n']:.3g} "
+            f"| {r['mac']} | {_fmt(r['step_ms'])} | {_fmt(r['warm_wall_s'])} | {r['retries']} "
+            f"| {_fmt(r['peak_gib'])} | {_fmt(r['bpp'], '{:.0f}')} "
+            f"| {_FREE.get(r.get('contended'), '?')} |"
+        )
+    by_tag = {r["tag"]: r for r in rows if "error" not in r}
+    ratios = []
+    for tag, r in sorted(by_tag.items()):
+        if r["arm"] != "mp":
+            continue
+        sp = by_tag.get(tag.replace("_mp_", "_sp_"))
+        if sp and sp.get("step_ms") and r.get("step_ms"):
+            ratios.append(
+                f"| {tag.replace('_mp_', '_')} | {sp['step_ms']:.2f} | {r['step_ms']:.2f} "
+                f"| {r['step_ms'] / sp['step_ms']:.3f} |"
+            )
+    if ratios:
+        lines += [
+            "",
+            "| config | sp step ms | mp step ms | mp / sp |",
+            "| --- | --- | --- | --- |",
+            *ratios,
+        ]
+    return lines
+
+
 def _fmt(x, spec: str = "{:.2f}") -> str:
     return "-" if x is None else spec.format(x)
 
@@ -378,6 +560,7 @@ def _summary(out_dir: Path) -> None:
             f"| {_fmt(r.get('migrated_per_step'), '{:,.0f}')} "
             f"| {_FREE.get(r.get('contended'), '?')} |"
         )
+    lines += _mp_summary(out_dir)
     (out_dir / "SUMMARY.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
 
@@ -391,10 +574,12 @@ def main() -> int:
     devices = [str(i) for i in range(args.max_cards)] if _on_cpu() else _devices()
     ncards = min(len(devices), args.max_cards)
     rows = _matrix(args, ncards)
+    if args.rows:
+        rows = [r for r in rows if re.search(args.rows, r["tag"])]
     print(f"{len(rows)} rows on cards {devices[:ncards]}", flush=True)
     memory_failed = False
     for row in rows:
-        if (args.out_dir / f"{row['tag']}.json").exists() and not args.redo:
+        if _done(row, args.out_dir) and not args.redo:
             continue
         if memory_failed and row["tag"].startswith("memory_"):
             print(f"skip {row['tag']}: a smaller memory row failed", flush=True)

@@ -1,6 +1,7 @@
 #!/bin/bash
-# H0 bundle: build the run environment ONCE, on a HoreKa login node (it needs the internet: pip and
-# GitHub over ssh). Idempotent: a step whose result is already there is checked, not redone.
+# HoreKa bundle: build the run environment ONCE, on a HoreKa login node (it needs the internet: pip and
+# GitHub over ssh). Idempotent: a step whose result is already there is checked, not redone; rerun it after
+# a `git pull` that changed pins.env (it moves the clones to the new commits).
 #
 #   bash bench/slurm/h0/setup_env.sh
 #
@@ -10,9 +11,12 @@
 #   src/yggdrax-pre104     the same commit with yggdrax/_cell_partition.py from just before #104
 #                          (a git worktree; the one-file modification is the A-B arm of job "pins")
 #   src/nornax, src/mimirax  at their pinned commits
+#   src/Odisseo            at its pinned commit (job a4's IC step only; a failed clone is a warning)
 #   bench_dir/benchmark_multigpu   the Odisseo bench harness (bench/slurm/h0/harness) + fp64 references
-#   data/                  the 25M disc + bulge IC and the fp64 reference cache, STAGED FROM THE
-#                          DEVELOPMENT MACHINE (bench/slurm/h0/stage_data.sh; checked against data.sha256)
+#   data/                  the 25M disc + bulge IC, the fp64 reference cache and (data/big/) the 1e8 Sgr IC
+#                          and the two 1e8 restarts, STAGED FROM THE DEVELOPMENT MACHINE
+#                          (bench/slurm/h0/stage_data.sh; checked against data.sha256; the big files only
+#                          if staged: without them jobs escaper, mesc_* and a1 skip)
 set -euo pipefail
 
 H0_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -89,6 +93,9 @@ checkout() {  # url commit dir
 checkout "$H0_YGGDRAX_URL" "$H0_YGGDRAX_COMMIT" "$H0_ROOT/src/yggdrax"
 checkout "$H0_NORNAX_URL" "$H0_NORNAX_COMMIT" "$H0_ROOT/src/nornax"
 checkout "$H0_MIMIRAX_URL" "$H0_MIMIRAX_COMMIT" "$H0_ROOT/src/mimirax"
+# Odisseo: only job a4's IC step runs a script of it (tools/a4_galaxy_ics.py); not fatal
+(checkout "$H0_ODISSEO_URL" "$H0_ODISSEO_COMMIT" "$H0_ROOT/src/Odisseo") \
+  || log "WARNING: Odisseo not cloned at $H0_ODISSEO_COMMIT: job a4 then needs A4_ODISSEO (bench/slurm/a4/site.env)"
 
 PRE=$H0_ROOT/src/yggdrax-pre104
 if [ ! -e "$PRE/.git" ]; then
@@ -105,8 +112,12 @@ BD=$H0_ROOT/bench_dir/benchmark_multigpu
 mkdir -p "$BD/artifacts/reference"
 cp -r "$H0_DIR/harness/benchmark_multigpu/common" "$H0_DIR/harness/benchmark_multigpu/codes" "$BD/"
 if [ -f "$H0_ROOT/data/disk_bulge_25m.npz" ]; then
-  log "checking the staged data against data.sha256"
-  (cd "$H0_ROOT/data" && sha256sum --quiet -c "$H0_DIR/data.sha256")
+  log "checking the staged data against data.sha256 (the big files only if staged; a minute)"
+  (cd "$H0_ROOT/data" && grep -v ' big/' "$H0_DIR/data.sha256" | sha256sum --quiet -c -)
+  (cd "$H0_ROOT/data" && grep ' big/' "$H0_DIR/data.sha256" | sha256sum --quiet --ignore-missing -c -)
+  for f in $(grep ' big/' "$H0_DIR/data.sha256" | awk '{print $2}'); do
+    [ -f "$H0_ROOT/data/$f" ] || log "note: $f not staged (stage_data.sh --no-big?): the jobs that read it skip"
+  done
   cp -n "$H0_ROOT"/data/reference/*.npy "$BD/artifacts/reference/" 2> /dev/null || true
 else
   log "WARNING: $H0_ROOT/data/disk_bulge_25m.npz missing: run bench/slurm/h0/stage_data.sh on the"
@@ -122,5 +133,5 @@ for m in (jaccpot, yggdrax, nornax, mimirax):
     print(f"{m.__name__:8s} {os.path.dirname(m.__file__)}")
 print("jax", jax.__version__, "devices (login node, CPU):", jax.devices())
 PYIMP
-date -Is > "$H0_ROOT/setup.done"
+{ date -Is; git -C "$H0_DIR" rev-parse HEAD; } > "$H0_ROOT/setup.done"
 log "done. Next: bash bench/slurm/h0/submit_all.sh --dry-run, then without --dry-run"

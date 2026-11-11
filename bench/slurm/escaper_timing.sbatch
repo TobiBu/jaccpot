@@ -7,8 +7,14 @@
 #   sbatch bench/slurm/escaper_timing.sbatch                  # every row (~1.5-2 h, rough)
 #   ROWS='dehnen' sbatch bench/slurm/escaper_timing.sbatch    # the rows whose tag matches a regex
 #
-# The IC: the 1e8 light-Sgr merger, UNCLIPPED (100,000,001 rows, a 45.7 Mpc box; A2), copy it to $DATA first (4.4 GB):
+# The IC: the 1e8 light-Sgr merger, UNCLIPPED (100,000,001 rows, a 45.7 Mpc box; A2), copy it to $DATA first (2.8 GB):
 #   /export/scratch/tbuck/mn-scratch/a2/sgr/sgr_light_1e8_noclip.npz -> $DATA/sgr_light_1e8_noclip.npz
+# On HoreKa this runs as job "escaper" of the bundle (bench/slurm/h0/README.md; stage_data.sh stages the IC).
+#
+# Allocator: XLA_PYTHON_CLIENT_PREALLOCATE=true (fraction 0.95) by default: ESC measured that 1e8 on ONE card
+# needs it, for the escaper arm AND the clipped baseline (with false both failed to place one 16-17 GiB block:
+# A1's BFC placement sensitivity at 1e8; docs/production_2026-11.md, section ESC). ESC_PREALLOCATE=false
+# restores the old setting.
 #
 # Rows (bench/escaper_timing.py; 6 segments of 10 steps, dt 1e-3, softening 1.5e-3, energy at every edge):
 #   esc_<mac>        escapers ON, r_escape 80 (800 kpc), the unclipped IC (~1.8e5 escapers)
@@ -29,16 +35,19 @@
 
 set -euo pipefail
 
-# --- adapt: a python with jax 0.11.2 (CUDA 12), yggdrax at the A2 commit or later, jaccpot at the ESC branch
+# --- adapt: a python with jax 0.11.2 (CUDA 12), yggdrax main, jaccpot main (ESC merged)
 PY=${PY:-python}
 JACCPOT=${JACCPOT:-$PWD}
 DATA=${DATA:-${WORKSPACE:-$HOME}/esc-data}
 OUT=${OUT:-${WORKSPACE:-$HOME}/esc-escaper-timing-$(date +%Y%m%d)}
 ROWS=${ROWS:-.}
-IC=$DATA/sgr_light_1e8_noclip.npz
+IC=${IC:-$DATA/sgr_light_1e8_noclip.npz}
+# STEPS / SEGMENTS: per row (the CPU smoke's tiny IC runs fewer)
+STEPS=${STEPS:-10}
+SEGMENTS=${SEGMENTS:-6}
 
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES%%,*}
-export XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
+export XLA_PYTHON_CLIENT_PREALLOCATE=${ESC_PREALLOCATE:-true} XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_experimental_enable_fusion_autotuner=false"
 echo "node $(hostname) card ${CUDA_VISIBLE_DEVICES}"
 nvidia-smi -i "$CUDA_VISIBLE_DEVICES" || true
@@ -64,7 +73,7 @@ for entry in "${ROW_LIST[@]}"; do
   if [ -s "$out" ]; then echo "skip $tag (done)"; continue; fi
   echo "== $tag $(date -Is)"
   # shellcheck disable=SC2086
-  "$PY" "$S" --ic "$IC" --steps 10 --segments 6 $args --out "$out" > "$OUT/logs/$tag.log" 2>&1 \
+  "$PY" "$S" --ic "$IC" --steps "$STEPS" --segments "$SEGMENTS" $args --out "$out" > "$OUT/logs/$tag.log" 2>&1 \
     || echo "row $tag failed rc=$? (see $OUT/logs/$tag.log)"
   tail -1 "$OUT/logs/$tag.log" || true
 done

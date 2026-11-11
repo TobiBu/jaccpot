@@ -5,7 +5,7 @@ MESC_JACCPOT=${MESC_JACCPOT:-${SLURM_SUBMIT_DIR:-$(pwd)}}
 # shellcheck source=../h0/env.sh
 source "$MESC_JACCPOT/bench/slurm/h0/env.sh"
 MESC_RUN=${MESC_RUN:-$H0_ROOT/mesc/${SLURM_JOB_ID:-local}}
-MESC_IC=${MESC_IC:-$H0_ROOT/data/sgr_light_1e8_noclip.npz}
+MESC_IC=${MESC_IC:-$SGR_IC}   # env.sh: $H0_ROOT/data/big/ (stage_data.sh)
 OUT=$MESC_RUN/${MESC_JOB:?}
 mkdir -p "$OUT"
 echo "=== MESC job $MESC_JOB on $(hostname) $(date -Is) (slurm job ${SLURM_JOB_ID:-none}, nodes ${SLURM_JOB_NODELIST:-?})"
@@ -15,8 +15,12 @@ cd "$MESC_JACCPOT"
 ENTRY="$H0_PY bench/mesh_escaper_timing.py"
 GPN=${H0_GPUS_PER_NODE:-4}
 CPN=${SLURM_CPUS_ON_NODE:-76}
+# MESC_EXTRA: arguments for every row (the CPU smoke's tiny IC runs fewer segments / steps)
+MESC_EXTRA=${MESC_EXTRA:-}
 MESC_PORT=${MESC_PORT:-$((20000 + ${SLURM_JOB_ID:-0} % 20000))}
-next_port() { MESC_PORT=$((MESC_PORT + 1)); export JAX_COORDINATOR_PORT=$MESC_PORT; }
+next_port() { # MESC_EXTRA: arguments for every row (the CPU smoke's tiny IC runs fewer segments / steps)
+MESC_EXTRA=${MESC_EXTRA:-}
+MESC_PORT=$((MESC_PORT + 1)); export JAX_COORDINATOR_PORT=$MESC_PORT; }
 # row NAME SRUN_ARGS... -- ENTRY_ARGS...: one srun step, skipped when its result exists (resubmit resumes)
 row() {
   local name=$1; shift
@@ -27,7 +31,8 @@ row() {
   next_port
   echo "--- $name: srun ${srun_args[*]} -- ${entry_args[*]} (port $MESC_PORT) $(date -Is)"
   local t0=$SECONDS
-  if srun "${srun_args[@]}" $ENTRY "${entry_args[@]}" --ic "$MESC_IC" --out "$OUT/$name" \
+  # shellcheck disable=SC2086
+  if srun "${srun_args[@]}" $ENTRY "${entry_args[@]}" $MESC_EXTRA --ic "$MESC_IC" --out "$OUT/$name" \
       > "$OUT/$name.log" 2>&1; then
     echo "    ok $((SECONDS - t0)) s"; grep '^\[done\]' "$OUT/$name.log" || true
   else

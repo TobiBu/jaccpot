@@ -13,13 +13,19 @@ dedicated nodes, so the times count. The suite itself is described in `docs/accu
 
 ## What you run
 
-H0's environment does the setup: `bench/slurm/h0/site.env` (account, partition, `H0_ROOT`), then
+**On HoreKa this suite is job `a4` of the bundle (`bench/slurm/h0/README.md` is the guide):
+`bash bench/slurm/h0/submit_all.sh --only a4` calls `submit.sh` below with the run directory inside the
+bundle's run (`$H0_ROOT/runs/<run id>/a4`) and the bundle's preflight as a dependency; `A4_ARGS` passes options
+(e.g. `A4_ARGS="--tier 1card"`). `submit.sh` itself still works on its own.**
+
+The bundle's environment does the setup: `bench/slurm/h0/site.env` (account, partition, `H0_ROOT`), then
 `setup_env.sh` once.
 
-A4 needs two more values in `bench/slurm/a4/site.env`:
+A4 needs one more value in `bench/slurm/a4/site.env`:
 
-* `A4_AGAMA_PY`: a python with agama, for the galaxy ICs (H0's venv has none);
-* `A4_ODISSEO`: an Odisseo checkout with `tools/a4_galaxy_ics.py`.
+* `A4_AGAMA_PY`: a python with agama, for the galaxy ICs (the bundle's venv has none);
+* `A4_ODISSEO` (an Odisseo checkout with `tools/a4_galaxy_ics.py`) defaults to the clone `setup_env.sh` makes at
+  `bench/slurm/h0/pins.env`'s Odisseo commit.
 
 ```bash
 bash bench/slurm/a4/submit.sh --dry-run                # every sbatch command, with its dependencies

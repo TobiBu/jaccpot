@@ -1,5 +1,5 @@
 #!/bin/bash
-# H0 bundle: after the jobs, one tarball + SUMMARY.md to send back.
+# HoreKa bundle: after the jobs, one tarball + SUMMARY.md to send back (every job, a4 included).
 #
 #   bash bench/slurm/h0/collect.sh                 # the newest run under $H0_ROOT/runs
 #   bash bench/slurm/h0/collect.sh RUN_DIR         # a given run (or a SMOKE run under $H0_ROOT/smoke)
@@ -24,6 +24,13 @@ fi
 # the scaling matrices' own summaries (their python imports jaccpot: the run environment)
 for m in "$RUN"/scaling_*/matrix; do
   [ -d "$m" ] && { "$H0_PY" "$H0_JACCPOT/bench/multigpu_scaling_matrix.py" --out-dir "$m" --summary > /dev/null || true; }
+done
+if [ -d "$RUN/mgrad/matrix" ]; then
+  "$H0_PY" "$H0_JACCPOT/bench/multigpu_grad_matrix.py" --out-dir "$RUN/mgrad/matrix" --summary > /dev/null || true
+fi
+for j in m1_node1 m1_node2 m2g_node1 m2g_node2 mesc_node1 mesc_node2; do
+  t=${j%_node*}
+  [ -d "$RUN/$j" ] && { "$H0_PY" "$H0_JACCPOT/bench/slurm/$t/summarize.py" "$RUN/$j" > "$RUN/$j/SUMMARY.md" 2> /dev/null || true; }
 done
 "$H0_PY" "$H0_DIR/summarize.py" "$RUN"
 name=$(basename "$RUN")

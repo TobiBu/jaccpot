@@ -5,6 +5,10 @@
 #   bash bench/slurm/a4/submit.sh [--dry-run] [--tier 1card|node|both] [--only L1,L2,...] [--no-ics]
 #   bash bench/slurm/a4/submit.sh --local-smoke     # gate 4: every job's exact commands at tiny N on this CPU
 #
+# The HoreKa bundle runs this as its job "a4" (bash bench/slurm/h0/submit_all.sh --only a4): A4_RUN inside the
+# bundle's run, A4_DEPENDENCY (e.g. afterok:<preflight id>) on the IC job and every array, A4_PREFLIGHT (the
+# preflight's status file for a4: a rung exits at once when the preflight found the entry broken).
+#
 # Jobs: ics (CPU, agama; skipped when every IC exists) -> one array per ladder and tier (afterok:ics) ->
 # summarize (afterany: every array). Rerunning into the same A4_RUN resumes: rungs with a result are skipped.
 set -euo pipefail
@@ -79,7 +83,7 @@ if [ "$DRY" = 0 ]; then
 fi
 RUN=${A4_RUN:-$H0_ROOT/a4/$(date +%Y%m%d-%H%M%S)}
 COMMON=(-A "$H0_ACCOUNT" --chdir="$JACCPOT")
-EXPORT=ALL,A4_JACCPOT="$JACCPOT",A4_RUN="$RUN",A4_IC="$A4_IC"
+EXPORT=ALL,A4_JACCPOT="$JACCPOT",A4_RUN="$RUN",A4_IC="$A4_IC"${A4_PREFLIGHT:+,A4_PREFLIGHT="$A4_PREFLIGHT"}
 # shellcheck disable=SC2206
 EXTRA=($H0_SBATCH_EXTRA)
 submit() {  # submit NAME SBATCH_ARGS...: prints the command; on a real run, the job id
@@ -89,11 +93,11 @@ submit() {  # submit NAME SBATCH_ARGS...: prints the command; on a real run, the
   mkdir -p "$RUN/logs"
   sbatch --parsable "${COMMON[@]}" "${EXTRA[@]}" "$@"
 }
-dep=""
+dep=${A4_DEPENDENCY:+--dependency=$A4_DEPENDENCY}
 if [ "$ICS" = 1 ]; then
   if [ "$DRY" = 1 ] || ! { [ -s "$A4_IC/galaxy.npz" ] && [ -s "$A4_IC/bar.npz" ] && [ -s "$A4_IC/merger.npz" ]; }; then
-    ics=$(submit ics -p "$A4_CPU_PARTITION" --export="$EXPORT" --output="$RUN/logs/%x-%j.out" "$DIR/ics.sbatch")
-    dep="--dependency=afterok:$ics"
+    ics=$(submit ics -p "$A4_CPU_PARTITION" --export="$EXPORT" --output="$RUN/logs/%x-%j.out" $dep "$DIR/ics.sbatch")
+    dep="--dependency=afterok:$ics${A4_DEPENDENCY:+,$A4_DEPENDENCY}"
   fi
 fi
 arrays=()

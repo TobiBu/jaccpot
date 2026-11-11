@@ -11,6 +11,7 @@
 # force step (FusedForceProvider.step: rebuild + accelerations), each compiled once per
 # kernel, then timed in interleaved rounds (--reps rounds x --inner calls, median per
 # round). The rows also carry the compiled temp bytes and the bitwise diff vs Triton.
+# On HoreKa this runs as job "s1b" of the bundle (bench/slurm/h0/README.md: one checkout, one setup, every job).
 #SBATCH --job-name=jaccpot-s1b-mosaic-l2p
 #SBATCH --partition=accelerated
 #SBATCH --nodes=1
@@ -22,8 +23,7 @@
 
 set -euo pipefail
 
-# --- adapt: a python with jax 0.11.2 (CUDA 12), jaccpot (this checkout, branch
-# s1b/mosaic-l2p), yggdrax main
+# --- adapt: a python with jax 0.11.2 (CUDA 12), jaccpot (this checkout: main), yggdrax main
 # source ~/envs/jaccpot-jax0112/bin/activate
 JACCPOT=${JACCPOT:-$PWD}                                  # this jaccpot checkout
 DISC_IC=${DISC_IC:-$HOME/ic/disk_bulge_25m.npz}           # copied from /export/scratch/tbuck/odisseo_ic/

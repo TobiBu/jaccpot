@@ -13,6 +13,8 @@
 # The sphere ladders sample their ICs in the run itself (numpy, seeded).
 set -euo pipefail
 A4_JACCPOT=${A4_JACCPOT:-${SLURM_SUBMIT_DIR:-$(pwd)}}
+# shellcheck source=../h0/site.env
+source "$A4_JACCPOT/bench/slurm/h0/site.env"   # H0_ROOT: A4_ODISSEO's default (setup_env.sh's clone)
 # shellcheck source=site.env
 source "$A4_JACCPOT/bench/slurm/a4/site.env"
 : "${A4_IC_SCALE:=1}"   # the local smoke shrinks every IC (A4_IC_SCALE=0.0001)

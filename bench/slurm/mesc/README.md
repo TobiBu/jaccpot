@@ -1,5 +1,9 @@
 # MESC: escapers on the mesh at 1e8 on HoreKa (prepared, not run)
 
+**On HoreKa these are jobs `mesc_node1` and `mesc_node2` of the bundle: `bench/slurm/h0/README.md` is the guide
+(`stage_data.sh` stages the IC, `submit_all.sh --only mesc_node1,mesc_node2`). This file says what the rows
+measure.**
+
 Track MESC of the multi-node accuracy plan (wave 3): `ProductionRunner(mesh=MeshRunConfig(...),
 escapers=EscaperPolicy(r_escape=80))` on the FULL unclipped 1e8 Sgr IC (100,000,001 rows, a 45.7 Mpc
 box) as N processes x 1 GPU, against the clipped control (escapers off, every particle beyond 80
@@ -8,20 +12,21 @@ section MESC.
 
 ## What you run
 
-H0's environment (`bench/slurm/h0/`: `site.env`, the venv, `setup_env.sh` once). Stage the IC first
-(4.4 GB):
+The bundle's environment (`bench/slurm/h0/`: `site.env`, the venv, `setup_env.sh` once). The IC (2.8 GB) is
+staged by the bundle's `stage_data.sh` from the development machine into `$H0_ROOT/data/big/` (without it the
+jobs record `SKIPPED`):
 
 ```bash
-mkdir -p $H0_ROOT/data
-# from the development machine:
-#   /export/scratch/tbuck/mn-scratch/a2/sgr/sgr_light_1e8_noclip.npz -> $H0_ROOT/data/
-bash bench/slurm/mesc/submit.sh --dry-run
-bash bench/slurm/mesc/submit.sh            # node1 and node2; or: submit.sh node1
+# on the development machine:
+bash bench/slurm/h0/stage_data.sh USER@horeka.scc.kit.edu:/path/to/H0_ROOT
+# on HoreKa:
+bash bench/slurm/h0/submit_all.sh --dry-run --only mesc_node1,mesc_node2
+bash bench/slurm/h0/submit_all.sh --only mesc_node1,mesc_node2    # bench/slurm/mesc/submit.sh forwards here
 ```
 
-Results: `$H0_ROOT/mesc/<run id>/<job>/SUMMARY.md` and every row's `result_p<rank>.json`. Send back
-`tar czf mesc.tgz -C $H0_ROOT/mesc/<run id> .` (small). A resubmission into the same run
-(`MESC_RUN=$H0_ROOT/mesc/<run id> bash bench/slurm/mesc/submit.sh node1`) skips the finished rows.
+Results: `$H0_ROOT/runs/<run id>/mesc_node1/SUMMARY.md` (and `mesc_node2/`) and every row's
+`result_p<rank>.json`; `collect.sh` puts them in the bundle's tarball. A resubmission into the same run
+(`H0_RUN_ID=<run id> bash bench/slurm/h0/submit_all.sh --only mesc_node1`) skips the finished rows.
 
 ## The jobs
 

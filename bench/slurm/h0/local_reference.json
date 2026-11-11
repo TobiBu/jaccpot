@@ -1,6 +1,72 @@
 {
- "_about": "Local single-card L pins (bench/dce_pins.py record --pins L1,L2,L3, root /export/scratch/tbuck/dce_pins), A100-PCIE-40GB on the shared development machine, a free card with another user's idle 416 MiB context on it (every row flagged contaminated; the numbers are clean per docs/production_2026-10.md). The H0 sanity row compares HoreKa's h0-L-main with these. No L pins were recorded locally on main 96122f63; the S9/S10 merges since 7510558a (#486-#498) were opt-in with CPU program identity 36/36 per their records, but nobody re-timed the L pins on 96122f63 locally: a HoreKa-vs-local gap of a few percent is not by itself a regression.",
+ "_about": "Local single-card L pins (bench/dce_pins.py record --pins L2, then L1,L3; root /export/scratch/tbuck/mn-scratch/h1/pins), recorded by track H1 on 2026-11-10 AT THE BUNDLE'S PINS: jaccpot main e5043069 (library code; bench/ and docs/ of the H1 branch), yggdrax f722c24, nornax 30be376, mimirax 1101a6e, jax 0.11.2, A100-PCIE-40GB cards of the SHARED development machine selected by autocvd (on-free-card), production flags (fusion autotuner off). The H0 sanity row (SUMMARY.md section 7) compares HoreKa's h0-L-main with h1-L-main and h1-L-main-b. B/p, far-pair counts and L3's rel-L2 are the same program on the same IC and must agree to the digits shown (they reproduced the 2026-10-30 records below exactly; L3's B/p alternates between 255.36 and 257.36 run to run, as before). The walls are a RATIO check only: these cards are shared with other users (host load 50-65 during the runs; 'contaminated' is dce_pins' own flag for another process on the card), and HoreKa's are SXM cards on dedicated nodes. The older tags (ab-*, s11s2-*) are kept for reference; they were recorded at older code.",
  "tags": {
+  "h1-L-main": {
+   "about": "the bundle's pins (A), card 7",
+   "L1": {
+    "n": 8000000,
+    "step_ms_min": 77.119,
+    "step_ms_median": 77.806,
+    "bytes_per_particle": 315.74,
+    "far_pair_count": 39093974,
+    "contaminated": false,
+    "loadavg_max": 65.4
+   },
+   "L2": {
+    "n": 100000000,
+    "step_ms_min": 863.869,
+    "step_ms_median": 864.046,
+    "bytes_per_particle": 256.77,
+    "far_pair_count": 402173018,
+    "contaminated": false,
+    "loadavg_max": 50.2
+   },
+   "L3": {
+    "n": 25000000,
+    "step_ms_min": 235.51,
+    "step_ms_median": 236.287,
+    "bytes_per_particle": 255.36,
+    "far_pair_count": 94801662,
+    "contaminated": false,
+    "loadavg_max": 59.6,
+    "force_ms_min": 100.687,
+    "force_ms_median": 100.692,
+    "rel_l2": 0.0004179115652402862
+   }
+  },
+  "h1-L-main-b": {
+   "about": "the same, A-vs-A control, card 7",
+   "L1": {
+    "n": 8000000,
+    "step_ms_min": 77.108,
+    "step_ms_median": 77.672,
+    "bytes_per_particle": 315.74,
+    "far_pair_count": 39093974,
+    "contaminated": false,
+    "loadavg_max": 62.5
+   },
+   "L2": {
+    "n": 100000000,
+    "step_ms_min": 864.792,
+    "step_ms_median": 865.095,
+    "bytes_per_particle": 256.77,
+    "far_pair_count": 402173018,
+    "contaminated": false,
+    "loadavg_max": 66.4
+   },
+   "L3": {
+    "n": 25000000,
+    "step_ms_min": 234.15,
+    "step_ms_median": 235.554,
+    "bytes_per_particle": 255.36,
+    "far_pair_count": 94801662,
+    "contaminated": false,
+    "loadavg_max": 58.4,
+    "force_ms_min": 100.139,
+    "force_ms_median": 100.339,
+    "rel_l2": 0.0004179115652402862
+   }
+  },
   "ab-base-20261030": {
    "about": "jaccpot main 7510558a (worktree ~/jaccpot-ab483), yggdrax pre-#104, card 7",
    "L1": {

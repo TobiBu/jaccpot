@@ -17,7 +17,7 @@
 #                       each task sees ONE card; initialize() passes local_device_ids=[0])
 #   det_*               dehnen_error with --xla_gpu_deterministic_ops=true (the bitwise gate if the
 #                       production flags' A-vs-A is not clean)
-export M2G_JOB=node1
+export M2G_JOB=${M2G_JOB:-node1}   # the HoreKa bundle's job sets m2g_node1
 # shellcheck source=_prologue.sh
 source "${M2G_JACCPOT:-$SLURM_SUBMIT_DIR}/bench/slurm/m2g/_prologue.sh"
 N=${M2G_N_PER_GPU:-2e6}
