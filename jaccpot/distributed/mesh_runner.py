@@ -266,6 +266,39 @@ def gather_by_id(
     return _by_id(flat, _host(layout.ids), _host(layout.count), tail_part)
 
 
+def _launch_free(fingerprint: dict) -> dict:
+    """A restart fingerprint without how the processes were launched.
+
+    The multi-process launch variables (``JACCPOT_MP_*``) and XLA's forced CPU
+    device count say how a mesh was put together, not what it computes; the
+    layout check (device count, ``cap``) and the force key's digest decide that.
+    So a checkpoint written by N processes continues bitwise in one process with
+    N devices, and the other way.
+
+    Parameters
+    ----------
+    fingerprint : dict
+        ``ProductionRunner._fingerprint``'s record.
+
+    Returns
+    -------
+    dict
+        A copy without them.
+    """
+    out = dict(fingerprint)
+    env = out.get("env")
+    if isinstance(env, dict):
+        out["env"] = {k: v for k, v in env.items() if not k.startswith("JACCPOT_MP_")}
+    flags = out.get("xla_flags")
+    if isinstance(flags, str):
+        out["xla_flags"] = " ".join(
+            t
+            for t in flags.split()
+            if not t.startswith("--xla_force_host_platform_device_count")
+        )
+    return out
+
+
 #: :func:`_elastic_program`'s programs, by (mesh, capacity, options)
 _ELASTIC_PROGRAMS: dict = {}
 
@@ -1992,8 +2025,8 @@ class MeshBackend:
         from jaccpot.scheme import scheme_record
 
         runner = self.runner
-        written = meta["fingerprint"]
-        now = runner._fingerprint(state, masses)
+        written = _launch_free(meta["fingerprint"])
+        now = _launch_free(runner._fingerprint(state, masses))
         mismatches = [
             key
             for key in sorted(set(written) | set(now))
