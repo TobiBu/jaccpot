@@ -1291,7 +1291,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.gated == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # ~18 min of calls on a loaded 64-core host (the fused cross-mode case ~14 of
+    # them; its dehnen_error twin is manual)
+    timeout-minutes: 60
     env:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu

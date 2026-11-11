@@ -249,7 +249,21 @@ def _gap(a, b) -> float:
     return float(np.max(np.abs(np.asarray(a, np.float64) - np.asarray(b, np.float64))))
 
 
-@pytest.mark.parametrize("mac", ["dehnen", "dehnen_error"])
+#: ``dehnen_error`` is manual (``JACCPOT_RUN_MANUAL_TESTS=1``): ~14 min of CPU compile
+#: per MAC on a loaded host; the geometric MAC runs in CI
+_CROSS_MACS = [
+    "dehnen",
+    pytest.param(
+        "dehnen_error",
+        marks=pytest.mark.skipif(
+            os.environ.get("JACCPOT_RUN_MANUAL_TESTS") != "1",
+            reason="manual: ~14 min of compile; set JACCPOT_RUN_MANUAL_TESTS=1",
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize("mac", _CROSS_MACS)
 def test_mesh_and_single_card_continue_each_other(cpu_fused_lane, mac, tmp_path):
     """Mesh checkpoint -> one card and -> a one-device mesh; one card's ``.npz`` ->
     the mesh: each within the yardstick (the uninterrupted runs' mesh-vs-card gap)
