@@ -86,6 +86,7 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only
     # deferred, as ``fmm_evaluate`` defers it: the gradient lane's modules stay out
     # of the forward lane's import graph
     from ._large_n_grad import LargeNGradPlan, LargeNGradStatics
+    from .target_points import TargetField, TargetPlan
 
 __all__ = [
     "FusedForceProvider",
@@ -1261,6 +1262,174 @@ class FusedForceProvider:
             sorted_output=order == "tree",
             force_params=force,
         )
+
+    # ----------------------------------------------------------------------
+    # Target points (#302): the field at points that are not sources.
+    # ----------------------------------------------------------------------
+
+    @on_lane_platform
+    def plan_targets(
+        self,
+        topology: FusedTopology,
+        points: Array,
+        *,
+        group_size: int = 32,
+        headroom: float = 1.5,
+        force_scale: Optional[Array] = None,
+    ) -> "TargetPlan":
+        """Size a target evaluation's static capacities, eagerly.
+
+        :func:`~jaccpot.runtime.target_points.plan_target_points` on this
+        provider: the plan :meth:`target_field` and :meth:`step_with_targets`
+        take. Its fields are compile-time constants, so points that move inside
+        its headroom recompile nothing.
+
+        Parameters
+        ----------
+        topology : FusedTopology
+            A topology at the sources' current positions (an eager prepare's).
+        points : Array
+            ``[M, 3]`` the points now.
+        group_size : int
+            Points per target group.
+        headroom : float
+            Capacity multiplier over the needs measured now.
+        force_scale : Optional[Array]
+            ``mac_type='dehnen_error'``: the points' f_b; ``None`` bootstraps it.
+
+        Returns
+        -------
+        TargetPlan
+            The plan.
+        """
+        from .target_points import plan_target_points
+
+        return plan_target_points(
+            self,
+            topology,
+            points,
+            group_size=int(group_size),
+            headroom=float(headroom),
+            force_scale=force_scale,
+        )
+
+    @on_lane_platform
+    def target_field(
+        self,
+        topology: FusedTopology,
+        points: Array,
+        plan: "TargetPlan",
+        *,
+        force_scale: Optional[Array] = None,
+        potential: bool = False,
+        return_force_scale: bool = False,
+    ) -> "TargetField":
+        """The field of ``topology``'s sources at ``points`` (massless, not sources).
+
+        :func:`~jaccpot.runtime.target_points.evaluate_target_points`: the points
+        do not enter the tree, the walk, the force scale or the topology, so the
+        sources' accelerations are those of a run without them. Traced or eager.
+
+        Parameters
+        ----------
+        topology : FusedTopology
+            From :meth:`rebuild` (or an eager prepare).
+        points : Array
+            ``[plan.num_points, 3]``.
+        plan : TargetPlan
+            From :meth:`plan_targets`.
+        force_scale : Optional[Array]
+            The points' f_b from the previous evaluation (``dehnen_error``).
+        potential : bool
+            Also return the potential at the points.
+        return_force_scale : bool
+            Also return the points' f_b for the next evaluation.
+
+        Returns
+        -------
+        TargetField
+            ``acc``, ``potential``, ``force_scale``, ``needs``, ``ok``.
+        """
+        from .target_points import evaluate_target_points
+
+        return evaluate_target_points(
+            self,
+            topology,
+            points,
+            plan=plan,
+            force_scale=force_scale,
+            potential=bool(potential),
+            return_force_scale=bool(return_force_scale),
+        )
+
+    @on_lane_platform
+    def step_with_targets(
+        self,
+        positions: Array,
+        masses: Array,
+        points: Array,
+        plan: "TargetPlan",
+        params: Optional[Union[ForceParams, StepParams]] = None,
+        aux: Optional[tuple] = None,
+        *,
+        target_force_scale: Optional[Array] = None,
+        potential: bool = False,
+    ) -> tuple[Any, tuple, "TargetField"]:
+        """:meth:`step` plus the field at ``points`` on the same topology.
+
+        The sources' half is :meth:`step`'s sequence call for call (rebuild,
+        accelerations, verdict); the target evaluation reads the rebuilt
+        topology after it. The target verdict is NOT folded into the sources'
+        bits: it is the returned field's ``ok``.
+
+        Parameters
+        ----------
+        positions : Array
+            ``[N, 3]`` source positions.
+        masses : Array
+            ``[N]`` source masses.
+        points : Array
+            ``[plan.num_points, 3]`` target points.
+        plan : TargetPlan
+            From :meth:`plan_targets`.
+        params : Optional[Union[ForceParams, StepParams]]
+            As in :meth:`step` (the sources' force; the targets take the
+            engine's own ``G`` and softening).
+        aux : Optional[tuple]
+            As in :meth:`step`.
+        target_force_scale : Optional[Array]
+            The points' f_b from the previous evaluation (``dehnen_error``).
+        potential : bool
+            Also the potential at the points.
+
+        Returns
+        -------
+        tuple[Any, tuple, TargetField]
+            ``(acc, (f_b, bits, needs), field)``; under ``dehnen_error`` the
+            field carries the points' next f_b.
+        """
+        from .target_points import evaluate_target_points
+
+        f_b_in, bits_in, needs_in = (None, None, None) if aux is None else aux
+        topology = self.rebuild(positions, masses, force_scale=f_b_in)
+        if self.scale_carry:
+            acc, f_b = self.accelerations(topology, params, force_scale=True)
+        else:
+            acc, f_b = self.accelerations(topology, params), None
+        bits = topology.overflow_bits(
+            extra=0 if params is None else self.params_overflow(params)
+        )
+        bits, needs = _fold_verdict(bits, topology.needs(), bits_in, needs_in)
+        field = evaluate_target_points(
+            self,
+            topology,
+            points,
+            plan=plan,
+            force_scale=target_force_scale,
+            potential=bool(potential),
+            return_force_scale=bool(self.scale_carry),
+        )
+        return acc, (f_b, bits, needs), field
 
     @on_lane_platform
     def capacity_ok(self, topology: FusedTopology) -> Array:
