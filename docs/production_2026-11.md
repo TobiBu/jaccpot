@@ -1487,7 +1487,7 @@ rows keyed by id). `docs/production.md`, "Sharded checkpoints", is the guide.
 CI shards run here with the CI arguments, device counts and typecheck settings: `test_shards.py check` rc 0;
 `unit` (typecheck 1) 1478 passed / 202 skipped; `characterization` 21 passed (no new constructor-state field in it:
 no golden regenerated); `distributed-checkpoint` (new job, 4 forced devices, installs `.[dev,io]`) 16 passed in
-32.5 min (both fused cross-mode MACs; the `dehnen_error` twin is now manual, ~14 min of compile); bench-tooling 155
+32.5 min (both fused cross-mode MACs; the `dehnen_error` twin is now manual, ~14 min of compile; `test_checkpoint_mesh.py` as CI runs it: peak RSS 5.3 GB, 13.7 min); bench-tooling 155
 passed. `test-distributed-multiprocess`: M2's refusal scenario now asks for `checkpoint="npz"`.
 
 **Open issues.**
