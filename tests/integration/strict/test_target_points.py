@@ -279,3 +279,50 @@ def test_capacities_are_totals_so_a_dense_clump_costs_only_its_own_pairs(lane):
     )
     temp = compiled.memory_analysis().temp_size_in_bytes
     assert temp < 256 * 2**20, temp
+
+
+def test_a_softening_override_gives_another_kernel_from_a_small_softening_tree(lane):
+    """Sources built with a SMALL softening (their own walk stays O(n log n)) give
+    the field of the engine's EPS at the points with ``softening=EPS``: against the
+    float64 direct sum at EPS, at the criterion's tolerance (the hybrid scheme's
+    back-reaction: a compact cluster's field on heavy galaxy particles)."""
+    if lane["mac"] != "dehnen":
+        pytest.skip("one criterion suffices for the override")
+    from jaccpot import FastMultipoleMethod, FusedForceProvider
+
+    base = FastMultipoleMethod(preset="galaxy").advanced
+    advanced = dataclasses.replace(
+        base,
+        tree=dataclasses.replace(base.tree, leaf_target=LEAF, cell_min_level=0),
+        runtime=dataclasses.replace(
+            base.runtime, fixed_order=ORDER, cpu_fused_lane=True
+        ),
+        mac_type="dehnen",
+    )
+    tiny = FastMultipoleMethod(
+        preset="galaxy",
+        theta=THETA,
+        G=1.0,
+        softening=1e-5,
+        precision="fp32",
+        advanced=advanced,
+    )
+    prov, topo = FusedForceProvider.prepare(
+        tiny, lane["xf"], lane["mf"], leaf_size=LEAF, max_order=ORDER
+    )
+    plan = prov.plan_targets(topo, lane["pts"], softening=EPS)
+    field = prov.target_field(topo, lane["pts"], plan, softening=EPS)
+    assert bool(field.ok)
+    want, _ = _direct(
+        np.asarray(lane["pts"], np.float64), lane["x"], lane["m"], lane["prov"].engine
+    )
+    assert _rel_l2(np.asarray(field.acc, np.float64), want) < _BOUND["dehnen"]
+    # without the override the same tree gives the near-Newtonian field
+    bare = prov.target_field(topo, lane["pts"], prov.plan_targets(topo, lane["pts"]))
+    coincident = _SLICES["coincident"]
+    assert (
+        _rel_l2(np.asarray(bare.acc, np.float64)[coincident], want[coincident])
+        > 10 * _BOUND["dehnen"]
+    )
+    with pytest.raises(ValueError, match="softening"):
+        prov.target_field(topo, lane["pts"], plan, softening=-1.0)

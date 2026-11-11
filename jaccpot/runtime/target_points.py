@@ -793,6 +793,7 @@ def evaluate_target_points(
     potential: bool = False,
     return_force_scale: bool = False,
     mac: Optional[str] = None,
+    softening: Optional[float] = None,
 ) -> TargetField:
     """The field of ``topology``'s sources at ``points``; traced or eager.
 
@@ -823,6 +824,13 @@ def evaluate_target_points(
         Also return the points' ``f_b`` for the next evaluation.
     mac : Optional[str]
         Criterion override (:func:`target_mac_type`).
+    softening : Optional[float]
+        The points' pair-kernel softening (Plummer-equivalent, the engine's
+        kernel), with the target walk's separation floor following it
+        (``softening_floor``, or the kernel's support factor, times it);
+        ``None`` takes the engine's. A source tree built with a SMALL softening
+        (its own walk stays O(n log n)) can then give the field of a larger one
+        -- a compact cluster's back-reaction on heavy galaxy particles.
 
     Returns
     -------
@@ -833,9 +841,13 @@ def evaluate_target_points(
     ------
     ValueError
         If ``points`` is not ``[plan.num_points, 3]``, or ``dehnen_error`` has no
-        ``force_scale``.
+        ``force_scale``, or ``softening`` is negative.
     """
-    from jaccpot.softening import resolve_softening_kernel, softening_params
+    from jaccpot.softening import (
+        resolve_softening_kernel,
+        softening_params,
+        support_factor,
+    )
 
     engine = provider.engine
     mac_name = target_mac_type(engine, mac)
@@ -851,6 +863,16 @@ def evaluate_target_points(
             "scale (a previous evaluation's return_force_scale=True, or "
             "bootstrap_target_force_scale)"
         )
+    kernel = resolve_softening_kernel(getattr(engine, "softening_kernel", None))
+    if softening is None:
+        eps = float(engine.softening)
+        floor = float(engine._walk_separation_floor())
+    else:
+        eps = float(softening)
+        if eps < 0.0:
+            raise ValueError(f"softening must be >= 0, got {eps}")
+        factor = getattr(engine, "softening_floor", None)
+        floor = float(support_factor(kernel) if factor is None else factor) * eps
     order = int(provider.max_order)
     src = _source_tables(engine, topology, order=order, mac=mac_name)
     dtype = src.radius.dtype
@@ -907,12 +929,10 @@ def evaluate_target_points(
             mac=mac_name,
             theta=float(provider.theta_value),
             theta_max=float(getattr(engine, "mac_theta_max", 1.0)),
-            floor=float(engine._walk_separation_floor()),
+            floor=floor,
             order=order,
         ),
     )
-    kernel = resolve_softening_kernel(getattr(engine, "softening_kernel", None))
-    eps = float(engine.softening)
     want_scale = bool(return_force_scale)
     want_pot = bool(potential)
     zeros3 = jnp.zeros((ngroups, gsize, 3), dtype)
@@ -1009,7 +1029,12 @@ def _jitted(provider: Any, plan: TargetPlan, **static: Any) -> Any:
 
 
 def bootstrap_target_force_scale(
-    provider: Any, topology: Any, points: Array, *, plan: TargetPlan
+    provider: Any,
+    topology: Any,
+    points: Array,
+    *,
+    plan: TargetPlan,
+    softening: Optional[float] = None,
 ) -> tuple[Array, TargetField]:
     """The points' first ``f_b`` under ``dehnen_error``: one geometric pass.
 
@@ -1023,6 +1048,8 @@ def bootstrap_target_force_scale(
         ``[M, 3]``.
     plan : TargetPlan
         Static shapes.
+    softening : Optional[float]
+        As in :func:`evaluate_target_points`.
 
     Returns
     -------
@@ -1030,9 +1057,9 @@ def bootstrap_target_force_scale(
         ``(f_b, field)`` of a pass with the geometric criterion at the engine's
         theta.
     """
-    field = _jitted(provider, plan, return_force_scale=True, mac="dehnen")(
-        topology, points, None
-    )
+    field = _jitted(
+        provider, plan, return_force_scale=True, mac="dehnen", softening=softening
+    )(topology, points, None)
     return field.force_scale, field
 
 
@@ -1047,6 +1074,7 @@ def plan_target_points(
     group_block: int = 64,
     pair_chunk: int = 128,
     max_rounds: int = 4,
+    softening: Optional[float] = None,
 ) -> TargetPlan:
     """Size a :class:`TargetPlan` eagerly from the points' current needs.
 
@@ -1075,6 +1103,9 @@ def plan_target_points(
         Pairs evaluated together.
     max_rounds : int
         Re-plans before giving up.
+    softening : Optional[float]
+        The points' pair-kernel softening the evaluations will use
+        (:func:`evaluate_target_points`).
 
     Returns
     -------
@@ -1095,14 +1126,16 @@ def plan_target_points(
     if target_mac_type(provider.engine) == "dehnen_error" and force_scale is None:
         for _ in range(int(max_rounds)):
             fb, field = bootstrap_target_force_scale(
-                provider, topology, points, plan=plan
+                provider, topology, points, plan=plan, softening=softening
             )
             if bool(field.ok):
                 break
             plan = plan.grown(field.needs, 1.0)
         force_scale = fb
     for _ in range(int(max_rounds)):
-        field = _jitted(provider, plan)(topology, points, force_scale)
+        field = _jitted(provider, plan, softening=softening)(
+            topology, points, force_scale
+        )
         if bool(field.ok):
             return plan.grown(field.needs, float(headroom))
         plan = plan.grown(field.needs, 1.0)

@@ -1276,6 +1276,7 @@ class FusedForceProvider:
         group_size: int = 32,
         headroom: float = 1.5,
         force_scale: Optional[Array] = None,
+        softening: Optional[float] = None,
     ) -> "TargetPlan":
         """Size a target evaluation's static capacities, eagerly.
 
@@ -1296,6 +1297,9 @@ class FusedForceProvider:
             Capacity multiplier over the needs measured now.
         force_scale : Optional[Array]
             ``mac_type='dehnen_error'``: the points' f_b; ``None`` bootstraps it.
+        softening : Optional[float]
+            The points' pair-kernel softening, as :meth:`target_field`'s (the
+            plan must be sized with the one the evaluations use).
 
         Returns
         -------
@@ -1311,6 +1315,7 @@ class FusedForceProvider:
             group_size=int(group_size),
             headroom=float(headroom),
             force_scale=force_scale,
+            softening=softening,
         )
 
     @on_lane_platform
@@ -1323,6 +1328,7 @@ class FusedForceProvider:
         force_scale: Optional[Array] = None,
         potential: bool = False,
         return_force_scale: bool = False,
+        softening: Optional[float] = None,
     ) -> "TargetField":
         """The field of ``topology``'s sources at ``points`` (massless, not sources).
 
@@ -1344,6 +1350,9 @@ class FusedForceProvider:
             Also return the potential at the points.
         return_force_scale : bool
             Also return the points' f_b for the next evaluation.
+        softening : Optional[float]
+            The points' pair-kernel softening (``None``: the engine's); see
+            :func:`~jaccpot.runtime.target_points.evaluate_target_points`.
 
         Returns
         -------
@@ -1360,6 +1369,7 @@ class FusedForceProvider:
             force_scale=force_scale,
             potential=bool(potential),
             return_force_scale=bool(return_force_scale),
+            softening=softening,
         )
 
     @on_lane_platform
