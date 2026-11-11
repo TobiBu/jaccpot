@@ -744,7 +744,9 @@ def _compact_pairs(
         gid, c, r, t, ok = xs
         far, near = jax.vmap(masks)(c, r, t, ok)  # [B, nodes]
 
-        def place(mask, start, cap, lst_g, lst_n):
+        def place(
+            mask: Array, start: Array, cap: int, lst_g: Array, lst_n: Array
+        ) -> tuple[Array, Array, Array]:
             cnt = jnp.sum(mask, axis=1, dtype=jnp.int32)
             first = start + jnp.cumsum(cnt) - cnt  # [B]
             rank = jnp.cumsum(mask, axis=1, dtype=jnp.int32) - 1
