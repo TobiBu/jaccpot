@@ -26,7 +26,7 @@ def main(root: str) -> None:
         print(
             f"| {step} | {r['process']}/{r['processes']} | {r['devices']} | {r.get('n')} | "
             f"{' '.join(writes)} | {' '.join(restores)} | "
-            f"{'' if shard is None else f'{shard:.0f}'} | {'' if disk is None else f'{disk / 2**20:.0f}'} | "
+            f"{'' if shard is None else f'{shard:.4g}'} | {'' if disk is None else f'{disk / 2**20:.4g}'} | "
             f"{r['peak_rss_mb']:.0f} | {peak:.1f} | {state} |"
         )
 

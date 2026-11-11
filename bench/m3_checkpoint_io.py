@@ -95,7 +95,8 @@ import numpy as np  # noqa: E402
 
 
 def _join() -> None:
-    if ARGS.arm == "mp":
+    """``initialize()`` from the SLURM step when it has several tasks (one task: alone)."""
+    if ARGS.arm == "mp" and int(os.environ.get("SLURM_NTASKS", "1")) > 1:
         from jaccpot.distributed import multiprocess as mp
 
         mp.initialize(initialization_timeout=900)
@@ -232,7 +233,7 @@ def _finish(record: dict) -> None:
         f"[p{record['process']}] {ARGS.cmd}: {json.dumps(record.get('summary'))}",
         flush=True,
     )
-    if ARGS.arm == "mp":
+    if jax.process_count() > 1:
         jax.distributed.shutdown()
 
 
