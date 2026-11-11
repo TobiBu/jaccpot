@@ -384,14 +384,28 @@ How it works (`jaccpot/runtime/target_points.py`):
   - eq (16a) with the group's own threshold `adaptive_eps * min f_b` over its points
     (their f_b, never the sources'), with M2P's error term at the group's closest
     member.
+  The walk runs in blocks of groups sized so the block's masks fit 256 MiB, and its
+  accepted pairs go into FLAT (group, node) far and (group, leaf) near lists.
 - **Far field.** M2P per point, for nodes that are accepted while every ancestor
   was rejected.
 - **Near field.** The engine's softened kernel over the near leaves. A point on
   top of a source gets the kernel's finite value.
+- **Evaluation.** Both run `plan.pair_chunk` pairs at a time and are scatter-added
+  into the points. On a GPU the sums are therefore order-nondeterministic at
+  round-off.
 
-The `TargetPlan`'s capacities are compile-time constants: points that move recompile
-nothing. A group that needs more reports it (`field.ok`, `field.needs`), and
-`plan.grown(needs)` is the re-plan.
+The `TargetPlan`'s capacities are TOTAL pair counts and compile-time constants:
+points that move recompile nothing. An evaluation that needs more reports it
+(`field.ok`, `field.needs`), and `plan.grown(needs)` is the re-plan.
+
+Memory is the lists (8 B per pair), one walk block and one pair chunk. Measured as
+compiled temporaries at N = 1e6 (CPU `memory_analysis`, p6, leaf 64):
+
+- 0.37–0.45 GiB for 1e3–1e5 cluster stars on the galaxy's tree;
+- 0.10–0.13 GiB for 1e6 galaxy points on a 1e3–1e5-star tree.
+
+The first version gave every group the worst group's capacities and asked for
+14.9 GiB at 1e6 points (see `production_2026-11.md`, ## HH).
 
 Measured against a float64 direct sum: 4000 sources, 700 points (inside, a clump, far
 outside, on top of sources), leaf 16, p4, float32:
@@ -408,7 +422,8 @@ Not yet available (issue #302 stays open for these):
 - `mac_force_scale_floor` on the points;
 - the solver facade's `target_points=`;
 - the mesh;
-- performance at large M × nodes: the walk is dense over groups × nodes.
+- speed at large M × nodes: the walk is dense, O(groups × nodes) work (a frontier walk is
+  future work; memory is bounded).
 
 ## The fp64 validation lane
 

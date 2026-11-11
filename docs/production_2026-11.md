@@ -1486,11 +1486,46 @@ rms tidal field:
 Decision: B (as U6). A wins only with the geometric criterion and a galaxy kernel whose support covers the cluster.
 
 **Tests.**
-- `tests/integration/strict/test_target_points.py`: 11 passed, 1 skipped by design, on the CPU route, both MACs, with
-  and without `JACCPOT_RUNTIME_TYPECHECK=1` (3.0 min at `-n 2`, peak RSS 2.0 GB, loaded host).
+- `tests/integration/strict/test_target_points.py`: 13 passed, 1 skipped by design, on the CPU route, both MACs, with
+  and without `JACCPOT_RUNTIME_TYPECHECK=1` (3.3 min at `-n 2`, peak RSS 2.2 GB, loaded host).
 - It runs in a new shard, `integration-strict-targets` (`test_shards.py check` rc 0, 3213 covered).
 - The top-level `tests/unit` guards pass with `JACCPOT_RUNTIME_TYPECHECK=1` after `bootstrap_target_force_scale`
   joined `__all__`; pre-commit is clean.
+
+**The GPU gate's OOM and the fix.**
+- The first GPU functional run (galaxy 1e6 + cluster 1e4, `nornax.adapters.FusedHybridForce`, card 1, 12:47) failed
+  with RESOURCE_EXHAUSTED: 14.92 GiB, inside `plan_target_points` for the back-reaction (1e6 galaxy points on the
+  cluster's tree).
+- The cause: every target group got the WORST group's far / near capacity. The per-point M2P gather dominated.
+  Compiled temporaries measured on CPU (`memory_analysis`, N = 2e4, p6, leaf 64):
+  `group_block x group_size x (far_cap x ~7.4 KB + near_cap x leaf_cap x ~30 B)`. That is 0.93 -> 3.70 GiB going from
+  far_cap 256 to 1024 at block 16. The galaxy groups next to the cluster needed ~1e3 cluster nodes, and all 31,250
+  groups paid for them.
+- The fix (a0a25a72):
+  - flat (group, node) pair lists whose lengths are TOTAL capacities;
+  - the walk in blocks sized from a 256 MiB budget (a large tree walks one group at a time);
+  - M2P / P2P in chunks of 128 pairs with scatter-add.
+- Accuracy is unchanged (3.0e-4 / 4.0e-5 above). A new regression test checks a dense clump among far points stays
+  under 256 MiB of compiled temporaries.
+- Memory vs M at N = 1e6 (Hernquist galaxy; Plummer cluster r_c 0.005; p6, leaf 64), compiled temporaries:
+
+  | direction | M (stars) | source nodes | walk block | far / near pairs (plan) | temporaries |
+  |---|---|---|---|---|---|
+  | galaxy -> stars | 1e3 | 120,831 | 32 | 24,448 / 1,024 | 450 MiB |
+  | galaxy -> stars | 1e4 | 120,831 | 32 | 234,624 / 4,352 | 372 MiB |
+  | galaxy -> stars | 1e5 | 120,831 | 32 | 2,327,424 / 33,664 | 389 MiB |
+  | stars -> 1e6 galaxy points | 1e3 | 2,047 | 64 | 49,408 / 33,280 | 102 MiB |
+  | stars -> 1e6 galaxy points | 1e4 | 2,047 | 64 | 55,168 / 207,104 | 98 MiB |
+  | stars -> 1e6 galaxy points | 1e5 | 14,335 | 64 | 68,608 / 1,774,208 | 125 MiB |
+
+- **GPU functional gate, PASS.** A100 card 1, `on-free-card`, contended, so no timing claims:
+  - galaxy 1e6 (galaxy preset, `dehnen_error` 1e-4, leaf 64, p6, eps_g 0.005) + Plummer cluster 1e4 (M_c 1e-4,
+    r_c 0.005, eps_c r_c/20, Hermite-4, n_sub 16), `cross="fmm"`;
+  - 100 slow steps of dt 1e-3: both verdicts hold in every segment, |dE/E| <= 9.0e-9, |dP| <= 1.3e-10;
+  - device peak 7.37 GB for the whole program;
+  - plans: stars far 123,136 / near 3,840; back-reaction far 87,680 / near 2,707,072
+    (`hh/runs/gpu_functional_1e6_1e4.json`).
+- **Identity** `w5-main-cpu` vs `hh-tip2-cpu` (a0a25a72): PASS 36/36.
 
 **Left on #302 (stays open):**
 - gradients through the target walk;
@@ -1499,4 +1534,5 @@ Decision: B (as U6). A wins only with the geometric criterion and a galaxy kerne
 - the solver facade's `target_points=`;
 - the mesh;
 - replacing §7's zero-mass trick;
-- a frontier walk instead of the dense group x node one, for M x nodes at 1e8.
+- a frontier walk instead of the dense group x node one. Memory is bounded; at 1e8 x 1e5-1e6 the walk's
+  O(groups x nodes) WORK binds.
