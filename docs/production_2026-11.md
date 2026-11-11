@@ -1351,3 +1351,86 @@ peak RSS of the largest 11.9 GB (`integration-strict-grad-runner`, unchanged fil
 **Timing (gate 3):** `bench/slurm/a3/position_precision_timing.sbatch`, legacy against summed, A-B-A-B, 1e8 and
 2.6e5, both MACs (prepared; the user submits). The summed drift adds no array; the kernels of their own add one
 elementwise pass each to the drift and the kick (local, contended, not evidence: +0.6-0.8 % of the step).
+
+## H1 — one HoreKa bundle on the mains of 2026-11-10 (2026-11-10)
+
+`bench/slurm/h0/` is now THE HoreKa bundle: one checkout of main, one `setup_env.sh`, one `submit_all.sh` that
+knows every timing job, one `collect.sh` tarball. `bench/slurm/h0/README.md` is the guide. Library code is
+untouched (`git diff main -- jaccpot/` empty); only `bench/` and `docs/` changed.
+
+**Pins.** yggdrax f722c24, nornax 30be376, mimirax 1101a6e (the mains of 2026-11-10; H0 pinned those of
+2026-11-03, which jaccpot main can no longer import: `from yggdrax import TreeDepthError`), plus Odisseo
+`jaccpot-integration` a0e8848 for job a4's IC tool. `requirements.txt` unchanged (jax 0.11.2; every sibling's
+`pyproject.toml` is satisfied by the venv). The pre-#104 A-B arm stays: aaf8d6d's `_cell_partition.py` is the only
+change to that file since #104, drops in on f722c24, imports, and a 4096-particle CPU step gives main's far-pair
+count (87,704).
+
+**Jobs** (19 sbatch jobs + a4; README has the table): H0's seven (preflight, pins, auto, s1b, grad, scaling_a,
+scaling_b) and, folded in, `scaling_mp` (new), `forward`, `mgrad`, `escaper`, `a1`, `a3`, `m1_node1/2`,
+`m2g_node1/2`, `mesc_node1/2` (the two-node jobs keep 2 x 4 tasks), `a4` (delegated to `bench/slurm/a4/submit.sh`,
+afterok the preflight; not in the default set). One staging step (`stage_data.sh`, `--no-big`), sha256 for every
+file including the 1e8 Sgr IC and A1's two 1e8 restarts. Budget: ~55 node-hours expected for the default set, at
+most ~107; a4 on top.
+
+**Audit against today's code** (each row measures what its README says):
+- `escaper_timing.sbatch`: `XLA_PYTHON_CLIENT_PREALLOCATE=true` (ESC: 1e8 on one card needs it, the baseline too).
+- `a1_dehnen_error_stall.sbatch`: the restore rows on `cuda_async` (A1's own finding: BFC could not place the 14.9
+  GiB block of a 1e8 restore with the probe on); the base arm (a pre-A1 checkout) and the L pins (job pins) are
+  not run; the pre-A3 restarts continue with the summed drift (the restore warns).
+- The scaling matrix's on / off tier drives `MeshSegmentRunner` with an explicit `migrate`: it still means what it
+  says (`MeshRunConfig` migrates by default; the m1 / m2g / mesc / mp rows run that default, as their READMEs say).
+- New **mp tier** (`multigpu_scaling_matrix.py --tiers mp`, job `scaling_mp`): `multiprocess_gate.py run --arm sp|mp`
+  on 1 / 2 / 4 cards (Plummer 8e6, the 25M disc + bulge via the gate's new `--ic disc`, Plummer 4e6 per card),
+  srun steps on HoreKa, `local_srun.py` elsewhere.
+- Every bench argument the jobs pass exists in today's parsers (each script's `--help`, choices included); the
+  environment knobs they set (`JACCPOT_STRICT_CARRY`, `JACCPOT_FORWARD_TANGENT_GROUP`, `JACCPOT_TANGENT_TPP_*`)
+  exist. Rows that ran before A3 measured the legacy drift; these rows measure the summed one (the default).
+- READMEs: m2g's `git checkout m2/multiprocess-gpu`, H0's deleted `h0/horeka-bundle`, mesc's 4.4 GB (2.8) fixed.
+
+**Local reference** (`bench/slurm/h0/local_reference.json`, the sanity row's comparison): L1-L3 at the new pins on
+one shared A100-PCIE-40GB (card 7, autocvd), A and A-vs-A. B/p, far-pair counts and L3's rel-L2 reproduce the
+2026-10-30 records exactly. The walls are a ratio check only: the cards are shared, and the host load was 50-66.
+
+| pin | step ms min (A / A-b) | B/p | far pairs | L3 force rel-L2 |
+| --- | --- | --- | --- | --- |
+| L1 (8e6 clipped Plummer) | 77.12 / 77.11 | 315.74 | 39,093,974 | - |
+| L2 (1e8) | 863.87 / 864.79 | 256.77 | 402,173,018 | - |
+| L3 (25M disc + bulge) | 235.51 / 234.15 | 255.36 | 94,801,662 | 4.179115652e-4 |
+
+**Gates.**
+- `git diff main -- jaccpot/` empty.
+- `setup_env.sh` end to end on a fresh HoreKa-layout root here (`stage_data.sh` into it, 12.4 GB with the big
+  files): exact wheels, `pip check` clean, the CUDA plugin inside the venv, every clone at its pin (Odisseo too),
+  the pre-#104 arm, sha256 of all 26 files.
+- `submit_all.sh --dry-run --all`: 19 sbatch lines (accounts, partition, nodes 1 / 2, tasks per node 1 / 4,
+  `--time`, exports, afterok on the preflight) plus a4's IC job, its 21 arrays and summary chained on the preflight;
+  worst case 107 node-hours for the default set.
+- **CPU smoke** (`SMOKE=1`, N = 2048, the setup_env-built root, forced CPU devices, multi-process steps as two
+  local processes on gloo):
+  - the preflight: 15/15 entries ok;
+  - every job ok: pins, auto, s1b, scaling_a, scaling_mp, scaling_b, forward, mgrad, escaper, a1, a3, m1_node1/2,
+    m2g_node1/2 (all 14 sp / mp / mpbind / deterministic compares bitwise on gloo), mesc_node1/2 (7 escapers in
+    the 4096-row Sgr subsample), a4; grad's last row (the rollout gradient, offload, T = 16; a ~400 GB XLA:CPU
+    compile) is recorded in the H1 report.
+  - mgrad's disc check row cannot run at N = 2048: a 2048-row disc prefix is nearly all-near and overflows the
+    flat walk's near-pair cap, which the cross formula sizes from N. The smoke checks on Plummer instead. The disc
+    row ran unchanged at its own N (262,144) on two local GPUs: gradient ok, error vs the fp64 direct sum
+    2.356e-4 (1.03x the single card).
+  - Smoke-only fixes on the way: the preflight's a4 entry had to export `A4_PY`; the grad matrix's 1 h row
+    timeout is shorter than one XLA:CPU gradient compile on a loaded host (4 h in the smoke).
+  - Trims, each recorded: one row per argument pattern where a row is a gradient compile (grad, forward, mgrad,
+    auto's r2 rows), scaling_b at one MAC, a4 at one ladder per IC family.
+  - The rollout-gradient step / nested / 1e8 offload rows and forward's `vgrad` do not compile on XLA:CPU (H0):
+    the GPU preflight runs them.
+- **GPU preflight** (local shared cards via `on-free-card`, functional only, no timing claims; `H0_LOCAL_SRUN=1`):
+  15/15 entries ok:
+  - on one card: pins, grad (step / nested / offload at 2e5), s1b, auto, forward (with `vgrad`), a3, escaper, a1,
+    a4;
+  - on cards 6,7: scaling, scaling_mp (the mp rows as 2 processes x 1 GPU on NCCL), mgrad, m1, m2g, mesc.
+  - It found one real fix: A1's stall bench needs a CPU platform for its `jax.debug.callback`. Job a1 now appends
+    `cpu` when `JAX_PLATFORMS` is narrowed; unset, as on HoreKa, is fine.
+- jaccpot CI for what changed:
+  - `test_shards.py check` rc 0 (3201 tests covered);
+  - bench-tooling shard 155 passed;
+  - the top-level `tests/unit` guards 94 passed with `JACCPOT_RUNTIME_TYPECHECK=1`;
+  - pre-commit clean on every touched file.

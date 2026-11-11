@@ -91,7 +91,7 @@ the batch step.
 
 | job | nodes x tasks | what it measures | rows | expected wall | `--time` |
 | --- | --- | --- | --- | --- | --- |
-| `preflight` | 1 x 4 | the environment (4 GPUs, the venv's plugin, a GPU op, srun), then one tiny row (2e5) of every entry point below (19 entries; the multi-process ones as srun steps); a broken entry is recorded in `preflight/status/` and its job exits at once | 17 entries | 45-60 min | 2:00 |
+| `preflight` | 1 x 4 | the environment (4 GPUs, the venv's plugin, a GPU op, srun), then one tiny row (2e5) of every entry point below (15 entries, one per job family; the multi-process ones as srun steps); a broken entry is recorded in `preflight/status/` and its job exits at once | 15 entries | 45-60 min | 2:00 |
 | `pins` | 1 x 1 | **L1** (8e6 clipped Plummer step), **L2** (1e8 step), **L3** (25M disc + bulge step + force rel-L2) on one card (`bench/dce_pins.py`), an **A-vs-A control**, and yggdrax **#104's extra cummax at 1e8** (L2 on main (A) vs the pre-#104 partition (B), A B A B A); `dce_pins compare` verdicts | 9 records | ~1.3 h | 3:00 |
 | `auto` | 1 x 1 | `cell_min_level="auto"` vs the galaxy preset's level 8 on mimirax's S10 bench (`seg_<N>_auto_adj` / `seg_<N>_adj`, `pre_<N>_fc1_auto` / `pre_<N>_fc1`) at 1e5, 1e6, 1e7, each pair A B B A | 24 | ~1.5 h | 3:00 |
 | `s1b` | 1 x 1 | S1b's particle-major L2P, Mosaic GPU vs Triton-Pallas (`s1b_mosaic_l2p.sbatch`): 2e6 and 2.5e7 disc, 1e8 Plummer | 3 sizes x 3 kernels | ~1 h | 2:00 |
