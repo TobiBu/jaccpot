@@ -2186,7 +2186,8 @@ class ProductionRunner:
                 raise ValueError(
                     f"{restart_from} was written by the multi-GPU mode (on "
                     f"{meta['mesh'].get('ndev')} devices): continue it with "
-                    "ProductionRunner(..., mesh=...)"
+                    "ProductionRunner(..., mesh=...); one card continues the "
+                    "mode's sharded checkpoints (MeshRunConfig(checkpoint='orbax'))"
                 )
             state_now = jnp.asarray(arrays["state"])
             masses_now = jnp.asarray(arrays["masses"])

@@ -18,7 +18,8 @@ whole initial condition, each of the N processes only its id range
   ``decompose_local`` == ``decompose``;
 * the runner with ``DirectMeshForce``: migrating and not, a repartition before
   every segment, the energy and the moments at every edge, a continuation in
-  memory; a restart file refused under several processes (M3: orbax);
+  memory; a ``.npz`` restart file refused under several processes (M3: they
+  write sharded checkpoints, ``test_checkpoint_multiprocess.py``);
 * the runner with ``FusedMeshForce`` (slow), the energy at every edge: both MACs
   migrating with a cross capacity too small for the first segment (re-planned
   and retried), and ``dehnen_error`` on the A3 start whose trees outgrow a leaf

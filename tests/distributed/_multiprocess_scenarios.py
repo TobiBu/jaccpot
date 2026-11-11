@@ -187,7 +187,7 @@ def direct_runner(n: int) -> dict:
 
     Migrating and non-migrating, a repartition before every segment, the energy
     and moments at every edge, a run continued in memory from its
-    ``RunResult``; under several processes a restart file is refused.
+    ``RunResult``; under several processes a ``.npz`` restart file is refused.
     """
     from jaccpot import FastMultipoleMethod
     from jaccpot.distributed.segment import DirectMeshForce
@@ -202,7 +202,7 @@ def direct_runner(n: int) -> dict:
     params = {"k": 0.5, "centre": (0.5, 0.5, 0.5)}
     out: dict = {}
 
-    def runner(migrate, **segment):
+    def runner(migrate, checkpoint="auto", **segment):
         return ProductionRunner(
             FastMultipoleMethod(preset="large_n_gpu", G=g, softening=soft),
             segment=SegmentConfig(steps=2, diagnostics_every_energy=1, **segment),
@@ -216,6 +216,7 @@ def direct_runner(n: int) -> dict:
                 num_samples=64,
                 migrate=migrate,
                 force=DirectMeshForce(G=g, softening=soft, axis_name=AXIS),
+                checkpoint=checkpoint,
             ),
         )
 
@@ -232,13 +233,16 @@ def direct_runner(n: int) -> dict:
         out[f"{tag}_owner"] = got["owner"]
         out[f"{tag}_edges"] = edges + _edges(res)
         out[f"{tag}_reports"] = _reports(res.handle)
-    # restart files: refused under several processes, before anything runs
+    # a .npz restart file: refused under several processes, before anything runs
+    # (M3: the sharded checkpoint is what they write, tests/distributed/test_checkpoint_*)
     refused = "one process"
     if mp.is_multiprocess():
         refused = "not refused"
         try:
             s, m = _input(state, masses, mesh)
-            runner(True, restart_every=1, restart_path="r_{segment}.npz").run(
+            runner(
+                True, checkpoint="npz", restart_every=1, restart_path="r_{segment}.npz"
+            ).run(
                 s, m, dt=0.02, num_steps=2, external_params=params
             )
         except NotImplementedError as exc:
