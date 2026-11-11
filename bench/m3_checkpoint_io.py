@@ -72,7 +72,9 @@ def _args() -> argparse.Namespace:
     r.add_argument("--reps", type=int, default=2)
     c = sub.choices["chain"]
     c.add_argument("--n", type=float, required=True)
-    c.add_argument("--pattern", required=True, help="restart_path, e.g. $W/ck_{step:08d}")
+    c.add_argument(
+        "--pattern", required=True, help="restart_path, e.g. $W/ck_{step:08d}"
+    )
     c.add_argument("--target-steps", type=int, required=True)
     c.add_argument("--every", type=int, default=1, help="segments per checkpoint")
     c.add_argument("--deadline", type=float, default=0.0, help="epoch s; 0: none")
@@ -226,7 +228,10 @@ def _finish(record: dict) -> None:
     name = f"result_{ARGS.cmd}_p{int(jax.process_index())}.json"
     with open(os.path.join(ARGS.out, name), "w") as fh:
         json.dump(record, fh, indent=1, default=str)
-    print(f"[p{record['process']}] {ARGS.cmd}: {json.dumps(record.get('summary'))}", flush=True)
+    print(
+        f"[p{record['process']}] {ARGS.cmd}: {json.dumps(record.get('summary'))}",
+        flush=True,
+    )
     if ARGS.arm == "mp":
         jax.distributed.shutdown()
 

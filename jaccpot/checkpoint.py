@@ -225,11 +225,7 @@ def latest_checkpoint(pattern: str) -> Optional[str]:
     regex = re.compile(
         "^"
         + "".join(
-            (
-                f"(?P<{m.group(1)}{i}>\\d+)"
-                if isinstance(m, re.Match)
-                else re.escape(m)
-            )
+            (f"(?P<{m.group(1)}{i}>\\d+)" if isinstance(m, re.Match) else re.escape(m))
             for i, m in enumerate(_split_fields(fields, pattern))
         )
         + "$"
@@ -442,7 +438,9 @@ def build_manifest(arrays: Mapping[str, Any], id_arrays: Mapping[str, str]) -> d
         )
         records, partial = [], 0
         for start, data in _local_shards(arr):
-            records.append([start, int(data.shape[0]) if data.ndim else 1, _sha256(data)])
+            records.append(
+                [start, int(data.shape[0]) if data.ndim else 1, _sha256(data)]
+            )
             if ids_by_start is not None:
                 partial = (partial + set_hash(ids_by_start[start], data)) % (1 << 64)
             del data
@@ -699,7 +697,10 @@ def verify_shards(arrays: Mapping[str, Any], manifest: Mapping[str, Any]) -> Non
     for name, arr in arrays.items():
         records = {int(r[0]): r for r in manifest["arrays"][name]["shards"]}
         if isinstance(arr, np.ndarray):
-            pieces = [(start, arr[start : start + rows]) for start, rows, _ in records.values()]
+            pieces = [
+                (start, arr[start : start + rows])
+                for start, rows, _ in records.values()
+            ]
         else:
             pieces = _local_shards(arr)
         for start, data in pieces:
@@ -779,10 +780,10 @@ def load_checkpoint(
 
     Raises
     ------
-    CheckpointCorruptError
-        With ``verify``, for a shard that differs from the manifest.
     ValueError
-        If the ids are not exactly ``0..N-1`` once each.
+        If the ids are not exactly ``0..N-1`` once each (with ``verify``, a shard
+        that differs from the manifest raises :class:`CheckpointCorruptError`, a
+        ``ValueError``, first).
     """
     meta = read_meta(path)
     written = meta["manifest"]["arrays"]

@@ -242,9 +242,7 @@ def direct_runner(n: int) -> dict:
             s, m = _input(state, masses, mesh)
             runner(
                 True, checkpoint="npz", restart_every=1, restart_path="r_{segment}.npz"
-            ).run(
-                s, m, dt=0.02, num_steps=2, external_params=params
-            )
+            ).run(s, m, dt=0.02, num_steps=2, external_params=params)
         except NotImplementedError as exc:
             refused = "refused" if "orbax" in str(exc) else str(exc)
     out["restart_refused"] = refused

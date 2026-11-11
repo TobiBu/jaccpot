@@ -1721,7 +1721,14 @@ class MeshBackend:
         }
         arrays = {
             name: getattr(layout, name)
-            for name in ("state", "masses", "ids", "count", "acceleration", "force_scale")
+            for name in (
+                "state",
+                "masses",
+                "ids",
+                "count",
+                "acceleration",
+                "force_scale",
+            )
         }
         ids_of = {
             name: "ids" for name in ("state", "masses", "acceleration", "force_scale")
@@ -2480,8 +2487,10 @@ class MeshBackend:
         most = max(b - a for a, b in chunks)
         cap_e = max(int(meta["escapers"]["tail_cap"]), tail_capacity(most))
         devices = _mesh_devices(self.mesh)
-        local = local_device_indices(self.mesh) if is_multiprocess() else list(
-            range(self.ndev)
+        local = (
+            local_device_indices(self.mesh)
+            if is_multiprocess()
+            else list(range(self.ndev))
         )
         sh = NamedSharding(self.mesh, P(self.axis_name))
         out: dict = {n: [] for n in names + ["tail_count"]}
@@ -2495,7 +2504,9 @@ class MeshBackend:
                 buf = np.full((cap_e,) + src.shape[1:], fill, src.dtype)
                 buf[:e] = src[rows]
                 out[n].append(jax.device_put(buf, devices[d]))
-            out["tail_count"].append(jax.device_put(np.asarray([e], np.int32), devices[d]))
+            out["tail_count"].append(
+                jax.device_put(np.asarray([e], np.int32), devices[d])
+            )
 
         def assembled(arrs: list) -> Any:
             return jax.make_array_from_single_device_arrays(
@@ -2820,10 +2831,12 @@ class MeshBackend:
         """
         from jaccpot.distributed.escapers import place_split, tail_capacity
         from jaccpot.distributed.migration import ownership_splitters
-        from jaccpot.distributed.multiprocess import _device_chunks
+        from jaccpot.distributed.multiprocess import (
+            _device_chunks,
+            is_multiprocess,
+            local_id_range,
+        )
         from jaccpot.distributed.segment import MeshState, _force_box_cubic
-
-        from jaccpot.distributed.multiprocess import is_multiprocess, local_id_range
 
         state = arrays["state"]
         n = int(state.shape[0])

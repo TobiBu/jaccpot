@@ -86,9 +86,7 @@ def _runner(n: int, **segment):
     return ProductionRunner(
         solver,
         **({} if settings is None else {"settings": settings}),
-        segment=SegmentConfig(
-            steps=tme.STEPS, diagnostics_every_energy=1, **segment
-        ),
+        segment=SegmentConfig(steps=tme.STEPS, diagnostics_every_energy=1, **segment),
         escapers=EscaperPolicy(tme.R_ESCAPE, tme.R_RETURN) if escapers else None,
         mesh=mesh,
     )

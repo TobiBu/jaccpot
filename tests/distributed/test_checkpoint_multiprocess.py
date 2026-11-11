@@ -76,7 +76,9 @@ def written(request, tmp_path_factory):
     root = str(tmp_path_factory.mktemp(f"m3-{request.param}"))
     env = {"M3_ROOT": root, "M3_ESC": request.param}
     sides = {
-        mode: _side(mode, "write_and_restart", 2, os.path.join(root, f"out-{mode}"), env)
+        mode: _side(
+            mode, "write_and_restart", 2, os.path.join(root, f"out-{mode}"), env
+        )
         for mode in ("sp", "mp")
     }
     return root, env, sides
@@ -92,7 +94,11 @@ def test_a_restart_and_a_chain_are_the_run_in_one_go(written):
             assert restored["layout"] == "checkpoint", (mode, tag, restored)
             for name in ("state", "acceleration", "force_scale"):
                 if f"once_{name}" in arrays:
-                    _same(arrays[f"{tag}_{name}"], arrays[f"once_{name}"], f"{mode} {tag} {name}")
+                    _same(
+                        arrays[f"{tag}_{name}"],
+                        arrays[f"once_{name}"],
+                        f"{mode} {tag} {name}",
+                    )
         once = values["once_edges"]
         assert values["resumed_edges"] == once[MID + 1 :], mode
         assert values["chained_edges"] == once[5:], mode

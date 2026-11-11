@@ -10,7 +10,9 @@ import sys
 
 def main(root: str) -> None:
     print(f"# M3 checkpoint I/O: {root}\n")
-    print("| step | rank/procs | devices | N | write s (reps) | restore s (reps) | shard MB | disk MB | RSS MB | dev peak GB | layout/status |")
+    print(
+        "| step | rank/procs | devices | N | write s (reps) | restore s (reps) | shard MB | disk MB | RSS MB | dev peak GB | layout/status |"
+    )
     print("|---|---|---|---|---|---|---|---|---|---|---|")
     for path in sorted(glob.glob(os.path.join(root, "*", "result_*_p*.json"))):
         r = json.load(open(path))

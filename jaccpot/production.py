@@ -1334,7 +1334,9 @@ class SnapshotWriter:
             ids_of = {"state": "ids"}
         path = os.path.join(self.directory, f"{self.prefix}_{edge.step:08d}")
         meta = {"kind": "snapshot", "step": int(edge.step), "time": float(edge.time)}
-        self.paths.append(write_checkpoint(path, arrays, meta, id_arrays=ids_of)["path"])
+        self.paths.append(
+            write_checkpoint(path, arrays, meta, id_arrays=ids_of)["path"]
+        )
 
 
 def _writes_here(all_processes: bool) -> bool:
