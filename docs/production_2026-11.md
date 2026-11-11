@@ -1434,3 +1434,69 @@ one shared A100-PCIE-40GB (card 7, autocvd), A and A-vs-A. B/p, far-pair counts 
   - bench-tooling shard 155 passed;
   - the top-level `tests/unit` guards 94 passed with `JACCPOT_RUNTIME_TYPECHECK=1`;
   - pre-commit clean on every touched file.
+
+## HH — the field at points that are not sources, for hybrid Hermite (session 1, 2026-11-11)
+
+Multi-node plan U6: globular clusters with direct-sum internal dynamics in a live Milky Way. jaccpot owns the force.
+This session lands `target_points` (#302) in the fused lane. The scheme is nornax's (`nornax.hybrid.HybridHermite`,
+`nornax.adapters.FusedHybridForce`), and the design note is nornax `docs/hybrid_hermite.md`.
+
+**What was built.**
+- `jaccpot/runtime/target_points.py` and `FusedForceProvider.plan_targets` / `target_field` / `step_with_targets`
+  evaluate the sources' field (and optionally the potential and eq (16b)'s f_b) at M massless points. How it works:
+  - the topology's upward pass is rerun on its tree;
+  - the points are Morton-sorted into groups of 32;
+  - a one-sided group x node walk applies either the geometric angle with the separation floor, or eq (16a) with the
+    group's own `adaptive_eps * min f_b` and M2P's error term at the group's closest member;
+  - the far field is M2P per point, the near field the engine's softened kernel.
+- The points enter neither the tree, the walk, the force scale, nor the topology. `step_with_targets`' source
+  accelerations and verdict bits equal `step`'s, bit for bit, under both MACs (test).
+- Capacities are static (`TargetPlan`): moving points recompile nothing (test: one trace for three point sets). An
+  overflow is reported (`ok`, `needs`) and `plan.grown(needs)` re-plans.
+- The default path is unchanged: identity vs `w5-main-cpu` (see below).
+
+**Why the far field is M2P, not a local expansion about each group.** The first version used M2L to the group centre,
+then L2P. On sparse groups its group-radius truncation error added coherently over every accepted node: 5.2e-4 rel
+at eps 1e-4 on points far outside the box, whatever the source nodes. With M2P per point the same points give
+6.0e-6.
+
+**Accuracy** (CPU route, `galaxy` preset with leaf 16, p4, float32 lane, ferrers3 eps 0.01; 4000 Gaussian sources,
+700 points: inside, a tight clump, far outside, on top of sources), rel-L2 against an fp64 direct sum:
+
+| criterion | all points | inside | clump | far | coincident | source lane (same sources) |
+|---|---|---|---|---|---|---|
+| geometric θ 0.6 | 3.0e-4 | 1.6e-5 | 8.6e-4 | 4.8e-6 | 2.9e-5 | 2.3e-3 |
+| `dehnen_error` 1e-4 | 4.0e-5 | 2.5e-5 | 9.4e-5 | 4.8e-6 | 2.0e-5 | 1.9e-4 |
+
+The geometric criterion's error at a point is its tolerance's, about 2x the source lane's rms on a 512-particle
+Plummer galaxy. On a 32-star clump at r = 0.8 (`large_n_gpu`, leaf 16, p4) it is 5.1e-3 / 1.0e-3 / 7.7e-5 at
+θ 0.6 / 0.4 / 0.25, against a source lane rms of 2.5e-3 / 4.7e-4 / 4.6e-5. Use `dehnen_error` for clusters.
+
+**Option A vs B** (nornax `docs/hybrid_hermite.md`). Galaxy: Hernquist, 2e4 particles. Cluster: Plummer, 1e3 stars,
+M_c 1e-3, r_c 0.01, at R = 1. The table gives the slow-force error on the cluster's stars, COM-subtracted, over the
+rms tidal field:
+
+| eps_g | criterion | A: stars stay galaxy sources, intra-cluster pairs subtracted | B: `target_points` |
+|---|---|---|---|
+| 0.002 | geometric θ 0.6 | 0.43 | 0.029 |
+| 0.002 | `dehnen_error` 1e-4 | 0.036 | 0.0047 |
+| 0.02 | geometric θ 0.6 | 0.013 | 0.032 |
+| 0.02 | `dehnen_error` 1e-4 | 0.017 | 0.0050 |
+
+Decision: B (as U6). A wins only with the geometric criterion and a galaxy kernel whose support covers the cluster.
+
+**Tests.**
+- `tests/integration/strict/test_target_points.py`: 11 passed, 1 skipped by design, on the CPU route, both MACs, with
+  and without `JACCPOT_RUNTIME_TYPECHECK=1` (3.0 min at `-n 2`, peak RSS 2.0 GB, loaded host).
+- It runs in a new shard, `integration-strict-targets` (`test_shards.py check` rc 0, 3213 covered).
+- The top-level `tests/unit` guards pass with `JACCPOT_RUNTIME_TYPECHECK=1` after `bootstrap_target_force_scale`
+  joined `__all__`; pre-commit is clean.
+
+**Left on #302 (stays open):**
+- gradients through the target walk;
+- `dehnen_theta`;
+- `mac_force_scale_floor` on the points;
+- the solver facade's `target_points=`;
+- the mesh;
+- replacing §7's zero-mass trick;
+- a frontier walk instead of the dense group x node one, for M x nodes at 1e8.
