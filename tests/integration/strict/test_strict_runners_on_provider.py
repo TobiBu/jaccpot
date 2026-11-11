@@ -190,7 +190,18 @@ def test_the_handle_carries_the_calls_provider():
     # its force at the returned positions is the handle's self-gravity
     acc, (f_b, bits, _) = jax.jit(prov.step)(out[:, 0], masses)
     assert f_b is None and int(bits) == 0
-    assert np.array_equal(np.asarray(acc), np.asarray(handle.self_acceleration))
+    # To a few ulp, not bitwise: ``jax.jit(prov.step)`` and the scan's force are two
+    # different XLA programs, and XLA:CPU rounds them alike only on some hosts. On
+    # GitHub's AVX-512 runners (AMD EPYC 9V74 / 9V45, Intel Xeon 6973P-C / Platinum
+    # 8370C) 3 of the 1536 components differ by at most 2 ulp (particles 77 and 338,
+    # 3.8e-6 absolute); on the AVX2-only EPYC 7763 and locally they are bitwise
+    # (14 runners, 2026-11-11). ``--xla_cpu_max_isa=AVX2`` does not remove it. The
+    # bound is in ulp of each particle's |a|, so a cancelling component is not
+    # held to a finer grid than the sum it came from.
+    got, want = np.asarray(acc), np.asarray(handle.self_acceleration)
+    scale = np.spacing(np.linalg.norm(want, axis=1, keepdims=True).astype(np.float32))
+    ulp = np.abs(got - want) / scale
+    assert np.all(ulp <= 4), (float(ulp.max()), np.nonzero(ulp > 4)[0][:10].tolist())
     # the next call continues from the handle as before: one run of 2 + 2 steps
     end, _, _ = _run(solver, out, masses, carry="particles", prepared=handle)
     whole, _, _ = _run(_solver(), state, masses, carry="particles", steps=2 * STEPS)
