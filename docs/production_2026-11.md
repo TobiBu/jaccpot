@@ -1486,8 +1486,8 @@ rms tidal field:
 Decision: B (as U6). A wins only with the geometric criterion and a galaxy kernel whose support covers the cluster.
 
 **Tests.**
-- `tests/integration/strict/test_target_points.py`: 13 passed, 1 skipped by design, on the CPU route, both MACs, with
-  and without `JACCPOT_RUNTIME_TYPECHECK=1` (3.3 min at `-n 2`, peak RSS 2.2 GB, loaded host).
+- `tests/integration/strict/test_target_points.py`: 14 passed, 2 skipped by design, on the CPU route, both MACs, with
+  and without `JACCPOT_RUNTIME_TYPECHECK=1` (3.0 min at `-n 2`, peak RSS 2.2 GB, loaded host).
 - It runs in a new shard, `integration-strict-targets` (`test_shards.py check` rc 0, 3213 covered).
 - The top-level `tests/unit` guards pass with `JACCPOT_RUNTIME_TYPECHECK=1` after `bootstrap_target_force_scale`
   joined `__all__`; pre-commit is clean.
@@ -1525,7 +1525,31 @@ Decision: B (as U6). A wins only with the geometric criterion and a galaxy kerne
   - device peak 7.37 GB for the whole program;
   - plans: stars far 123,136 / near 3,840; back-reaction far 87,680 / near 2,707,072
     (`hh/runs/gpu_functional_1e6_1e4.json`).
-- **Identity** `w5-main-cpu` vs `hh-tip2-cpu` (a0a25a72): PASS 36/36.
+- **Two more defects the larger runs found, both fixed:**
+  - The cluster provider carried the galaxy's softening (support 0.012 vs r_c 0.005). Its own walk then made every
+    pair of a compact cluster near, and at 1e5 stars the prepare's flat walk overflowed a 2.7e8 queue. The fix
+    (2d506959) is `target_field(..., softening=)` / `plan_targets(..., softening=)`: the points' pair softening, with
+    the separation floor following it. The cluster's tree keeps a small softening, and the back-reaction takes the
+    galaxy's.
+  - nornax's energy ledger built a dense M x M matrix for W_cc (74.5 GiB at 1e5 stars). It is now a blocked sum
+    (nornax cce59ad).
+- **GPU gate rerun on the final code:** 1e6 + 1e4, card 6, the same physics numbers (|dE/E| <= 9.0e-9,
+  |dP| <= 1.3e-10, verdicts ok), device peak **1.01 GiB** (`gpu_functional_1e6_1e4_v3.json`).
+- **Probe at 1e7 + 1e5** (card 6, 8 steps): verdicts ok, |dE/E| <= 9.2e-9, |dP| <= 2e-11, device peak **5.34 GiB**.
+  Plans: stars far 1,297,280 / near 30,464; back-reaction far 804,864 / near 17,231,488 (`gpu_probe_1e7_1e5.json`).
+- **Production shape: 1e8 galaxy + 1e5-1e6 stars on one A100.** This is an estimate, not a run.
+  - *Galaxy -> stars only:* fits. The lists are ~23 far pairs per star x 8 B (0.2 GB at 1e6 stars), the temporaries
+    are under 0.5 GB, and the walk block drops to 1 group (one 1.2e7-node block is ~0.8 GB). All of that sits on top
+    of the runner's 214-330 B/p, i.e. 21-33 GB.
+  - *The FMM back-reaction over all 1e8 galaxy points:* adds ~100 B per galaxy point of per-point transients (the
+    sorted copy, groups, outputs, scatter carries), ~10 GB, plus its near list (~1.7 pairs per point x 8 B,
+    ~1.4 GB). That is marginal or over at 40 GB.
+    Fixes for session 2:
+    - evaluate the back-reaction over galaxy-point slices; or
+    - use the cluster's multipole for distant galaxy particles and target points only within a few cluster radii.
+  - *Time, not memory, binds at 1e8:* the dense walk is O(groups x nodes), 3e3-3e4 star groups x 1.2e7 galaxy nodes
+    = 4e10-4e11 MAC tests per step. Production needs a frontier walk (yggdrax). Timings belong on HoreKa.
+- **Identity:** `w5-main-cpu` vs `hh-tip2-cpu` (a0a25a72) and `hh-tip3-cpu` (2d506959): PASS 36/36 both.
 
 **Left on #302 (stays open):**
 - gradients through the target walk;

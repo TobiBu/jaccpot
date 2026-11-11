@@ -407,6 +407,12 @@ compiled temporaries at N = 1e6 (CPU `memory_analysis`, p6, leaf 64):
 The first version gave every group the worst group's capacities and asked for
 14.9 GiB at 1e6 points (see `production_2026-11.md`, ## HH).
 
+`target_field(..., softening=eps)` (and the same in `plan_targets`) gives the field
+of another pair softening at the points, with the walk's separation floor following
+it. A source tree built with a small softening, so that its own walk stays
+O(n log n), can then give the field of a larger one: a compact cluster's
+back-reaction on heavy galaxy particles.
+
 Measured against a float64 direct sum: 4000 sources, 700 points (inside, a clump, far
 outside, on top of sources), leaf 16, p4, float32:
 
