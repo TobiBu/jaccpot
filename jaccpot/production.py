@@ -666,6 +666,13 @@ class MeshRunConfig:
     migration_cap : Any
         ``migrate=True``: the migration buffer's rows per device, ``"auto"`` (the
         default: sized from one step's drift at the first segment) or an int.
+    checkpoint : str
+        The restart format :meth:`ProductionRunner.save_restart` writes:
+        ``"npz"`` (one file through one host, as before), ``"orbax"`` (a sharded
+        checkpoint directory, :mod:`jaccpot.checkpoint`: every process writes its
+        own shards; needs the ``jaccpot[io]`` extra) or ``"auto"`` (the default:
+        ``"orbax"`` under several processes, else ``"npz"``). A restore reads
+        either, whatever this says.
     """
 
     mesh: Any
@@ -677,6 +684,7 @@ class MeshRunConfig:
     force: Any = None
     migrate: bool = True
     migration_cap: Any = "auto"
+    checkpoint: str = "auto"
 
     def __post_init__(self) -> None:
         if len(tuple(getattr(self.mesh, "axis_names", ()))) != 1:
@@ -692,6 +700,11 @@ class MeshRunConfig:
             raise ValueError("MeshRunConfig.repartition_every must be >= 0")
         if int(self.num_samples) < 1:
             raise ValueError("MeshRunConfig.num_samples must be >= 1")
+        if self.checkpoint not in ("auto", "npz", "orbax"):
+            raise ValueError(
+                "MeshRunConfig.checkpoint must be 'auto', 'npz' or 'orbax', got "
+                f"{self.checkpoint!r}"
+            )
         if self.migration_cap != "auto" and int(self.migration_cap) < 1:
             raise ValueError(
                 f"MeshRunConfig.migration_cap must be 'auto' or >= 1, got "
@@ -1208,11 +1221,20 @@ class SnapshotWriter:
         collective: every process must call the writer) and keep no path. One
         process: no effect. In memory (``directory=None``) every process keeps
         its snapshots.
+    sharded : bool
+        Write each snapshot as a sharded checkpoint directory
+        ``<prefix>_<step:08d>/`` (:mod:`jaccpot.checkpoint`; the ``jaccpot[io]``
+        extra) instead of a ``.npz``: in the multi-GPU mode the layout's
+        ``state``, ``masses``, ``ids`` and ``count`` (and the escaper tail's) as
+        they live on the mesh, every process writing its own shards -- nothing
+        passes through one host; on one card the state and masses. Read one back
+        by id with :func:`jaccpot.checkpoint.load_checkpoint`. Needs
+        ``directory``; ``all_processes`` has no effect.
 
     Raises
     ------
     ValueError
-        If ``every`` is below 1.
+        If ``every`` is below 1, or ``sharded`` without a directory.
     """
 
     def __init__(
@@ -1223,14 +1245,18 @@ class SnapshotWriter:
         initial: bool = True,
         prefix: str = "snapshot",
         all_processes: bool = False,
+        sharded: bool = False,
     ) -> None:
         if int(every) < 1:
             raise ValueError("SnapshotWriter.every must be >= 1")
+        if sharded and directory is None:
+            raise ValueError("SnapshotWriter(sharded=True) needs a directory")
         self.directory = directory
         self.every = int(every)
         self.initial = bool(initial)
         self.prefix = str(prefix)
         self.all_processes = bool(all_processes)
+        self.sharded = bool(sharded)
         self.snapshots: list = []
         self.paths: list = []
         if directory is not None:
@@ -1248,6 +1274,9 @@ class SnapshotWriter:
             return
         if edge.segment % self.every:
             return
+        if self.sharded:
+            self._write_sharded(edge)
+            return
         state = edge.state_host()  # every process: a gather under several
         if self.directory is None:
             self.snapshots.append(
@@ -1264,6 +1293,48 @@ class SnapshotWriter:
             time=np.asarray(edge.time, np.float64),
         )
         self.paths.append(path)
+
+    def _write_sharded(self, edge: SegmentEdge) -> None:
+        """Write ``edge``'s snapshot as a sharded checkpoint (every process calls it).
+
+        Parameters
+        ----------
+        edge : SegmentEdge
+            The edge.
+        """
+        import jax
+        import jax.numpy as jnp
+
+        from jaccpot.checkpoint import write_checkpoint
+
+        assert self.directory is not None
+        layout = getattr(edge, "layout", None)
+        if layout is not None:
+            arrays = {
+                "state": layout.state,
+                "masses": layout.masses,
+                "ids": layout.ids,
+                "count": layout.count,
+            }
+            ids_of = {"state": "ids", "masses": "ids"}
+            tail = getattr(edge, "escapers", None)
+            if tail is not None and int(tail.total) > 0:
+                for name in ("state", "masses", "ids", "count"):
+                    arrays[f"tail_{name}"] = getattr(tail, name)
+                ids_of.update(tail_state="tail_ids", tail_masses="tail_ids")
+        else:
+            state = jnp.asarray(edge.state_host())
+            arrays = {
+                "state": state,
+                "ids": jax.device_put(
+                    np.arange(state.shape[0], dtype=np.int32),
+                    next(iter(state.devices())),
+                ),
+            }
+            ids_of = {"state": "ids"}
+        path = os.path.join(self.directory, f"{self.prefix}_{edge.step:08d}")
+        meta = {"kind": "snapshot", "step": int(edge.step), "time": float(edge.time)}
+        self.paths.append(write_checkpoint(path, arrays, meta, id_arrays=ids_of)["path"])
 
 
 def _writes_here(all_processes: bool) -> bool:
@@ -1368,6 +1439,80 @@ def load_restart(path: Union[str, "os.PathLike"]) -> tuple:
         raise ValueError(
             f"{path} is not a {RESTART_FORMAT} file (format {meta.get('format')!r})"
         )
+    return arrays, meta
+
+
+def _single_card_restart(path: Union[str, "os.PathLike"]) -> tuple:
+    """A multi-GPU run's sharded checkpoint as a single card's restart (by id).
+
+    The state, masses and f_b by id (:func:`jaccpot.checkpoint.load_checkpoint`,
+    every shard checked); the carried total acceleration as the start force when
+    the run had no external field (with one the single card evaluates its start
+    force: the self-gravity is not separable from the total); an escaper split's
+    order (tree rows first). The plan is left to the single card's prepare (none
+    of the mesh's carries over): the continuation is correct, not bitwise.
+
+    Parameters
+    ----------
+    path : Union[str, os.PathLike]
+        The checkpoint.
+
+    Returns
+    -------
+    tuple
+        ``(arrays, meta)`` as :func:`load_restart` returns them.
+
+    Raises
+    ------
+    ValueError
+        If it is not a restart checkpoint.
+    """
+    from jaccpot.checkpoint import load_checkpoint
+
+    by_id, written = load_checkpoint(path)
+    if written.get("mesh") is None or "counters" not in written:
+        raise ValueError(f"{path} is not a restart checkpoint (a snapshot?)")
+    field = written["external"]["field"]
+    arrays = {"state": by_id["state"], "masses": by_id["masses"]}
+    if field is None and "acceleration" in by_id:
+        arrays["self_acceleration"] = by_id["acceleration"]
+    if "force_scale" in by_id:
+        arrays["force_scale"] = by_id["force_scale"]
+    meta = {
+        "format": RESTART_FORMAT,
+        "counters": written["counters"],
+        "baselines": written["baselines"],
+        "plan": {
+            "leaf_capacity": None,
+            "walk_caps": None,
+            "level_widths": [],
+            "level_counts": [],
+            "upward_num_levels": None,
+            "force_key": None,
+        },
+        "digests": {},
+        "template_shapes": None,
+        "external": {
+            "field": field,
+            "params_sha256": written["external"]["params_sha256"],
+            "total_is_self": field is None,
+        },
+        "fingerprint": written["fingerprint"],
+        "from_mesh": written["mesh"],
+    }
+    if "scheme" in written:
+        meta["scheme"] = written["scheme"]
+    escapers = written.get("escapers")
+    if escapers is not None:
+        meta["escapers"] = {
+            k: v
+            for k, v in escapers.items()
+            if k not in ("tail_cap", "tail_grown", "recuts")
+        }
+        escaper = by_id.get("escaper")
+        if escaper is not None and escaper.any():
+            ids = np.arange(escaper.shape[0], dtype=np.int32)
+            arrays["escaper_order"] = np.concatenate([ids[~escaper], ids[escaper]])
     return arrays, meta
 
 
@@ -2029,7 +2174,13 @@ class ProductionRunner:
             split_in = res.escapers
             res.state = res.handle = None  # consumed
         elif isinstance(restart_from, (str, os.PathLike)):
-            arrays, meta = load_restart(restart_from)
+            from jaccpot.checkpoint import is_checkpoint
+
+            if is_checkpoint(restart_from):
+                # a multi-GPU run's sharded checkpoint, continued on one card
+                arrays, meta = _single_card_restart(restart_from)
+            else:
+                arrays, meta = load_restart(restart_from)
             split_in = meta.get("escapers")
             if meta.get("mesh") is not None:
                 raise ValueError(

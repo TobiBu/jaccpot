@@ -50,8 +50,22 @@ are gathered over the processes, float reductions folded in mesh order, so the
 run is bitwise the single process's on the same devices. Callbacks run on every
 process (an edge's gathers are collectives: every process must make them);
 ``SnapshotWriter`` and ``DiagnosticsLog`` write their files on process 0 only
-(``all_processes=True`` to write on each). Restart files are refused (one ``.npz`` through one host; sharded
-checkpoints are track M3); ``restart_from=<RunResult>`` continues in memory.
+(``all_processes=True`` to write on each; ``SnapshotWriter(sharded=True)``: every
+process its own shards). Restart files are the sharded checkpoints (below);
+``restart_from=<RunResult>`` continues in memory.
+
+**Sharded checkpoints** (M3, :mod:`jaccpot.checkpoint`, ``MeshRunConfig(checkpoint=
+"orbax")``; the default ``"auto"`` under several processes): one orbax directory --
+the layout's arrays as they live on the mesh, each process writing its own shards,
+committed atomically -- with the ``.npz`` file's ``meta`` and a manifest (each shard's
+sha256, each array's set hash over its live rows by id). On the same mesh the restore
+reads each process's own shards back (checked) and the plan as from a ``.npz``:
+bitwise. On another device or process count orbax re-shards the layout in equal row
+blocks, each process compacts its live rows (``O(N / P)`` host memory) and the
+decomposition program makes the new domains, the carried acceleration and f_b
+riding along (:meth:`MeshBackend._elastic_layout`). A single card's ``.npz`` restarts
+on the mesh by id; a mesh checkpoint restarts on one card
+(:meth:`~jaccpot.production.ProductionRunner.run`).
 
 **Restart files** hold the state, masses, total acceleration and (under the
 criterion) f_b BY ID, the layout (ids per row, the padding rows' positions) and the
@@ -80,11 +94,11 @@ from jax.sharding import PartitionSpec as P
 
 __all__ = ["MeshBackend", "gather_by_id"]
 
-#: why a multi-process run refuses restart files until M3 (user decision U5)
+#: why a multi-process run refuses to WRITE a .npz restart (M3: sharded instead)
 _MULTIPROCESS_RESTART = (
-    "the restart file is one .npz gathered through one host. Sharded per-rank "
-    "checkpoints (orbax, plan track M3) replace it; until then continue a "
-    "multi-process run in memory (restart_from=<its RunResult>)"
+    "a .npz restart file is gathered through one host. Under several processes "
+    "write the sharded checkpoint (MeshRunConfig(checkpoint='auto' or 'orbax'), "
+    "jaccpot.checkpoint; the jaccpot[io] extra)"
 )
 
 
@@ -252,6 +266,93 @@ def gather_by_id(
     return _by_id(flat, _host(layout.ids), _host(layout.count), tail_part)
 
 
+#: :func:`_elastic_program`'s programs, by (mesh, capacity, options)
+_ELASTIC_PROGRAMS: dict = {}
+
+
+def _elastic_program(
+    mesh: Any,
+    *,
+    cap: int,
+    num_samples: int,
+    axis_name: str,
+    cubic: Optional[bool],
+    carry: tuple,
+) -> Any:
+    """The elastic restore's repartition: compacted blocks to ``cap``-row domains.
+
+    ``(state, masses, ids, count, *carry) -> (state, masses, ids, count,
+    declined, *carry)``: ``rollout._repartition_shard`` on each device's block
+    (any row count), its ``acceleration`` / ``force_scale`` routed with the
+    particles, the state packed ``(rows, 2, 3)`` as the segment runner keeps it.
+
+    Parameters
+    ----------
+    mesh : Any
+        The 1-D mesh.
+    cap : int
+        Output rows per device.
+    num_samples : int
+        Pivot samples per device.
+    axis_name : str
+        Mesh axis.
+    cubic : Optional[bool]
+        The box shape (``rollout.decompose``).
+    carry : tuple
+        Of ``"acceleration"`` and ``"force_scale"``: what rides along.
+
+    Returns
+    -------
+    Any
+        The jitted program.
+    """
+    from jaccpot.distributed.rollout import _mesh_devices, _repartition_shard
+
+    key = (mesh, int(cap), int(num_samples), axis_name, cubic, carry)
+    program = _ELASTIC_PROGRAMS.get(key)
+    if program is not None:
+        return program
+    ndev = len(_mesh_devices(mesh))
+
+    def body(state: Any, masses: Any, ids: Any, count: Any, *extra: Any) -> tuple:
+        given = dict(zip(carry, extra))
+        fb = given.get("force_scale")
+        routed = _repartition_shard(
+            state[:, 0],
+            state[:, 1],
+            masses,
+            ids,
+            count,
+            ndev=ndev,
+            cap=cap,
+            num_samples=num_samples,
+            axis_name=axis_name,
+            acceleration=given.get("acceleration"),
+            force_scale=None if fb is None else fb,
+            cubic=cubic,
+        )
+        x, v, m, i, c, acc, diag = routed[:7]
+        out = [jnp.stack([x, v], axis=1), m, i, c, diag["declined"]]
+        if "acceleration" in given:
+            out.append(acc)
+        if fb is not None:
+            out.append(routed[7])
+        return tuple(out)
+
+    spec = P(axis_name)
+    program = jax.jit(
+        jax.shard_map(
+            body,
+            mesh=mesh,
+            in_specs=(spec,) * (4 + len(carry)),
+            out_specs=(spec,) * (5 + len(carry)),
+            check_vma=False,
+        )
+    )
+    _ELASTIC_PROGRAMS[key] = program
+    return program
+
+
 class MeshBackend:
     """:class:`~jaccpot.production.ProductionRunner`'s multi-GPU mode.
 
@@ -367,11 +468,10 @@ class MeshBackend:
                 "the multi-GPU mode has no in-scan step_callback; use a callback "
                 "at the segment edges"
             )
-        if int(runner.segment.restart_every) > 0 or isinstance(
-            restart_from, (str, os.PathLike)
-        ):
+        if int(runner.segment.restart_every) > 0 and self._checkpoint_format() == "npz":
             refuse_in_multiprocess(
-                "a restart file (SegmentConfig.restart_every, restart_from=<file>)",
+                "a .npz restart file (SegmentConfig.restart_every with "
+                "MeshRunConfig(checkpoint='npz'))",
                 _MULTIPROCESS_RESTART,
             )
         started = time.perf_counter()
@@ -432,7 +532,16 @@ class MeshBackend:
             restored = {"from": "RunResult", "step": step, "bitwise": True}
             res.state = res.handle = None  # consumed
         elif isinstance(restart_from, (str, os.PathLike)):
-            arrays, meta = load_restart(restart_from)
+            from jaccpot.checkpoint import is_checkpoint, read_meta
+
+            sharded = is_checkpoint(restart_from)
+            if sharded:
+                meta = read_meta(restart_from)
+                arrays = None
+                dtype = np.dtype(meta["manifest"]["arrays"]["state"]["dtype"])
+            else:
+                arrays, meta = load_restart(restart_from)
+                dtype = arrays["state"].dtype
             counters = meta["counters"]
             step, segment_done = int(counters["step"]), int(counters["segment"])
             t0_run = float(counters["t0"])
@@ -443,14 +552,31 @@ class MeshBackend:
             )
             baselines = meta["baselines"]
             self._check_force_params(force_params, self.config.force)
-            external_arg = self._external_arg(external_params, arrays["state"].dtype)
-            msr, restored = self._restore(
-                str(restart_from),
-                arrays,
-                meta,
-                dt_value=dt_value,
-                external_arg=external_arg,
-            )
+            external_arg = self._external_arg(external_params, dtype)
+            if sharded:
+                msr, restored = self._restore_checkpoint(
+                    str(restart_from),
+                    meta,
+                    dt_value=dt_value,
+                    external_arg=external_arg,
+                )
+            elif meta.get("mesh") is None or is_multiprocess():
+                # a single card's file, or a mesh file under several processes
+                msr, restored = self._restore_by_id(
+                    str(restart_from),
+                    arrays,
+                    meta,
+                    dt_value=dt_value,
+                    external_arg=external_arg,
+                )
+            else:
+                msr, restored = self._restore(
+                    str(restart_from),
+                    arrays,
+                    meta,
+                    dt_value=dt_value,
+                    external_arg=external_arg,
+                )
             split = self._split_in(meta.get("escapers"), policy, msr)
             del arrays
         else:
@@ -1424,29 +1550,13 @@ class MeshBackend:
             Before the first segment (step 0 is the run's own input).
         """
         from jaccpot.distributed.multiprocess import refuse_in_multiprocess
-        from jaccpot.production import (
-            RESTART_FORMAT,
-            _atomic_savez,
-            _key_digest,
-            _qualname,
-            _template_shapes,
-        )
-        from jaccpot.runtime.strict_carry import external_field_key
-        from jaccpot.scheme import scheme_record
+        from jaccpot.production import _atomic_savez
 
-        refuse_in_multiprocess("save_restart", _MULTIPROCESS_RESTART)
         runner = self.runner
-        current = runner._current
-        msr = None if current is None else current["handle"]
-        split = None if current is None else current.get("escapers")
-        # a changed escaper split drops the carried accelerations (the
-        # continuation's start force evaluates them), so its edges hold none
-        resplit_edge = split is not None and int(current["segment"]) > 0
-        if msr is None or (msr.state.acceleration is None and not resplit_edge):
-            raise RuntimeError(
-                "save_restart needs a run that has done a segment: the state at "
-                "step 0 is the run's input"
-            )
+        current, msr, split = self._restart_position()
+        if self._checkpoint_format() == "orbax":
+            return self._save_checkpoint(path, current, msr, split)
+        refuse_in_multiprocess("save_restart", _MULTIPROCESS_RESTART)
         layout = msr.state
         flat = {
             name: _host(getattr(layout, name))
@@ -1475,6 +1585,167 @@ class MeshBackend:
             # the escaper tail's layout: the id of every row (-1 on padding); its
             # padding rows are zero
             arrays["escaper_ids"] = tail_part[1]
+        meta = self._restart_meta(
+            current, msr, count, by_id["state"], by_id["masses"], split
+        )
+        # UTF-8 bytes, as the single card's
+        arrays["meta"] = np.frombuffer(json.dumps(meta).encode("utf-8"), np.uint8)
+        _atomic_savez(str(path), **arrays)
+        runner._last_restart = str(path)
+        return str(path)
+
+    def _checkpoint_format(self) -> str:
+        """The restart format: ``"npz"`` (one file) or ``"orbax"`` (sharded).
+
+        ``MeshRunConfig.checkpoint``; ``"auto"``: the sharded checkpoint under
+        several processes (a ``.npz`` would pass through one host), else the
+        ``.npz``.
+
+        Returns
+        -------
+        str
+            ``"npz"`` or ``"orbax"``.
+        """
+        from jaccpot.distributed.multiprocess import is_multiprocess
+
+        chosen = str(getattr(self.config, "checkpoint", "auto"))
+        if chosen == "auto":
+            return "orbax" if is_multiprocess() else "npz"
+        return chosen
+
+    def _restart_position(self) -> tuple:
+        """The runner's last edge: ``(current, segment runner, escaper split)``.
+
+        Returns
+        -------
+        tuple
+            As named.
+
+        Raises
+        ------
+        RuntimeError
+            Before the first segment (step 0 is the run's own input).
+        """
+        current = self.runner._current
+        msr = None if current is None else current["handle"]
+        split = None if current is None else current.get("escapers")
+        # a changed escaper split drops the carried accelerations (the
+        # continuation's start force evaluates them), so its edges hold none
+        resplit_edge = split is not None and int(current["segment"]) > 0
+        if msr is None or (msr.state.acceleration is None and not resplit_edge):
+            raise RuntimeError(
+                "save_restart needs a run that has done a segment: the state at "
+                "step 0 is the run's input"
+            )
+        return current, msr, split
+
+    def _save_checkpoint(
+        self, path: Any, current: dict, msr: Any, split: Optional[dict]
+    ) -> str:
+        """:meth:`save_restart` as a sharded orbax checkpoint (:mod:`jaccpot.checkpoint`).
+
+        The layout's arrays as they live on the mesh (``state``, ``masses``,
+        ``ids``, ``count``, ``acceleration``, ``force_scale``; the escaper tail's
+        as ``tail_*``), each process writing its own shards, and the ``.npz``
+        file's ``meta`` with the manifest. Every process calls it (the runner's
+        restart cadence does).
+
+        Parameters
+        ----------
+        path : Any
+            The checkpoint directory.
+        current : dict
+            The runner's position.
+        msr : Any
+            The segment runner.
+        split : Optional[dict]
+            The escaper split.
+
+        Returns
+        -------
+        str
+            The absolute path.
+        """
+        from jaccpot.checkpoint import write_checkpoint
+
+        runner = self.runner
+        layout = msr.state
+        count = _host(layout.count)
+        tail = None if split is None else msr.tail
+        n_all = int(np.sum(count)) + (0 if tail is None else int(tail.total))
+        dtype = layout.state.dtype
+        meta = self._restart_meta(
+            current,
+            msr,
+            count,
+            jax.ShapeDtypeStruct((n_all, 2, 3), dtype),
+            jax.ShapeDtypeStruct((n_all,), layout.masses.dtype),
+            split,
+        )
+        meta["checkpoint"] = {
+            "processes": int(jax.process_count()),
+            "num_particles": n_all,
+        }
+        arrays = {
+            name: getattr(layout, name)
+            for name in ("state", "masses", "ids", "count", "acceleration", "force_scale")
+        }
+        ids_of = {
+            name: "ids" for name in ("state", "masses", "acceleration", "force_scale")
+        }
+        if tail is not None:
+            for name in ("state", "masses", "ids", "count", "acceleration"):
+                arrays[f"tail_{name}"] = getattr(tail, name)
+            ids_of.update(
+                {f"tail_{n}": "tail_ids" for n in ("state", "masses", "acceleration")}
+            )
+        stats = write_checkpoint(path, arrays, meta, id_arrays=ids_of)
+        runner._last_restart = stats["path"]
+        runner._last_checkpoint_stats = stats
+        return stats["path"]
+
+    def _restart_meta(
+        self,
+        current: dict,
+        msr: Any,
+        count: np.ndarray,
+        state: Any,
+        masses: Any,
+        split: Optional[dict],
+    ) -> dict:
+        """A restart's ``meta`` (the ``.npz`` file's and the sharded checkpoint's).
+
+        Parameters
+        ----------
+        current : dict
+            The runner's position at its last edge.
+        msr : Any
+            The segment runner.
+        count : np.ndarray
+            ``(ndev,)`` live rows per device.
+        state : Any
+            ``(N, 2, 3)`` by id, or anything with its ``shape`` and ``dtype``
+            (the fingerprint reads only those).
+        masses : Any
+            ``(N,)`` likewise.
+        split : Optional[dict]
+            The escaper split, or ``None``.
+
+        Returns
+        -------
+        dict
+            JSON-able.
+        """
+        from jaccpot.production import (
+            RESTART_FORMAT,
+            _key_digest,
+            _qualname,
+            _template_shapes,
+        )
+        from jaccpot.runtime.strict_carry import external_field_key
+        from jaccpot.scheme import scheme_record
+
+        runner = self.runner
         force = msr.force
         field = runner.external_acceleration_fn
         external_key = external_field_key(field, current["external_params"])
@@ -1518,7 +1789,7 @@ class MeshBackend:
                 "field": _qualname(field),
                 "params_sha256": None if external_key is None else external_key[1],
             },
-            "fingerprint": runner._fingerprint(by_id["state"], by_id["masses"]),
+            "fingerprint": runner._fingerprint(state, masses),
         }
         if split is not None and runner.escapers is not None:
             # only with the escaper path: the policy, the split and the ledger
@@ -1534,11 +1805,7 @@ class MeshBackend:
         if runner.scheme is not None:
             # only with a scheme: built-in files stay byte for byte (as one card)
             meta["scheme"] = scheme_record(runner.scheme)
-        # UTF-8 bytes, as the single card's
-        arrays["meta"] = np.frombuffer(json.dumps(meta).encode("utf-8"), np.uint8)
-        _atomic_savez(str(path), **arrays)
-        runner._last_restart = str(path)
-        return str(path)
+        return meta
 
     def _restore(
         self,
@@ -1586,9 +1853,7 @@ class MeshBackend:
         ValueError
             For a single-card file.
         """
-        from jaccpot.production import _key_digest, _qualname
-        from jaccpot.runtime.strict_carry import external_field_key
-        from jaccpot.scheme import scheme_record
+        from jaccpot.production import _key_digest
 
         saved = meta.get("mesh")
         if saved is None:
@@ -1597,28 +1862,9 @@ class MeshBackend:
                 "with ProductionRunner(...) without mesh="
             )
         runner = self.runner
-        written = meta["fingerprint"]
-        now = runner._fingerprint(arrays["state"], arrays["masses"])
-        mismatches = [
-            key
-            for key in sorted(set(written) | set(now))
-            if written.get(key) != now.get(key)
-        ]
-        if dt_value != float(meta["counters"]["dt"]):
-            mismatches.append("dt")
-        if meta.get("scheme") != scheme_record(runner.scheme):
-            # another scheme continues correctly, but not bitwise
-            mismatches.append("scheme")
-        field = runner.external_acceleration_fn
-        external = meta["external"]
-        key = external_field_key(field, external_arg)
-        field_matches = external["field"] == _qualname(field) and external[
-            "params_sha256"
-        ] == (None if key is None else key[1])
-        if not field_matches:
-            # the total of another field (or of none): the next segment computes
-            # this one's in a start force
-            mismatches.append("external_field")
+        mismatches, field_matches = self._continuation_checks(
+            meta, arrays["state"], arrays["masses"], dt_value, external_arg
+        )
         acceleration = arrays.get("acceleration") if field_matches else None
         force_scale = arrays.get("force_scale")
         # the escaper path (MESC): the tail's rows, by id
@@ -1715,6 +1961,687 @@ class MeshBackend:
             "layout": "file" if same_layout else "decomposed",
         }
         return msr, restored
+
+    def _continuation_checks(
+        self, meta: dict, state: Any, masses: Any, dt_value: float, external_arg: Any
+    ) -> tuple:
+        """What differs from the run that wrote a restart, and whether its field is ours.
+
+        Parameters
+        ----------
+        meta : dict
+            The restart's ``meta``.
+        state : Any
+            ``(N, 2, 3)`` (only its shape and dtype are read).
+        masses : Any
+            ``(N,)`` likewise.
+        dt_value : float
+            This run's timestep.
+        external_arg : Any
+            The field parameters the segments pass.
+
+        Returns
+        -------
+        tuple
+            ``(mismatches, field_matches)``: the fingerprint keys, ``dt``,
+            ``scheme`` and ``external_field`` that differ, and whether the carried
+            total acceleration is this run's field's.
+        """
+        from jaccpot.production import _qualname
+        from jaccpot.runtime.strict_carry import external_field_key
+        from jaccpot.scheme import scheme_record
+
+        runner = self.runner
+        written = meta["fingerprint"]
+        now = runner._fingerprint(state, masses)
+        mismatches = [
+            key
+            for key in sorted(set(written) | set(now))
+            if written.get(key) != now.get(key)
+        ]
+        if dt_value != float(meta["counters"]["dt"]):
+            mismatches.append("dt")
+        if meta.get("scheme") != scheme_record(runner.scheme):
+            # another scheme continues correctly, but not bitwise
+            mismatches.append("scheme")
+        field = runner.external_acceleration_fn
+        external = meta["external"]
+        key = external_field_key(field, external_arg)
+        field_matches = external["field"] == _qualname(field) and external[
+            "params_sha256"
+        ] == (None if key is None else key[1])
+        if not field_matches:
+            # the total of another field (or of none): the next segment computes
+            # this one's in a start force
+            mismatches.append("external_field")
+        return mismatches, field_matches
+
+    def _check_escaper_mode(self, path: str, has_tail: bool) -> None:
+        """Refuse a continuation in another escaper mode than the restart's.
+
+        Parameters
+        ----------
+        path : str
+            The restart (for the message).
+        has_tail : bool
+            Whether it ran with escapers.
+
+        Raises
+        ------
+        ValueError
+            If this runner's ``escapers`` disagree.
+        """
+        if has_tail != (self.runner.escapers is not None):
+            raise ValueError(
+                "a run continues in its own escaper mode: "
+                + (
+                    f"{path} ran with escapers= (pass the runner the policy)"
+                    if self.runner.escapers is None
+                    else f"{path} ran without escapers (escapers=None)"
+                )
+            )
+
+    def _finish_restore(
+        self,
+        path: str,
+        meta: dict,
+        msr: Any,
+        mismatches: list,
+        same_layout: bool,
+        *,
+        external_arg: Any,
+        how: str,
+    ) -> tuple:
+        """The force-key check, the counters, the warning and the ``restored`` record.
+
+        Parameters
+        ----------
+        path : str
+            The restart.
+        meta : dict
+            Its ``meta``.
+        msr : Any
+            The rebuilt segment runner.
+        mismatches : list
+            What differs so far (extended here).
+        same_layout : bool
+            Whether the layout is the file's.
+        external_arg : Any
+            The field parameters.
+        how : str
+            ``restored["layout"]``.
+
+        Returns
+        -------
+        tuple
+            ``(msr, restored)``.
+        """
+        from jaccpot.production import _key_digest
+
+        digests = {"force_key": _key_digest(msr.force.key())}
+        if same_layout and digests["force_key"] != meta["digests"].get("force_key"):
+            mismatches.append("force_key")
+        msr.resume(
+            segment_index=int(meta["counters"]["segment"]),
+            steps_done=int(meta["counters"]["step"]),
+            external_params=external_arg,
+        )
+        if mismatches:
+            warnings.warn(
+                f"restart {path}: {mismatches} differ from the run that wrote it; "
+                "the continuation is correct but not bitwise the uninterrupted run",
+                stacklevel=5,
+            )
+        restored = {
+            "from": path,
+            "step": int(meta["counters"]["step"]),
+            "bitwise": not mismatches,
+            "mismatches": mismatches,
+            "digests": digests,
+            "layout": how,
+        }
+        return msr, restored
+
+    def _restore_checkpoint(
+        self, path: str, meta: dict, *, dt_value: float, external_arg: Any
+    ) -> tuple:
+        """The segment runner a sharded checkpoint continues from (:mod:`jaccpot.checkpoint`).
+
+        **The same mesh** (device count and ``cap``): orbax restores every array
+        onto the run's sharding -- each process reads its own shards --, each
+        shard's sha256 is checked against the manifest, and the force's plan is
+        restored as from a ``.npz``: bitwise the uninterrupted run.
+        **Another mesh** (any device or process count): :meth:`_elastic_layout`
+        -- a re-sharding restore, the live rows' set hashes checked, and the
+        decomposition program run on them; the carried total acceleration and
+        f_b ride along. Correct, not bitwise (``mesh_layout``).
+
+        Parameters
+        ----------
+        path : str
+            The checkpoint.
+        meta : dict
+            Its ``meta``.
+        dt_value : float
+            This run's timestep.
+        external_arg : Any
+            The field parameters the segments pass.
+
+        Returns
+        -------
+        tuple
+            ``(MeshSegmentRunner, restored)`` (``restored["layout"]``:
+            ``"checkpoint"`` or ``"decomposed"``).
+
+        Raises
+        ------
+        ValueError
+            For a checkpoint that is not a restart (a snapshot) or another
+            escaper mode.
+        CheckpointCorruptError
+            When what was read differs from the manifest.
+        """
+        from jaccpot.checkpoint import restore_arrays, verify_shards
+        from jaccpot.distributed.escapers import EscaperTail
+        from jaccpot.distributed.segment import MeshState
+
+        saved = meta.get("mesh")
+        if saved is None or "counters" not in meta:
+            raise ValueError(
+                f"{path} is not a restart checkpoint (a snapshot holds no plan)"
+            )
+        manifest = meta["manifest"]["arrays"]
+        n_all = int(meta["checkpoint"]["num_particles"])
+        like_state = jax.ShapeDtypeStruct(
+            (n_all, 2, 3), np.dtype(manifest["state"]["dtype"])
+        )
+        like_masses = jax.ShapeDtypeStruct(
+            (n_all,), np.dtype(manifest["masses"]["dtype"])
+        )
+        mismatches, field_matches = self._continuation_checks(
+            meta, like_state, like_masses, dt_value, external_arg
+        )
+        has_tail = "tail_ids" in manifest
+        self._check_escaper_mode(path, has_tail)
+        same_layout = int(saved["ndev"]) == self.ndev and (
+            self.config.cap is None or int(self.config.cap) == int(saved["cap"])
+        )
+        if not same_layout:
+            mismatches.append("mesh_layout")
+            force = self._force()
+            layout, migration, tail = self._elastic_layout(
+                path, meta, force, field_matches
+            )
+            msr = self._segment_runner(layout, force, migration)
+            if tail is not None:
+                msr.attach_escapers(tail, self._coupling_G(msr.force))
+            return self._finish_restore(
+                path,
+                meta,
+                msr,
+                mismatches,
+                False,
+                external_arg=external_arg,
+                how="decomposed",
+            )
+        sh = NamedSharding(self.mesh, P(self.axis_name))
+        names = [
+            n
+            for n in ("state", "masses", "ids", "count", "acceleration", "force_scale")
+            if n in manifest
+        ]
+        if has_tail:
+            names += [
+                f"tail_{n}"
+                for n in ("state", "masses", "ids", "count", "acceleration")
+                if f"tail_{n}" in manifest
+            ]
+        got = restore_arrays(path, {n: (sh, None) for n in names})
+        verify_shards(got, meta["manifest"])
+        layout = MeshState(
+            state=got["state"],
+            masses=got["masses"],
+            ids=got["ids"],
+            count=got["count"],
+            acceleration=got.get("acceleration") if field_matches else None,
+            force_scale=got.get("force_scale"),
+        )
+        tail = None
+        if has_tail:
+            tail = EscaperTail(
+                state=got["tail_state"],
+                masses=got["tail_masses"],
+                ids=got["tail_ids"],
+                count=got["tail_count"],
+                cap=int(manifest["tail_ids"]["shape"][0]) // self.ndev,
+                total=n_all - int(np.sum(saved["counts"])),
+                acceleration=got.get("tail_acceleration") if field_matches else None,
+            )
+        del got
+        migration = saved.get("migration")
+        if bool(migration) != bool(self.config.migrate):
+            # the cuts (or their absence) are part of the trajectory
+            mismatches.append("migration")
+        msr = self._segment_runner(
+            layout,
+            self._restored_force(meta["plan"]),
+            migration if self.config.migrate else None,
+        )
+        self._install_plan(msr.force, meta)
+        if tail is not None:
+            msr.attach_escapers(tail, self._coupling_G(msr.force))
+        return self._finish_restore(
+            path,
+            meta,
+            msr,
+            mismatches,
+            True,
+            external_arg=external_arg,
+            how="checkpoint",
+        )
+
+    def _elastic_layout(
+        self, path: str, meta: dict, force: Any, field_matches: bool
+    ) -> tuple:
+        """A sharded checkpoint's particles decomposed on THIS mesh (another count).
+
+        orbax restores the written layout onto this mesh in equal row blocks
+        (``ceil(rows / ndev)`` rows per device, zeros padded at the end: a
+        re-sharding restore, each process reading only its blocks); each process
+        compacts its blocks' live rows on the host (``O(N / P)``), checks them
+        against the manifest's set hashes (summed over the processes) and places
+        them back; one repartition program (``rollout._repartition_shard``, the
+        decomposition's and the segment runner's body, from ``block`` input rows
+        to ``cap`` output rows) makes the Morton domains, routing the carried
+        total acceleration and f_b with their particles. The escaper tail (small)
+        is read whole on every process and split evenly by id.
+
+        Parameters
+        ----------
+        path : str
+            The checkpoint.
+        meta : dict
+            Its ``meta``.
+        force : Any
+            The run's force (its box shape).
+        field_matches : bool
+            Whether the carried acceleration is this run's field's.
+
+        Returns
+        -------
+        tuple
+            ``(MeshState, migration, EscaperTail or None)``.
+
+        Raises
+        ------
+        ValueError
+            If the repartition would overflow a device's ``cap`` (give
+            ``MeshRunConfig(cap=...)`` more).
+        """
+        from jaccpot.checkpoint import restore_arrays, verify_set_hashes
+        from jaccpot.distributed.migration import ownership_splitters
+        from jaccpot.distributed.multiprocess import (
+            host_value,
+            is_multiprocess,
+            local_device_indices,
+        )
+        from jaccpot.distributed.rollout import _mesh_devices
+        from jaccpot.distributed.segment import MeshState, _force_box_cubic
+
+        saved = meta["mesh"]
+        manifest = meta["manifest"]["arrays"]
+        rows_old = int(saved["ndev"]) * int(saved["cap"])
+        n_all = int(meta["checkpoint"]["num_particles"])
+        cap = self._cap(n_all)
+        block = -(-rows_old // self.ndev)
+        carry = ["acceleration"] if field_matches and "acceleration" in manifest else []
+        carry += ["force_scale"] if "force_scale" in manifest else []
+        names = ["state", "masses", "ids"] + carry
+        sh = NamedSharding(self.mesh, P(self.axis_name))
+        got = restore_arrays(
+            path,
+            {
+                n: (sh, (self.ndev * block,) + tuple(manifest[n]["shape"][1:]))
+                for n in names
+            },
+        )
+        devices = _mesh_devices(self.mesh)
+        local = (
+            local_device_indices(self.mesh)
+            if is_multiprocess()
+            else list(range(self.ndev))
+        )
+        by_device = {
+            n: {
+                s.device: np.asarray(jax.device_get(s.data))
+                for s in got[n].addressable_shards
+            }
+            for n in names
+        }
+        del got
+        parts: dict = {n: [] for n in names + ["count"]}
+        pieces = []
+        for d in local:
+            dev = devices[d]
+            ids = by_device["ids"][dev]
+            rows = d * block + np.arange(ids.shape[0])
+            take = np.flatnonzero((ids >= 0) & (rows < rows_old))
+            k = int(take.shape[0])
+            values = {n: by_device[n][dev] for n in names}
+            pieces.append(
+                (ids[take], {n: values[n][take] for n in names if n != "ids"})
+            )
+            for n in names:
+                src = values[n]
+                buf = np.zeros_like(src)
+                buf[:k] = src[take]
+                if n == "ids":
+                    buf[k:] = -1
+                elif n == "state" and k:
+                    # padding on the first live row (as the decomposition lays it)
+                    buf[k:, 0] = buf[0, 0]
+                parts[n].append(jax.device_put(buf, dev))
+            parts["count"].append(jax.device_put(np.asarray([k], np.int32), dev))
+        verify_set_hashes(pieces, meta["manifest"], [n for n in names if n != "ids"])
+        del by_device, pieces
+
+        def assembled(arrs: list) -> Any:
+            return jax.make_array_from_single_device_arrays(
+                (self.ndev * int(arrs[0].shape[0]),) + tuple(arrs[0].shape[1:]),
+                sh,
+                arrs,
+            )
+
+        placed = {n: assembled(parts[n]) for n in parts}
+        del parts
+        migrate = bool(self.config.migrate)
+        cubic = _force_box_cubic(force) if migrate else None
+        program = _elastic_program(
+            self.mesh,
+            cap=cap,
+            num_samples=int(self.config.num_samples),
+            axis_name=self.axis_name,
+            cubic=cubic,
+            carry=tuple(carry),
+        )
+        out = program(
+            placed["state"],
+            placed["masses"],
+            placed["ids"],
+            placed["count"],
+            *(placed[n] for n in carry),
+        )
+        del placed
+        state, masses, ids, count, declined = out[:5]
+        if bool(np.any(host_value(declined))):
+            raise ValueError(
+                f"restoring {path} on {self.ndev} devices: the decomposition would "
+                f"overflow a device's cap={cap}; give the shards more room "
+                "(MeshRunConfig(cap=...))"
+            )
+        carried = dict(zip(carry, out[5:]))
+        layout = MeshState(
+            state=state,
+            masses=masses,
+            ids=ids,
+            count=count,
+            acceleration=carried.get("acceleration"),
+            force_scale=carried.get("force_scale"),
+        )
+        migration = None
+        if migrate:
+            migration = {
+                "splitters": ownership_splitters(
+                    self.mesh,
+                    state[:, 0],
+                    count,
+                    cubic=bool(cubic),
+                    axis_name=self.axis_name,
+                )
+            }
+        tail = None
+        if "tail_ids" in manifest:
+            tail = self._elastic_tail(path, meta, field_matches)
+        return layout, migration, tail
+
+    def _elastic_tail(self, path: str, meta: dict, field_matches: bool) -> Any:
+        """A sharded checkpoint's escaper tail on THIS mesh, split evenly by id.
+
+        The tail is small: every process reads it whole (each shard's sha256
+        checked) and keeps its devices' chunks of the escapers in id order.
+
+        Parameters
+        ----------
+        path : str
+            The checkpoint.
+        meta : dict
+            Its ``meta``.
+        field_matches : bool
+            Whether the carried acceleration is this run's field's.
+
+        Returns
+        -------
+        Any
+            The :class:`~jaccpot.distributed.escapers.EscaperTail`.
+        """
+        from jaccpot.checkpoint import restore_arrays, verify_shards
+        from jaccpot.distributed.escapers import EscaperTail, tail_capacity
+        from jaccpot.distributed.multiprocess import (
+            _device_chunks,
+            is_multiprocess,
+            local_device_indices,
+        )
+        from jaccpot.distributed.rollout import _mesh_devices
+
+        manifest = meta["manifest"]["arrays"]
+        names = ["tail_state", "tail_masses", "tail_ids"]
+        if field_matches and "tail_acceleration" in manifest:
+            names.append("tail_acceleration")
+        host = restore_arrays(path, {n: (None, None) for n in names})
+        verify_shards(host, meta["manifest"])
+        ids = host["tail_ids"]
+        order = np.flatnonzero(ids >= 0)
+        order = order[np.argsort(ids[order], kind="stable")]
+        total = int(order.shape[0])
+        chunks = _device_chunks(total, self.ndev)
+        most = max(b - a for a, b in chunks)
+        cap_e = max(int(meta["escapers"]["tail_cap"]), tail_capacity(most))
+        devices = _mesh_devices(self.mesh)
+        local = local_device_indices(self.mesh) if is_multiprocess() else list(
+            range(self.ndev)
+        )
+        sh = NamedSharding(self.mesh, P(self.axis_name))
+        out: dict = {n: [] for n in names + ["tail_count"]}
+        for d in local:
+            a, b = chunks[d]
+            rows = order[a:b]
+            e = int(rows.shape[0])
+            for n in names:
+                src = host[n]
+                fill = -1 if n == "tail_ids" else 0
+                buf = np.full((cap_e,) + src.shape[1:], fill, src.dtype)
+                buf[:e] = src[rows]
+                out[n].append(jax.device_put(buf, devices[d]))
+            out["tail_count"].append(jax.device_put(np.asarray([e], np.int32), devices[d]))
+
+        def assembled(arrs: list) -> Any:
+            return jax.make_array_from_single_device_arrays(
+                (self.ndev * int(arrs[0].shape[0]),) + tuple(arrs[0].shape[1:]),
+                sh,
+                arrs,
+            )
+
+        return EscaperTail(
+            state=assembled(out["tail_state"]),
+            masses=assembled(out["tail_masses"]),
+            ids=assembled(out["tail_ids"]),
+            count=assembled(out["tail_count"]),
+            cap=int(cap_e),
+            total=total,
+            acceleration=(
+                assembled(out["tail_acceleration"])
+                if "tail_acceleration" in out
+                else None
+            ),
+        )
+
+    def _restore_by_id(
+        self,
+        path: str,
+        arrays: dict,
+        meta: dict,
+        *,
+        dt_value: float,
+        external_arg: Any,
+    ) -> tuple:
+        """A ``.npz`` restart decomposed on this mesh BY ID (another layout).
+
+        A single card's file (``meta["mesh"]`` unset; its arrays are in the
+        caller's rows: by id), or a multi-GPU file restored under several
+        processes. Every process reads the whole file (a single card's N fits one
+        host) and decomposes its own id range as a fresh run does
+        (:meth:`_decomposed`, :func:`~jaccpot.distributed.escapers.place_split`
+        with the file's escapers); the carried total acceleration and f_b are
+        placed at their ids. Correct, not bitwise (``mesh_layout``).
+
+        Parameters
+        ----------
+        path : str
+            The file.
+        arrays : dict
+            Its arrays.
+        meta : dict
+            Its ``meta``.
+        dt_value : float
+            This run's timestep.
+        external_arg : Any
+            The field parameters the segments pass.
+
+        Returns
+        -------
+        tuple
+            ``(MeshSegmentRunner, restored)``.
+        """
+        from jaccpot.distributed.escapers import empty_tail
+
+        state, masses = arrays["state"], arrays["masses"]
+        n = int(state.shape[0])
+        mismatches, field_matches = self._continuation_checks(
+            meta, state, masses, dt_value, external_arg
+        )
+        mismatches.append("mesh_layout")
+        single = meta.get("mesh") is None
+        if single:
+            # a single card's escaper split: its tree rows first in its order
+            split_in = meta.get("escapers")
+            order = arrays.get("escaper_order")
+            tail_ids = None
+            if split_in is not None:
+                n_bound = int(split_in["n_bound"])
+                escaped = (
+                    np.zeros(0, np.int32)
+                    if order is None
+                    else np.asarray(order[n_bound:], np.int32)
+                )
+                tail_ids = np.sort(escaped)
+            tail_cap = 0
+            total = arrays.get("acceleration")
+            if total is None and bool(meta["external"].get("total_is_self")):
+                total = arrays.get("self_acceleration")
+        else:
+            tail_ids = arrays.get("escaper_ids")
+            tail_cap = (
+                0 if meta.get("escapers") is None else int(meta["escapers"]["tail_cap"])
+            )
+            total = arrays.get("acceleration")
+        self._check_escaper_mode(path, tail_ids is not None)
+        acceleration = total if field_matches else None
+        force = self._force()
+        tail = None
+        if tail_ids is not None and int(np.sum(tail_ids >= 0)) > 0:
+            layout, migration, tail = self._decomposed_split(
+                arrays, tail_ids, force, tail_cap
+            )
+        else:
+            layout, migration = self._decomposed_local(state, masses, force)
+            if tail_ids is not None:
+                tail = empty_tail(self.mesh, self.axis_name, state.dtype)
+        layout.acceleration = self._place_by_id(layout.ids, acceleration)
+        layout.force_scale = self._place_by_id(layout.ids, arrays.get("force_scale"))
+        if tail is not None and int(tail.total) > 0:
+            tail.acceleration = self._place_by_id(tail.ids, acceleration)
+        msr = self._segment_runner(layout, force, migration)
+        if tail is not None:
+            msr.attach_escapers(tail, self._coupling_G(msr.force))
+        return self._finish_restore(
+            path,
+            meta,
+            msr,
+            mismatches,
+            False,
+            external_arg=external_arg,
+            how="decomposed",
+        )
+
+    def _decomposed_local(
+        self, state: np.ndarray, masses: np.ndarray, force: Any
+    ) -> tuple:
+        """:meth:`_decomposed` of a whole by-id set held by every process.
+
+        One process: the whole set. Several: each its own id range
+        (``decompose_local``; bitwise the one process's).
+
+        Parameters
+        ----------
+        state : np.ndarray
+            ``(N, 2, 3)`` by id.
+        masses : np.ndarray
+            ``(N,)``.
+        force : Any
+            The run's force.
+
+        Returns
+        -------
+        tuple
+            As :meth:`_decomposed`.
+        """
+        from jaccpot.distributed.multiprocess import is_multiprocess, local_id_range
+
+        n = int(state.shape[0])
+        if not is_multiprocess():
+            return self._decomposed(state, masses, force)
+        lo, hi = local_id_range(n, self.mesh)
+        return self._decomposed(state[lo:hi], masses[lo:hi], force, num_particles=n)
+
+    def _place_by_id(self, ids: Any, by_id: Optional[np.ndarray]) -> Any:
+        """A by-id host array placed at a layout's rows (zero on padding).
+
+        Each process fills its own shards from the ids they hold.
+
+        Parameters
+        ----------
+        ids : Any
+            The layout's ``(rows,)`` sharded ids (``-1`` on padding).
+        by_id : Optional[np.ndarray]
+            ``(N, ...)`` held by every process, or ``None``.
+
+        Returns
+        -------
+        Any
+            The sharded ``(rows, ...)`` array, or ``None``.
+        """
+        if by_id is None:
+            return None
+        parts = []
+        for shard in ids.addressable_shards:
+            local = np.asarray(jax.device_get(shard.data))
+            live = local >= 0
+            out = np.zeros((local.shape[0],) + by_id.shape[1:], by_id.dtype)
+            out[live] = by_id[local[live]]
+            parts.append(jax.device_put(out, shard.device))
+        return jax.make_array_from_single_device_arrays(
+            (int(ids.shape[0]),) + tuple(by_id.shape[1:]), ids.sharding, parts
+        )
 
     def _layout_from_file(
         self, arrays: dict, cap: int, acceleration: Optional[np.ndarray]
@@ -1863,6 +2790,8 @@ class MeshBackend:
         from jaccpot.distributed.multiprocess import _device_chunks
         from jaccpot.distributed.segment import MeshState, _force_box_cubic
 
+        from jaccpot.distributed.multiprocess import is_multiprocess, local_id_range
+
         state = arrays["state"]
         n = int(state.shape[0])
         escaper = np.zeros(n, bool)
@@ -1870,12 +2799,14 @@ class MeshBackend:
         most = max(int(escaper[a:b].sum()) for a, b in _device_chunks(n, self.ndev))
         migrate = bool(self.config.migrate)
         cubic = _force_box_cubic(force) if migrate else None
+        # several processes: each places its own id range (as a fresh run)
+        lo, hi = local_id_range(n, self.mesh) if is_multiprocess() else (0, n)
         shard, tail = place_split(
             self.mesh,
-            state,
-            arrays["masses"],
-            escaper,
-            lo=0,
+            state[lo:hi],
+            arrays["masses"][lo:hi],
+            escaper[lo:hi],
+            lo=lo,
             num_particles=n,
             cap=self._cap(n),
             num_samples=int(self.config.num_samples),
