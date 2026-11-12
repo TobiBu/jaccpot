@@ -834,6 +834,29 @@ earlier measurements. Most predate the 2026-10 cleanup and no longer run end to
 end (they drive a deleted worker script, the removed complex basis or private
 helpers whose signatures changed); the cleanup record lists what each needs.
 
+## Paper Branch (`paper/jaccpot-i-v2`)
+
+This branch (cut from `main` at tag `paper-i-base`) additionally carries the benchmarks, figure notebooks, and tests for
+the Jaccpot I methods paper. The manuscript and the phase-by-phase project plan
+both live in the separate `jaccpot-paper-i` repo -- see
+[PROJECT_PLAN.md](https://github.com/TobiBu/jaccpot-paper-i/blob/main/PROJECT_PLAN.md).
+This branch deliberately keeps no copy: the two diverged once already, with the
+branch's copy still specifying a Phase 4 scope that had been superseded.
+
+The pipeline has three layers, kept strictly separate:
+
+1. `bench/**/*.py` — seeded, `argparse`'d benchmark scripts that dump JSON into
+   `results/`. **No plotting logic**, and nothing a figure depends on is printed
+   rather than written. GPU scripts select a free device with `autocvd` *before*
+   importing JAX.
+2. `examples/jaccpot_paper/fig_*.ipynb` — one notebook per figure. Loads from
+   `results/**/*.json` only, **never recomputes**, writes a single PDF.
+3. `jaccpot-paper-i/figures/` — the exported PDFs, with a provenance row in that
+   repo's `figures/README.md` recording which script and notebook produced each.
+
+`results/` is gitignored apart from `.gitkeep`; the small summary JSON a figure
+actually needs is committed explicitly with `git add -f`, never bulk arrays.
+
 ## Runtime Type Checking
 
 `jaccpot` can enable package-wide runtime checking for annotated callables using
