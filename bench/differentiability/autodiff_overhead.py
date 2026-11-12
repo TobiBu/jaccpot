@@ -76,8 +76,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--theta", type=float, default=0.5)
     p.add_argument(
         "--basis",
-        default="real,complex",
-        help="Comma-separated bases (the canonical example reports both)",
+        default="real",
+        help=(
+            "Comma-separated bases. Only 'real' (alias 'solidfmm') exists since the "
+            "2026-10 cleanup; the September figure also reported 'complex'"
+        ),
     )
     p.add_argument("--leaf-size", type=int, default=32)
     p.add_argument("--repeats", type=int, default=10)
@@ -147,10 +150,7 @@ def main() -> int:
         grad_option_overrides,
         resolve_grad_options,
     )
-    from jaccpot.runtime.kernels.core import (  # noqa: E402
-        _fused_complex_m2l_pallas_active,
-        _real_m2l_pallas_active,
-    )
+    from jaccpot.runtime.kernels.core import _real_m2l_pallas_active  # noqa: E402
 
     def lane_engaged(cfg: GradConfig) -> bool:
         """Ask the runtime whether the fused-Pallas M2L actually engages here.
@@ -161,9 +161,7 @@ def main() -> int:
 
         options = resolve_grad_options(cfg, num_particles=0, supports_fast_lane=True)
         with grad_option_overrides(options):
-            return bool(
-                _fused_complex_m2l_pallas_active() and _real_m2l_pallas_active()
-            )
+            return bool(_real_m2l_pallas_active())
 
     device = jax.devices()[0]
     cc = str(getattr(device, "compute_capability", "") or "")

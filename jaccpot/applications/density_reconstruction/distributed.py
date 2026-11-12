@@ -476,7 +476,7 @@ def make_distributed_forward_operator(
     order: int = 4,
     theta: float = 0.5,
     leaf_size: int = 64,
-    basis: str = "solidfmm",
+    basis: str = "real",
     mac_type: Optional[str] = None,
     nearfield_backend: Optional[str] = None,
     partitioner: str = "rcb",

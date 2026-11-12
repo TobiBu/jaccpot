@@ -240,7 +240,7 @@ def _one_point(
         theta=float(theta), G=float(gravity), softening=float(softening)
     )
     if lane == "large_n":
-        kwargs.update(preset="large_n_gpu", expansion_basis="solidfmm")
+        kwargs.update(preset="large_n_gpu", expansion_basis="real")
     fmm = FastMultipoleMethod(**kwargs)
     t0 = time.perf_counter()
     state = fmm.prepare_state(

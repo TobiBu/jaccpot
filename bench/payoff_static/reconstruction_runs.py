@@ -643,7 +643,7 @@ def main() -> int:
         "n": [int(v) for v in str(args.n).split(",") if v],
         "theta": float(args.theta),
         "order": int(args.order),
-        "basis": "solidfmm",
+        "basis": "real",
         "seed": int(args.seed),
         "device": runmeta.device_label(),
         "precision": str(args.dtype),

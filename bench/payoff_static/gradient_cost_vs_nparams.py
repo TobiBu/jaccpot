@@ -117,7 +117,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--leaf-size", type=int, default=64, help="Leaf size")
     p.add_argument("--softening", type=float, default=1.0e-2, help="Plummer softening")
     p.add_argument("--preset", default="accurate", help="jaccpot preset")
-    p.add_argument("--basis", default="solidfmm", help="Expansion basis")
+    p.add_argument("--basis", default="real", help="Expansion basis")
     p.add_argument("--repeats", type=int, default=5, help="Timed repeats")
     p.add_argument("--warmup", type=int, default=2, help="Untimed warmup calls")
     p.add_argument(

@@ -431,7 +431,7 @@ def make_forward_operator(
     leaf_size: int = 16,
     mac_type: Optional[str] = None,
     preset: str = "accurate",
-    basis: str = "solidfmm",
+    basis: str = "real",
     differentiate_mac: bool = False,
 ) -> ForwardOperator:
     """Configure the observation operator and enforce its invariants.
@@ -457,7 +457,7 @@ def make_forward_operator(
     preset : str
         jaccpot preset; ``"accurate"`` by default.
     basis : str
-        Expansion basis; ``"solidfmm"`` is the radix differentiable path.
+        Expansion basis; ``"real"``, the only basis since the 2026-10 cleanup (``"solidfmm"`` is an alias).
     differentiate_mac : bool
         Must be ``False``; see :func:`assert_no_differentiated_mac`.
 

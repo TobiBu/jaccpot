@@ -209,7 +209,7 @@ def measure(
     kwargs["softening"] = softening
     if runtime_lane == "large_n":
         kwargs["preset"] = "large_n_gpu"
-        kwargs["expansion_basis"] = "solidfmm"
+        kwargs["expansion_basis"] = "real"
 
     fmm = FastMultipoleMethod(**kwargs)
 

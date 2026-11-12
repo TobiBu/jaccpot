@@ -173,7 +173,7 @@ def time_arm(
     kwargs: dict[str, Any] = dict(
         advanced=cfg,
         preset="large_n_gpu",
-        expansion_basis="solidfmm",
+        expansion_basis="real",
         softening=softening,
         streamed_far_pairs=True,
     )

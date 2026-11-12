@@ -126,7 +126,7 @@ def _solver(
         kwargs["mac_force_scale_mode"] = force_scale_mode
     if runtime_lane == "large_n":
         kwargs["preset"] = "large_n_gpu"
-        kwargs["expansion_basis"] = "solidfmm"
+        kwargs["expansion_basis"] = "real"
     return FastMultipoleMethod(**kwargs)
 
 

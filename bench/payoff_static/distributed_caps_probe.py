@@ -195,7 +195,7 @@ payload = {
         "n": [int(v) for v in str(_args.n).split(",") if v.strip()],
         "theta": 0.5,
         "order": 4,
-        "basis": "solidfmm",
+        "basis": "real",
         "seed": 0,
         "device": runmeta.device_label(),
         "precision": "float64",

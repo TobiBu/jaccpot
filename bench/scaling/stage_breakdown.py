@@ -159,7 +159,7 @@ def _parse_args() -> argparse.Namespace:
             "that default matters: supplying ANY explicit traversal_config replaces "
             "the preset's tuned values, and measured at N=65536 that alone took "
             "per-step time from 1079 ms to ~3200 ms and pushed the attributed "
-            "fraction from 76% down to 27% -- with the queue set to the same 131072 "
+            "fraction from 76%% down to 27%% -- with the queue set to the same 131072 "
             "the preset uses. The cost is the override, not the capacity. Set this "
             "only to push past the 'Pair queue capacity exceeded' ceiling above "
             "N=131072, and read the resulting per-step numbers as a differently "
@@ -227,13 +227,10 @@ def main() -> int:
         solver = FastMultipoleMethod(
             **extra,
             preset="large_n_gpu",
-            runtime_path="large_n",
-            expansion_basis="solidfmm",
-            complex_rotation="solidfmm",
+            expansion_basis="real",
             theta=float(args.theta),
             nearfield_mode="bucketed",
             nearfield_edge_chunk_size=64,
-            grouped_interactions=False,
             working_dtype=jnp.float32,
             tree_build_mode="static_radix",
             fixed_order=int(args.order),
@@ -337,13 +334,12 @@ def main() -> int:
         "n": ns,
         "theta": float(args.theta),
         "order": int(args.order),
-        "basis": "solidfmm",
+        "basis": "real",
         "seed": int(args.seed),
         "device": runmeta.device_label(),
         "precision": args.dtype,
         "leaf_size": int(args.leaf_size),
         "preset": "large_n_gpu",
-        "runtime_path": "large_n",
         "distribution": "uniform_cube",
         "steps": int(args.steps),
         "warmup": int(args.warmup),
