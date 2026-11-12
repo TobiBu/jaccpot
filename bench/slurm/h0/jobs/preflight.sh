@@ -117,6 +117,10 @@ entry m2g bash -c "srun ${MP[*]} $H0_PY bench/multiprocess_gate.py collectives -
   && JAX_COORDINATOR_PORT=$((PORT + 3)) srun ${MP[*]} $H0_PY bench/multiprocess_gate.py run --arm mp --n-per-gpu $((N / GPN)) \
   --repeats 1 --out $OUT/m2g/mp"
 entry a4 env CUDA_VISIBLE_DEVICES="$FIRST_CARD" bash -c "$(declare -f a4_entry); N=$N OUT=$OUT H0_PY=$H0_PY a4_entry"
+# M3: a sharded checkpoint written by the node's processes and restored elastically by one (orbax in the venv)
+entry m3 bash -c "JAX_COORDINATOR_PORT=$((PORT + 5)) srun ${MP[*]} $H0_PY bench/m3_checkpoint_io.py write --n $N --steps 1 --reps 1 \
+  --ckpt $OUT/m3/ck --out $OUT/m3/write && JAX_COORDINATOR_PORT=$((PORT + 6)) srun --ntasks=1 --gres=gpu:1 $H0_PY \
+  bench/m3_checkpoint_io.py restore --ckpt $OUT/m3/ck --steps 1 --reps 1 --out $OUT/m3/restore"
 if [ -s "$SGR_IC" ]; then
   if wanted escaper || wanted mesc; then
     "$H0_PY" "$H0_DIR/tiny_ic.py" "$SGR_IC" "$OUT/sgr_tiny.npz" "$N" > "$OUT/logs/tiny_ic.log" 2>&1 || true

@@ -1560,3 +1560,68 @@ Decision: B (as U6). A wins only with the geometric criterion and a galaxy kerne
 - replacing §7's zero-mass trick;
 - a frontier walk instead of the dense group x node one. Memory is bounded; at 1e8 x 1e5-1e6 the walk's
   O(groups x nodes) WORK binds.
+## M3 — sharded checkpoints and elastic restarts (orbax; 2026-11-11)
+
+The multi-GPU mode's restart files and snapshots no longer pass through one host. `jaccpot/checkpoint.py` (new) writes
+ONE orbax checkpoint directory per checkpoint: the mesh layout's arrays as they live on the devices (each process writes
+its own shards, OCDBT; nothing gathered, nothing copied on the device) and the `.npz` restart's `meta` plus a
+**manifest** (sha256 of every shard's bytes; an order- and split-independent 64-bit set hash per array over the live
+rows keyed by id). `docs/production.md`, "Sharded checkpoints", is the guide.
+
+**Decisions** (unattended session; recorded here and in `mn-scratch/m3/STATUS.md`):
+- **orbax as stored arrays, own digests.** U5 asked for orbax. orbax refuses per-device leaves under several
+  processes (a fully addressable array "in a multi-host setting"), so the checkpoint stores the global layout arrays
+  and the per-shard digests are the manifest's own (orbax's zarr data chunks carry no checksum; only the shard index
+  has a crc32c). astronomix's checkpoint module was not on this machine; the standard orbax API is used
+  (`Checkpointer(CompositeCheckpointHandler)`, `PyTreeSave` / `PyTreeRestore` with shardings, `JsonSave`).
+- **Elastic restores re-decompose from the layout order, not from by-id ranges.** A by-id range per process would
+  make every process read every old shard (`O(N)`); instead orbax re-shards the written rows onto the new mesh in
+  equal blocks, each process compacts its live rows (`O(N/P)`), and ONE repartition program (the decomposition's
+  `_repartition_shard`, any input block size -> `cap`) makes the Morton domains, the carried total acceleration and
+  f_b routed with their particles. The same Morton domains result; only the even split the sample sort starts from
+  differs (round-off, plus the pivots' sampling).
+- **One card keeps its `.npz`** (one host holds the state anyway; its programs and files unchanged; old files load).
+  Cross mode: a mesh checkpoint continues on one card (by id), a single card's `.npz` on the mesh (every process reads
+  the file, a single card's N fits one host).
+- **`MeshRunConfig(checkpoint="auto"|"npz"|"orbax")`**, default `"auto"`: the sharded checkpoint under several
+  processes, the `.npz` in one (the one-process default stays byte for byte what it was). The `.npz` is refused
+  under several processes (M2's refusal, narrowed to the format).
+- **Fingerprint comparison without the launch.** `JACCPOT_MP_*` and XLA's forced CPU device count are left out of
+  the restore's comparison (mesh mode only): a checkpoint written by 2 processes continues BITWISE in 1 process x 2
+  devices and back. The written fingerprint is unchanged.
+- orbax-checkpoint **0.12.9** (tensorstore 0.1.86) is the `io` extra; locally in an overlay
+  (`mn-scratch/m3/site-orbax`, `--target`, the venv's versions as constraints, every duplicate of a venv package
+  removed: jax / jaxlib / numpy / the CUDA plugin still resolve from the venv). The HoreKa venv pins the closure
+  (`bench/slurm/h0/requirements.txt`, 50 packages).
+
+**Gates (CPU, this host, jaccpot m3/sharded-io).**
+
+| gate | configuration | result |
+| --- | --- | --- |
+| identity | `provider_hlo_identity compare w5-main-cpu m3-tip-cpu` | **PASS 36/36** |
+| 1 same count | ESC's Plummer + 8 fliers, `DirectMeshForce`, migrating, energy at every edge, a checkpoint every edge; 2 devices: 1 process x 2 and 2 processes x 1 (gloo); escapers on and off | restart from segment 3 by a fresh runner == one go **bitwise** (state, acceleration, every edge's diagnostics, ledger); a chain of 3 runs == one go bitwise; sp == mp bitwise (arrays and JSON) |
+| 1 across process counts | written by 2 processes, restored by 1 x 2 (and the reverse) | **bitwise**, no warning, `layout="checkpoint"` |
+| 1 fused | ESC's system, fused CPU lane, geometric MAC, 2 devices | same-count restore: state identical (0.0) |
+| 2 elastic | written on 2 devices -> 4 (1 x 4 and 4 x 1: equal to each other **bitwise**), 4 -> 2 processes | within 1e-5 x scale of one go (direct force is partition-independent: the gap is the escapers' mesh-order sums); `layout="decomposed"`, `mesh_layout` named |
+| 2 cross mode | fused CPU lane, geometric MAC, escapers crossing (1 -> 9 escapers), 60 steps, restart at 30 | **yardstick** (mesh(2) vs single card, uninterrupted, max abs dx at the end) **2.47e-4**; mesh(2) -> 1-device mesh 4.7e-5 from the mesh run; mesh -> single card 7.2e-5 (mesh) / 2.4e-4 (card); single card -> mesh 7.2e-5 (card) / 2.4e-4 (mesh): every continuation within the yardstick of both runs; escaper membership carried (1025 bound) |
+| 3 crash | a writer killed inside orbax's commit (every shard written; child `os._exit`); a replace interrupted between its renames | no checkpoint at the new path, the previous one loads, `latest_checkpoint` skips the half-written one; the committed `.next` is found by `resolve` and the next write cleans up |
+| 3 corruption | another write's array data under a checkpoint's manifest; flipped bytes in every data file | refused: sha256 per shard (same layout), set hash (re-sharded restore), by-id load; flipped bytes: `ValueError` from tensorstore's decoder before the manifest |
+| snapshots | `SnapshotWriter(sharded=True)`, 1 x 2 and 2 x 1 | every snapshot read back by id == the edge's gathered state; sp == mp |
+| 4 GPU, Plummer 2e6 | 2 A100-PCIE-40GB (cards 1,6, autocvd; shared host, functional only), galaxy preset (`dehnen_error`), eps 1e-3, dt 2e-3, 4 segments x 5 steps, a checkpoint every edge, restart at segment 2 | 1 x 2 == 2 x 1 **bitwise**; same count (2 x 1 from the 2-process checkpoint, and 1 x 2 from it): **0 elements differ**, `bitwise=True`; elastic 2 -> 1-device mesh max abs dx 9.5e-7 (rms 4.6e-10), 2 -> one card rms 1.3e-8; **yardstick** card vs mesh(2), uninterrupted: max 1.1e-6, rms 3.1e-8. Checkpoint 110.4 MB (55.2 MB per rank). Peak host RSS per process: writes 4.5-5.3 GB (each process draws the whole IC), restores 2.5-4.0 GB; device peak 0.56-0.72 GiB |
+| 4 GPU, Sgr 2.2e6 | A2's unclipped 1e8 light Sgr downsampled as MESC did (2,219,944 rows, 182,859 beyond r 80), geometric theta 0.7, eps 1.5e-3, dt 1e-3, escapers r_escape 80, same cadence | 1 x 2 == 2 x 1 **bitwise**; same count **0 elements differ**, `bitwise=True` (escapers 182,837, ledger equal); elastic 2 -> 1-device mesh max 2.3e-6 (rms 2.1e-8), 2 -> one card max 1.1e-5 (rms 2.7e-7); **yardstick** card vs mesh max 2.9e-5 (rms 8.0e-7); ledgered drift 2.7-3.9e-7, momentum 3.5-4.0e-10 everywhere. Peak host RSS: writes ~9.0-9.4 GB per process (each loads the 1e8 IC file to downsample), restores 2.6-4.0 GB |
+| 6 HoreKa (CPU smoke) | `SMOKE=1 ... --only m3_node1,m3_node4` | preflight `m3` ok; m3_node1 7/7 steps, m3_node4 4/4, chaining `continue` -> `done` |
+
+CI shards run here with the CI arguments, device counts and typecheck settings: `test_shards.py check` rc 0;
+`unit` (typecheck 1) 1478 passed / 202 skipped; `characterization` 21 passed (no new constructor-state field in it:
+no golden regenerated); `distributed-checkpoint` (new job, 4 forced devices, installs `.[dev,io]`) 16 passed in
+32.5 min (both fused cross-mode MACs; the `dehnen_error` twin is now manual, ~14 min of compile; `test_checkpoint_mesh.py` as CI runs it: peak RSS 5.3 GB, 13.7 min); bench-tooling 155
+passed. `test-distributed-multiprocess`: M2's refusal scenario now asks for `checkpoint="npz"`.
+
+**Open issues.**
+- A mesh `RunResult` still gathers the final state by id on EVERY process (`O(N)` each, M2's `host_value`): the
+  1e9 HoreKa job stubs it out; M5 needs an opt-out.
+- The elastic restore's set-hash check needs the live rows' ids, so it cannot point at WHICH old shard was corrupt
+  (the same-count restore and `load_checkpoint` can).
+- Checkpoints are synchronous (the segment edge waits for the write); orbax's async checkpointer would overlap it
+  with the next segment: decide on the HoreKa numbers.
+- A single card -> mesh restore reads the whole `.npz` on every process; fine up to a single card's N.
