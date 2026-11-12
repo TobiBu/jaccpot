@@ -855,6 +855,84 @@ compile key. Size: 40 B/particle in float32 (+4 under `dehnen_error`) plus 4 B p
   and sized afresh: the same run to round-off, `restored["bitwise"] = False`,
   `"mesh_layout"` among the mismatches.
 
+### Sharded checkpoints (multi-node plan M3)
+
+Under several processes the `.npz` above would pass the whole state through one host, so
+the multi-GPU mode writes a **sharded checkpoint** instead: `MeshRunConfig(checkpoint=...)`
+is `"auto"` (the default: sharded under several processes, the `.npz` in one), `"orbax"`
+(always sharded) or `"npz"` (always the file; refused under several processes). orbax is
+an optional dependency: `pip install 'jaccpot[io]'` (orbax-checkpoint 0.12.9 is the version
+gated). Importing jaccpot and every default path never import it; using a checkpoint
+without it is an `ImportError` that names the extra.
+
+**Writing.** `SegmentConfig(restart_every=k, restart_path="run/ck_{step:08d}")` (or
+`runner.save_restart(path)` at an edge) writes one DIRECTORY per checkpoint, every process
+calling it (the runner's cadence does). Inside:
+
+| item | what |
+|---|---|
+| `arrays/` (orbax, OCDBT) | the layout's arrays as they live on the mesh: `state` `(ndev*cap, 2, 3)`, `masses`, `ids` (`-1` on padding), `count` `(ndev,)`, `acceleration` (the total), `force_scale` (under `dehnen_error`); with escapers the tail's `tail_state`, `tail_masses`, `tail_ids`, `tail_count`, `tail_acceleration`. Each process writes ITS OWN shards (`arrays/ocdbt.process_<p>/`): nothing passes through one host and nothing is copied on the device for the write; host memory per process is one shard at a time |
+| `meta/metadata` (JSON, process 0) | what the `.npz`'s `meta` holds (counters, baselines, the plan record, the template's shapes, the force key's digest, the field record, the fingerprint, `mesh`, the escaper split and ledger, the scheme) plus `checkpoint` (processes, N) and the **manifest**: per array its shape and dtype, the sha256 of every shard's bytes (by first row), and for the per-particle arrays a set hash over the live rows keyed by id (`jaccpot.checkpoint.set_hash`: order- and split-independent) |
+
+The commit is atomic (orbax writes a temporary directory and renames it after every
+process finished): a job killed mid-write leaves no checkpoint at the new path and every
+earlier one intact. Writing over an existing path goes through `<path>.next` (committed
+first), `path -> <path>.prev`, `<path>.next -> path`, `<path>.prev` removed; a crash between
+the renames leaves a committed `.next` or `.prev` that every reader finds
+(`jaccpot.checkpoint.resolve`). Size: the layout's rows, not N: ~48 B per row in float32
+under `dehnen_error` (state 24, mass 4, id 4, acceleration 12, f_b 4) at `cap_headroom`
+1.15, before orbax's compression.
+
+**Restoring** (`run(restart_from=<directory>)`, in a fresh process, one or many):
+
+- **The same device count and `cap`** (any process count: N processes x 1 device or 1 x
+  N): orbax reads each process's own shards back onto the run's sharding, every shard's
+  sha256 is checked, and the plan is restored exactly as from a `.npz`: the continuation is
+  the uninterrupted run, BITWISE (`restored["layout"] == "checkpoint"`). The launch details
+  (`JACCPOT_MP_*`, XLA's forced CPU device count) are not part of the comparison, so a
+  checkpoint written by 2 processes continues bitwise in 1 process with 2 devices.
+- **Another device or process count (elastic)**: orbax restores the written rows onto THIS
+  mesh in equal blocks (a re-sharding restore: each process reads only its blocks), each
+  process compacts its live rows on the host (`O(N/P)`), the set hashes are checked (summed
+  over the processes), and one repartition program (the decomposition's) makes the new
+  Morton domains, the carried acceleration and f_b travelling with their particles (no
+  start force); the escaper tail is read whole and split evenly. Correct, not bitwise:
+  `restored["layout"] == "decomposed"`, `"mesh_layout"` among the mismatches. A block whose
+  rows would overflow a device's `cap` is an error naming `MeshRunConfig(cap=...)`.
+- **One card**: `ProductionRunner(solver)` (no `mesh=`) continues a mesh checkpoint by id
+  (every shard read and checked on the one host); the carried total is the start force
+  when the run had no external field (with one, the single card evaluates its start
+  force); an escaper split continues with the same membership. The plan is the single
+  card's own prepare: correct, not bitwise.
+- **From one card**: the mesh mode continues a single card's `.npz` by id (every process
+  reads the file -- a single card's N fits one host -- and decomposes its own id range),
+  the carried total and f_b placed by id; with escapers, the file's membership.
+
+A checkpoint written and read under a manifest mismatch (a shard that is not the one the
+manifest hashed, a corrupted file) raises `jaccpot.checkpoint.CheckpointCorruptError` (or
+tensorstore's decoder error first, for flipped compressed bytes) instead of continuing.
+
+**Snapshots** that never pass through one host: `SnapshotWriter("run/snaps", every=2,
+sharded=True)` writes `run/snaps/snapshot_<step:08d>/` in the same format (state, masses,
+ids and counts, the escaper tail; `meta` holds `kind="snapshot"`, step and time). Read one
+back on one host by id with `jaccpot.checkpoint.load_checkpoint(path, ["state"])`.
+
+**Job chaining** (SLURM walltime): `jaccpot.checkpoint.latest_checkpoint("run/ck_{step:08d}")`
+is the newest COMMITTED checkpoint of a restart-path pattern (a half-written one is
+skipped). `bench/slurm/m3/chain.sbatch` is the pattern: each job first submits its
+successor (`afterany` on itself), continues from the latest checkpoint, and stops itself
+with one more checkpoint before its deadline (a decision every process takes together:
+`bench/m3_checkpoint_io.py chain`); the successor resumes or, after `DONE`, exits.
+
+**Diagnostics** stay `DiagnosticsLog`'s: one JSON line per edge, written by process 0
+after the edge's collectives (every process keeps the rows); a run continued from a
+checkpoint appends its edges to the same file, which then equals the run in one go's
+(wall times aside).
+
+**Gates** (`tests/distributed/test_checkpoint_*.py`, job `test-distributed-checkpoint`, the
+CI shard that installs the `io` extra): the numbers are in `docs/production_2026-11.md`
+(`## M3`).
+
 **What is bitwise, and what is not:**
 
 | | |

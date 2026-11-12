@@ -300,7 +300,8 @@ SHARDS: dict[str, list[str]] = {
         *_UNIT_MULTI_DEVICE,
         "-m",
         "not distributed_criterion and not distributed_segment"
-        " and not distributed_multiprocess and not distributed_grad",
+        " and not distributed_multiprocess and not distributed_grad"
+        " and not distributed_checkpoint",
     ],
     "distributed-criterion": ["tests/distributed", "-m", "distributed_criterion"],
     # the fused mesh lane's segment runner (S11): minutes of compile per case
@@ -351,6 +352,9 @@ SHARDS: dict[str, list[str]] = {
         "-m",
         "distributed_multiprocess",
     ],
+    # sharded checkpoints and elastic restarts (M3): the only job that installs the
+    # `io` extra (orbax); forced devices and localhost processes
+    "distributed-checkpoint": ["tests/distributed", "-m", "distributed_checkpoint"],
 }
 
 # The two jobs that do not run on every pull request. Each costs minutes of
@@ -370,6 +374,7 @@ GATED_SHARDS: tuple[str, ...] = (
     "distributed-grad-gates",
     "distributed-segment-escapers",
     "distributed-multiprocess",
+    "distributed-checkpoint",
     "nornax-distributed",
 )
 GATED_PATHS: tuple[str, ...] = (
@@ -381,6 +386,8 @@ GATED_PATHS: tuple[str, ...] = (
     "jaccpot/scheme.py",
     # the A4 reference force, gated across devices and processes
     "jaccpot/verification/",
+    # sharded checkpoints (M3)
+    "jaccpot/checkpoint.py",
     # what the fused mesh lane (test-distributed-segment) takes its shapes, template,
     # verdict and plan from on the runtime side
     "jaccpot/runtime/fused_provider.py",

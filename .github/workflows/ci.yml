@@ -1282,6 +1282,52 @@ jobs:
             exit 1
           fi
 
+  # Sharded checkpoints and elastic restarts of the multi-GPU mode (M3,
+  # tests/distributed/test_checkpoint_*.py): orbax is the optional `io` extra, which
+  # only this job installs; four forced devices for the in-process cases, localhost
+  # processes (gloo) for the multi-process ones.
+  test-distributed-checkpoint:
+    name: test-distributed-checkpoint
+    needs: changes
+    if: needs.changes.outputs.gated == 'true'
+    runs-on: ubuntu-latest
+    # ~18 min of calls on a loaded 64-core host (the fused cross-mode case ~14 of
+    # them; its dehnen_error twin is manual)
+    timeout-minutes: 60
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+      XLA_FLAGS: --xla_force_host_platform_device_count=4
+      JACCPOT_CHECKPOINT_TESTS_REQUIRE_ORBAX: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install package + dev tools + the io extra
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install -e ".[dev,io]"
+      - name: Checkpoint tier
+        # `-n 0`: the multi-process cases already run up to four processes.
+        run: |
+          set -o pipefail
+          rc=0
+          mapfile -t selection < <(python .github/scripts/test_shards.py args distributed-checkpoint)
+          pytest "${selection[@]}" -n 0 -rs --durations=15 \
+            | tee pytest-checkpoint-tier.txt || rc=$?
+          if [ "$rc" != 0 ] && [ "$rc" != 5 ]; then exit "$rc"; fi
+      - name: Fail if the tier was skipped rather than run
+        run: |
+          if grep -qE "no tests ran|collected 0 items" pytest-checkpoint-tier.txt; then
+            echo "::error::the checkpoint tier did not run"
+            exit 1
+          fi
+
   test-distributed-tier:
     # `tests/distributed/` on forced CPU devices -- the tier itself, which until
     # now ran nowhere.

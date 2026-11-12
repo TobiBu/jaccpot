@@ -73,6 +73,8 @@ JOBS=(
   "m2g_node2|2|$G|02:00:00|yes|M2G: 8 x 1 GPU over two nodes + the barrier probe"
   "mesc_node1|1|$G|03:00:00|yes|MESC: escapers on the mesh at 1e8, 4 x 1 GPU (the Sgr IC)"
   "mesc_node2|2|$G|02:30:00|yes|MESC: escapers on the mesh at 1e8, 8 x 1 GPU (the Sgr IC)"
+  "m3_node1|1|$G|02:00:00|yes|M3: sharded checkpoint I/O per rank at 1e8, elastic 4 -> 2/1 GPUs + chaining"
+  "m3_node4|4|$G|02:00:00|yes|M3: sharded checkpoint I/O per rank at 1e9 on 16 GPUs, elastic 16 -> 12/8"
   "a4|-|-|per ladder|no|A4 accuracy suite: IC job (CPU) + one array per ladder and tier + summary"
 )
 
@@ -135,6 +137,7 @@ if [ "${SMOKE:-}" = 1 ]; then
     echo "=== SMOKE $name: $what  $(date -Is)"
     gpn=2
     [ "$nodes" = 2 ] && gpn=1
+    [ "$nodes" = 4 ] && gpn=1
     start=$SECONDS
     if SMOKE=1 H0_JACCPOT=$H0_JACCPOT H0_RUN=$H0_RUN H0_JOB=$name H0_GPUS_PER_NODE=$gpn \
       bash "$H0_DIR/jobs/$name.sh" > "$H0_RUN/logs/$name.out" 2>&1; then
