@@ -1435,6 +1435,131 @@ one shared A100-PCIE-40GB (card 7, autocvd), A and A-vs-A. B/p, far-pair counts 
   - the top-level `tests/unit` guards 94 passed with `JACCPOT_RUNTIME_TYPECHECK=1`;
   - pre-commit clean on every touched file.
 
+## HH — the field at points that are not sources, for hybrid Hermite (session 1, 2026-11-11)
+
+Multi-node plan U6: globular clusters with direct-sum internal dynamics in a live Milky Way. jaccpot owns the force.
+This session lands `target_points` (#302) in the fused lane. The scheme is nornax's (`nornax.hybrid.HybridHermite`,
+`nornax.adapters.FusedHybridForce`), and the design note is nornax `docs/hybrid_hermite.md`.
+
+**What was built.**
+- `jaccpot/runtime/target_points.py` and `FusedForceProvider.plan_targets` / `target_field` / `step_with_targets`
+  evaluate the sources' field (and optionally the potential and eq (16b)'s f_b) at M massless points. How it works:
+  - the topology's upward pass is rerun on its tree;
+  - the points are Morton-sorted into groups of 32;
+  - a one-sided group x node walk applies either the geometric angle with the separation floor, or eq (16a) with the
+    group's own `adaptive_eps * min f_b` and M2P's error term at the group's closest member;
+  - the far field is M2P per point, the near field the engine's softened kernel.
+- The points enter neither the tree, the walk, the force scale, nor the topology. `step_with_targets`' source
+  accelerations and verdict bits equal `step`'s, bit for bit, under both MACs (test).
+- Capacities are static (`TargetPlan`): moving points recompile nothing (test: one trace for three point sets). An
+  overflow is reported (`ok`, `needs`) and `plan.grown(needs)` re-plans.
+- The default path is unchanged: identity vs `w5-main-cpu` (see below).
+
+**Why the far field is M2P, not a local expansion about each group.** The first version used M2L to the group centre,
+then L2P. On sparse groups its group-radius truncation error added coherently over every accepted node: 5.2e-4 rel
+at eps 1e-4 on points far outside the box, whatever the source nodes. With M2P per point the same points give
+6.0e-6.
+
+**Accuracy** (CPU route, `galaxy` preset with leaf 16, p4, float32 lane, ferrers3 eps 0.01; 4000 Gaussian sources,
+700 points: inside, a tight clump, far outside, on top of sources), rel-L2 against an fp64 direct sum:
+
+| criterion | all points | inside | clump | far | coincident | source lane (same sources) |
+|---|---|---|---|---|---|---|
+| geometric θ 0.6 | 3.0e-4 | 1.6e-5 | 8.6e-4 | 4.8e-6 | 2.9e-5 | 2.3e-3 |
+| `dehnen_error` 1e-4 | 4.0e-5 | 2.5e-5 | 9.4e-5 | 4.8e-6 | 2.0e-5 | 1.9e-4 |
+
+The geometric criterion's error at a point is its tolerance's, about 2x the source lane's rms on a 512-particle
+Plummer galaxy. On a 32-star clump at r = 0.8 (`large_n_gpu`, leaf 16, p4) it is 5.1e-3 / 1.0e-3 / 7.7e-5 at
+θ 0.6 / 0.4 / 0.25, against a source lane rms of 2.5e-3 / 4.7e-4 / 4.6e-5. Use `dehnen_error` for clusters.
+
+**Option A vs B** (nornax `docs/hybrid_hermite.md`). Galaxy: Hernquist, 2e4 particles. Cluster: Plummer, 1e3 stars,
+M_c 1e-3, r_c 0.01, at R = 1. The table gives the slow-force error on the cluster's stars, COM-subtracted, over the
+rms tidal field:
+
+| eps_g | criterion | A: stars stay galaxy sources, intra-cluster pairs subtracted | B: `target_points` |
+|---|---|---|---|
+| 0.002 | geometric θ 0.6 | 0.43 | 0.029 |
+| 0.002 | `dehnen_error` 1e-4 | 0.036 | 0.0047 |
+| 0.02 | geometric θ 0.6 | 0.013 | 0.032 |
+| 0.02 | `dehnen_error` 1e-4 | 0.017 | 0.0050 |
+
+Decision: B (as U6). A wins only with the geometric criterion and a galaxy kernel whose support covers the cluster.
+
+**Tests.**
+- `tests/integration/strict/test_target_points.py`: 14 passed, 2 skipped by design, on the CPU route, both MACs, with
+  and without `JACCPOT_RUNTIME_TYPECHECK=1` (3.0 min at `-n 2`, peak RSS 2.2 GB, loaded host).
+- It runs in a new shard, `integration-strict-targets` (`test_shards.py check` rc 0, 3213 covered).
+- The top-level `tests/unit` guards pass with `JACCPOT_RUNTIME_TYPECHECK=1` after `bootstrap_target_force_scale`
+  joined `__all__`; pre-commit is clean.
+
+**The GPU gate's OOM and the fix.**
+- The first GPU functional run (galaxy 1e6 + cluster 1e4, `nornax.adapters.FusedHybridForce`, card 1, 12:47) failed
+  with RESOURCE_EXHAUSTED: 14.92 GiB, inside `plan_target_points` for the back-reaction (1e6 galaxy points on the
+  cluster's tree).
+- The cause: every target group got the WORST group's far / near capacity. The per-point M2P gather dominated.
+  Compiled temporaries measured on CPU (`memory_analysis`, N = 2e4, p6, leaf 64):
+  `group_block x group_size x (far_cap x ~7.4 KB + near_cap x leaf_cap x ~30 B)`. That is 0.93 -> 3.70 GiB going from
+  far_cap 256 to 1024 at block 16. The galaxy groups next to the cluster needed ~1e3 cluster nodes, and all 31,250
+  groups paid for them.
+- The fix (a0a25a72):
+  - flat (group, node) pair lists whose lengths are TOTAL capacities;
+  - the walk in blocks sized from a 256 MiB budget (a large tree walks one group at a time);
+  - M2P / P2P in chunks of 128 pairs with scatter-add.
+- Accuracy is unchanged (3.0e-4 / 4.0e-5 above). A new regression test checks a dense clump among far points stays
+  under 256 MiB of compiled temporaries.
+- Memory vs M at N = 1e6 (Hernquist galaxy; Plummer cluster r_c 0.005; p6, leaf 64), compiled temporaries:
+
+  | direction | M (stars) | source nodes | walk block | far / near pairs (plan) | temporaries |
+  |---|---|---|---|---|---|
+  | galaxy -> stars | 1e3 | 120,831 | 32 | 24,448 / 1,024 | 450 MiB |
+  | galaxy -> stars | 1e4 | 120,831 | 32 | 234,624 / 4,352 | 372 MiB |
+  | galaxy -> stars | 1e5 | 120,831 | 32 | 2,327,424 / 33,664 | 389 MiB |
+  | stars -> 1e6 galaxy points | 1e3 | 2,047 | 64 | 49,408 / 33,280 | 102 MiB |
+  | stars -> 1e6 galaxy points | 1e4 | 2,047 | 64 | 55,168 / 207,104 | 98 MiB |
+  | stars -> 1e6 galaxy points | 1e5 | 14,335 | 64 | 68,608 / 1,774,208 | 125 MiB |
+
+- **GPU functional gate, PASS.** A100 card 1, `on-free-card`, contended, so no timing claims:
+  - galaxy 1e6 (galaxy preset, `dehnen_error` 1e-4, leaf 64, p6, eps_g 0.005) + Plummer cluster 1e4 (M_c 1e-4,
+    r_c 0.005, eps_c r_c/20, Hermite-4, n_sub 16), `cross="fmm"`;
+  - 100 slow steps of dt 1e-3: both verdicts hold in every segment, |dE/E| <= 9.0e-9, |dP| <= 1.3e-10;
+  - device peak 7.37 GB for the whole program;
+  - plans: stars far 123,136 / near 3,840; back-reaction far 87,680 / near 2,707,072
+    (`hh/runs/gpu_functional_1e6_1e4.json`).
+- **Two more defects the larger runs found, both fixed:**
+  - The cluster provider carried the galaxy's softening (support 0.012 vs r_c 0.005). Its own walk then made every
+    pair of a compact cluster near, and at 1e5 stars the prepare's flat walk overflowed a 2.7e8 queue. The fix
+    (2d506959) is `target_field(..., softening=)` / `plan_targets(..., softening=)`: the points' pair softening, with
+    the separation floor following it. The cluster's tree keeps a small softening, and the back-reaction takes the
+    galaxy's.
+  - nornax's energy ledger built a dense M x M matrix for W_cc (74.5 GiB at 1e5 stars). It is now a blocked sum
+    (nornax cce59ad).
+- **GPU gate rerun on the final code:** 1e6 + 1e4, card 6, the same physics numbers (|dE/E| <= 9.0e-9,
+  |dP| <= 1.3e-10, verdicts ok), device peak **1.01 GiB** (`gpu_functional_1e6_1e4_v3.json`).
+- **Probe at 1e7 + 1e5** (card 6, 8 steps): verdicts ok, |dE/E| <= 9.2e-9, |dP| <= 2e-11, device peak **5.34 GiB**.
+  Plans: stars far 1,297,280 / near 30,464; back-reaction far 804,864 / near 17,231,488 (`gpu_probe_1e7_1e5.json`).
+- **Production shape: 1e8 galaxy + 1e5-1e6 stars on one A100.** This is an estimate, not a run.
+  - *Galaxy -> stars only:* fits. The lists are ~23 far pairs per star x 8 B (0.2 GB at 1e6 stars), the temporaries
+    are under 0.5 GB, and the walk block drops to 1 group (one 1.2e7-node block is ~0.8 GB). All of that sits on top
+    of the runner's 214-330 B/p, i.e. 21-33 GB.
+  - *The FMM back-reaction over all 1e8 galaxy points:* adds ~100 B per galaxy point of per-point transients (the
+    sorted copy, groups, outputs, scatter carries), ~10 GB, plus its near list (~1.7 pairs per point x 8 B,
+    ~1.4 GB). That is marginal or over at 40 GB.
+    Fixes for session 2:
+    - evaluate the back-reaction over galaxy-point slices; or
+    - use the cluster's multipole for distant galaxy particles and target points only within a few cluster radii.
+  - *Time, not memory, binds at 1e8:* the dense walk is O(groups x nodes), 3e3-3e4 star groups x 1.2e7 galaxy nodes
+    = 4e10-4e11 MAC tests per step. Production needs a frontier walk (yggdrax). Timings belong on HoreKa.
+- **Identity:** `w5-main-cpu` vs `hh-tip2-cpu` (a0a25a72) and `hh-tip3-cpu` (2d506959): PASS 36/36 both.
+
+**Left on #302 (stays open):**
+- gradients through the target walk;
+- `dehnen_theta`;
+- `mac_force_scale_floor` on the points;
+- the solver facade's `target_points=`;
+- the mesh;
+- replacing §7's zero-mass trick;
+- a frontier walk instead of the dense group x node one. Memory is bounded; at 1e8 x 1e5-1e6 the walk's
+  O(groups x nodes) WORK binds.
 ## M3 — sharded checkpoints and elastic restarts (orbax; 2026-11-11)
 
 The multi-GPU mode's restart files and snapshots no longer pass through one host. `jaccpot/checkpoint.py` (new) writes

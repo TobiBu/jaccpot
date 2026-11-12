@@ -351,6 +351,86 @@ forward and aux, and is differentiable in the positions, the masses and array `G
   `tests/integration/test_jaccpot_provider_rollout.py` compares its rollout with
   `strict_run_v2(carry="particles")` and the production runner.
 
+## Target points: the field at points that are not sources (#302)
+
+`prov.target_field(topology, points, plan)` evaluates the field of a topology's sources at
+`M` massless points. The points never enter the tree, the walk, the force scale or the
+topology, so the sources' forces are those of a run without them, bit for bit
+(`step_with_targets` against `step`). Use it for the galaxy's tidal field at the stars of a
+direct-sum cluster (nornax `HybridHermite`), or at observation points.
+
+```python
+prov, topo = FusedForceProvider.prepare(solver, x0, m, leaf_size=64, max_order=6)
+plan = prov.plan_targets(topo, points)              # eager: static capacities
+fb_t = None                                         # dehnen_error: the points' f_b
+if prov.scale_carry:
+    from jaccpot.runtime.target_points import bootstrap_target_force_scale
+    fb_t, _ = bootstrap_target_force_scale(prov, topo, points, plan=plan)
+
+@jax.jit
+def force(x, m, pts, aux, fb_t):
+    acc, aux, field = prov.step_with_targets(x, m, pts, plan, aux=aux,
+                                             target_force_scale=fb_t)
+    return acc, aux, field.acc, field.force_scale, field.ok
+```
+
+How it works (`jaccpot/runtime/target_points.py`):
+
+- **Upward pass.** It is rerun on the topology's tree: the topology keeps locals,
+  not multipoles.
+- **Target groups.** The points are Morton-sorted into groups of `plan.group_size`.
+- **Walk.** Each group tests every source node with the source walk's criterion:
+  - the geometric opening angle with the kernel's separation floor; or
+  - eq (16a) with the group's own threshold `adaptive_eps * min f_b` over its points
+    (their f_b, never the sources'), with M2P's error term at the group's closest
+    member.
+  The walk runs in blocks of groups sized so the block's masks fit 256 MiB, and its
+  accepted pairs go into FLAT (group, node) far and (group, leaf) near lists.
+- **Far field.** M2P per point, for nodes that are accepted while every ancestor
+  was rejected.
+- **Near field.** The engine's softened kernel over the near leaves. A point on
+  top of a source gets the kernel's finite value.
+- **Evaluation.** Both run `plan.pair_chunk` pairs at a time and are scatter-added
+  into the points. On a GPU the sums are therefore order-nondeterministic at
+  round-off.
+
+The `TargetPlan`'s capacities are TOTAL pair counts and compile-time constants:
+points that move recompile nothing. An evaluation that needs more reports it
+(`field.ok`, `field.needs`), and `plan.grown(needs)` is the re-plan.
+
+Memory is the lists (8 B per pair), one walk block and one pair chunk. Measured as
+compiled temporaries at N = 1e6 (CPU `memory_analysis`, p6, leaf 64):
+
+- 0.37–0.45 GiB for 1e3–1e5 cluster stars on the galaxy's tree;
+- 0.10–0.13 GiB for 1e6 galaxy points on a 1e3–1e5-star tree.
+
+The first version gave every group the worst group's capacities and asked for
+14.9 GiB at 1e6 points (see `production_2026-11.md`, ## HH).
+
+`target_field(..., softening=eps)` (and the same in `plan_targets`) gives the field
+of another pair softening at the points, with the walk's separation floor following
+it. A source tree built with a small softening, so that its own walk stays
+O(n log n), can then give the field of a larger one: a compact cluster's
+back-reaction on heavy galaxy particles.
+
+Measured against a float64 direct sum: 4000 sources, 700 points (inside, a clump, far
+outside, on top of sources), leaf 16, p4, float32:
+
+| criterion | target points | the source lane, same sources |
+|---|---|---|
+| geometric θ 0.6 | rel-L2 3.0e-4 | 2.3e-3 |
+| `dehnen_error` ε 1e-4 | 4.0e-5 | 1.9e-4 |
+
+Not yet available (issue #302 stays open for these):
+
+- gradients through the target walk;
+- `dehnen_theta`;
+- `mac_force_scale_floor` on the points;
+- the solver facade's `target_points=`;
+- the mesh;
+- speed at large M × nodes: the walk is dense, O(groups × nodes) work (a frontier walk is
+  future work; memory is bounded).
+
 ## The fp64 validation lane
 
 `preset="large_n_gpu"` computes the force in float32 (the production lane). An explicit

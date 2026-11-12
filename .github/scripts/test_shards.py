@@ -143,6 +143,11 @@ _STRICT_SCHEME = "tests/integration/strict/test_runner_scheme.py"
 # MACs, N = 256 -- 6.0 min serial under typecheck on a loaded host. Beside the
 # scheme file (12.4 of its shard's 25 min).
 _STRICT_CPU_ROUTE = "tests/integration/strict/test_cpu_fused_route.py"
+# The field at points that are not sources (target_points, #302; multi-node plan
+# HH, 2026-11-11): the CPU route under both MACs against a float64 direct sum, the
+# sources' bits, recompiles, overflow. Its own shard: `integration-strict` is near
+# its cap and `integration-strict-scheme` holds 18.4 of its 25 min.
+_STRICT_TARGETS = "tests/integration/strict/test_target_points.py"
 # The differentiable fused step and the rollout over it (S9): every Pallas kernel in
 # interpret mode, and reverse programs of the whole lane (2-5 min of compilation
 # each on CPU). With them `integration-strict` was cancelled at its cap on #490
@@ -245,6 +250,7 @@ SHARDS: dict[str, list[str]] = {
                 _STRICT_ESC,
                 _STRICT_SCHEME,
                 _STRICT_CPU_ROUTE,
+                _STRICT_TARGETS,
                 *_STRICT_GRAD_FILES,
                 _STRICT_GRAD_ROLLOUT,
                 _STRICT_GRAD_RUNNER,
@@ -258,6 +264,7 @@ SHARDS: dict[str, list[str]] = {
     "integration-strict-a2": list(_STRICT_A2_FILES),
     "integration-strict-esc": [_STRICT_ESC],
     "integration-strict-scheme": [_STRICT_SCHEME, _STRICT_CPU_ROUTE],
+    "integration-strict-targets": [_STRICT_TARGETS],
     "integration-strict-grad": list(_STRICT_GRAD_FILES),
     "integration-strict-grad-rollout": [
         _STRICT_GRAD_ROLLOUT,
