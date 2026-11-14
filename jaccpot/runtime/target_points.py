@@ -85,6 +85,8 @@ __all__ = [
 
 #: the criteria the target walk implements
 _GEOMETRIC_MACS = ("dehnen", "bh")
+#: the target walks (:attr:`TargetPlan.walk`)
+_WALKS = ("frontier", "dense")
 _TINY = 1e-24
 
 
@@ -116,6 +118,17 @@ class TargetPlan:
         one group at a time).
     pair_chunk : int
         Pairs evaluated together.
+    walk : str
+        ``"frontier"`` (default): each group descends the source tree from the
+        root, breadth first, through a ring queue of (group, node) pairs of
+        ``queue_capacity`` entries, ``walk_chunk`` pairs a step -- the MAC is
+        tested only on the children of opened nodes. ``"dense"``: every group
+        tests every node (session 1's walk; ``groups x nodes`` tests, kept for
+        comparisons).
+    queue_capacity : int
+        The frontier walk's ring queue (pending (group, node) pairs).
+    walk_chunk : int
+        Pairs the frontier walk tests per step (also the seeds' granularity).
     """
 
     num_points: int
@@ -124,6 +137,9 @@ class TargetPlan:
     near_capacity: int = 1024
     group_block: int = 64
     pair_chunk: int = 128
+    walk: str = "frontier"
+    queue_capacity: int = 8192
+    walk_chunk: int = 2048
 
     def __post_init__(self) -> None:
         for name in (
@@ -133,16 +149,24 @@ class TargetPlan:
             "near_capacity",
             "group_block",
             "pair_chunk",
+            "queue_capacity",
+            "walk_chunk",
         ):
             if int(getattr(self, name)) < 1:
                 raise ValueError(f"TargetPlan.{name} must be >= 1")
+        if self.walk not in _WALKS:
+            raise ValueError(
+                f"TargetPlan.walk must be one of {_WALKS}, got {self.walk!r}"
+            )
 
     @property
     def num_groups(self) -> int:
         """Groups after padding ``M`` up to a multiple of ``group_size``."""
         return -(-int(self.num_points) // int(self.group_size))
 
-    def grown(self, needs: Any, headroom: float = 1.5) -> "TargetPlan":
+    def grown(
+        self, needs: Any, headroom: float = 1.5, stats: Optional[Any] = None
+    ) -> "TargetPlan":
         """A plan whose capacities cover ``needs`` with ``headroom``.
 
         Parameters
@@ -151,21 +175,33 @@ class TargetPlan:
             ``(far, near)`` total pair counts an evaluation needed.
         headroom : float
             Multiplier on the needs.
+        stats : Optional[Any]
+            The evaluation's :attr:`TargetField.stats`: its first entry (the
+            frontier queue's peak) sizes ``queue_capacity``; an overflowed queue
+            (peak above the capacity) at least doubles it, since a dropped
+            subtree hides its own pending pairs.
 
         Returns
         -------
         TargetPlan
             The same plan with capacities ``max(old, need * headroom)``, rounded
-            up to a multiple of ``pair_chunk``.
+            up to a multiple of ``pair_chunk`` (the queue: of ``walk_chunk``).
         """
         far, near = (int(v) for v in np.asarray(needs).reshape(-1)[:2])
         chunk = int(self.pair_chunk)
+        queue = int(self.queue_capacity)
+        if stats is not None:
+            peak = int(np.asarray(stats).reshape(-1)[0])
+            if peak > queue:
+                queue = max(2 * queue, _ceil_to(peak * 2, int(self.walk_chunk)))
+            queue = max(queue, _ceil_to(peak * headroom, int(self.walk_chunk)))
         return dataclasses.replace(
             self,
             far_capacity=max(int(self.far_capacity), _ceil_to(far * headroom, chunk)),
             near_capacity=max(
                 int(self.near_capacity), _ceil_to(near * headroom, chunk)
             ),
+            queue_capacity=queue,
         )
 
 
@@ -187,7 +223,12 @@ class TargetField(NamedTuple):
     needs : Array
         ``int32 [2]``: the total far / near pair counts the walk accepted.
     ok : Array
-        Boolean scalar: both counts fit the plan (the result is then complete).
+        Boolean scalar: both counts (and the frontier queue) fit the plan (the
+        result is then complete).
+    stats : Optional[Array]
+        ``int [3]``: the frontier queue's peak of pending pairs (``0`` for the
+        dense walk), the MAC tests the walk ran, and the points the walk served
+        (the live points; a back-reaction's inner points).
     """
 
     acc: Array
@@ -195,6 +236,7 @@ class TargetField(NamedTuple):
     force_scale: Optional[Array]
     needs: Array
     ok: Array
+    stats: Optional[Array] = None
 
 
 def _ceil_to(value: Union[int, float], multiple: int) -> int:
@@ -284,21 +326,31 @@ def target_mac_type(engine: Any, mac: Optional[str] = None) -> str:
     )
 
 
-def _morton_order(points: Array) -> Array:
+def _morton_order(points: Array, live: Optional[Array] = None) -> Array:
     """Argsort of the points along a 10-bit-per-axis Morton curve of their box.
 
     Parameters
     ----------
     points : Array
         ``[M, 3]``.
+    live : Optional[Array]
+        ``[M]`` bool: only these span the box, and the others sort last.
 
     Returns
     -------
     Array
         ``[M]`` the stable argsort of the Morton codes.
     """
-    lo = jnp.min(points, axis=0)
-    hi = jnp.max(points, axis=0)
+    if live is None:
+        lo = jnp.min(points, axis=0)
+        hi = jnp.max(points, axis=0)
+    else:
+        lo = jnp.min(jnp.where(live[:, None], points, jnp.inf), axis=0)
+        hi = jnp.max(jnp.where(live[:, None], points, -jnp.inf), axis=0)
+        anyl = jnp.any(live)
+        lo = jnp.where(anyl, lo, 0.0)
+        hi = jnp.where(anyl, hi, 0.0)
+        points = jnp.where(live[:, None], points, lo)
     span = jnp.maximum(jnp.max(hi - lo), jnp.asarray(_TINY, points.dtype))
     q = jnp.clip(((points - lo) / span) * 1023.0, 0.0, 1023.0).astype(jnp.uint32)
 
@@ -310,6 +362,9 @@ def _morton_order(points: Array) -> Array:
         return v
 
     code = spread(q[:, 0]) | (spread(q[:, 1]) << 1) | (spread(q[:, 2]) << 2)
+    if live is not None:
+        # 30-bit codes: the dead points' key sorts after every live one
+        code = jnp.where(live, code, jnp.uint32(0xFFFFFFFF))
     return jnp.argsort(code, stable=True)
 
 
@@ -341,6 +396,11 @@ class _SourceTables(NamedTuple):
         ``[n, 3]`` sorted source positions.
     masses : Array
         ``[n]`` sorted source masses.
+    children : Array
+        ``[nodes + 1, 2]`` an internal node's two children (the frontier walk's
+        descent); leaves and the sentinel have the sentinel ``nodes``.
+    root : Array
+        The root node (``int32`` scalar).
     """
 
     centers: Array
@@ -354,6 +414,8 @@ class _SourceTables(NamedTuple):
     table: Optional[Array]
     positions: Array
     masses: Array
+    children: Array
+    root: Array
 
 
 def _source_tables(
@@ -410,8 +472,20 @@ def _source_tables(
     nodes = int(ranges.shape[0])
     internal = int(jnp.asarray(tree.left_child).shape[0])
     counts = ranges[:, 1] - ranges[:, 0] + 1
-    parent = jnp.asarray(tree.parent, jnp.int32)
-    parent = jnp.where((parent < 0) | (parent >= nodes), nodes, parent)
+    raw_parent = jnp.asarray(tree.parent, jnp.int32)
+    parent = jnp.where((raw_parent < 0) | (raw_parent >= nodes), nodes, raw_parent)
+    root = jnp.argmax(raw_parent < 0).astype(jnp.int32)
+    kids = jnp.stack(
+        [
+            jnp.asarray(tree.left_child, jnp.int32).reshape(-1),
+            jnp.asarray(tree.right_child, jnp.int32).reshape(-1),
+        ],
+        axis=1,
+    )
+    kids = jnp.where((kids < 0) | (kids >= nodes), nodes, kids)
+    children = jnp.concatenate(
+        [kids, jnp.full((nodes + 1 - internal, 2), nodes, jnp.int32)]
+    )
     table = None
     if mac == "dehnen_error":
         # the source rows of eq (16a); the reverse direction (targets source
@@ -439,7 +513,93 @@ def _source_tables(
         table=table,
         positions=pos,
         masses=mas,
+        children=children,
+        root=root,
     )
+
+
+def _pair_accept(
+    src: _SourceTables,
+    node: Array,
+    centre: Array,
+    rad: Array,
+    threshold: Optional[Array],
+    *,
+    mac: str,
+    theta: float,
+    theta_max: float,
+    floor: float,
+    order: int,
+) -> Array:
+    """The criterion on ``K`` (group, node) pairs, elementwise.
+
+    Both walks call this: the dense one with every node against one group, the
+    frontier one with a chunk of queued pairs, so the two accept the same pairs
+    with the same arithmetic.
+
+    Parameters
+    ----------
+    src : _SourceTables
+        The source tree.
+    node : Array
+        ``[K]`` source nodes (``< nodes``).
+    centre : Array
+        ``[K, 3]`` (or ``[3]``) the groups' centres.
+    rad : Array
+        ``[K]`` (or scalar) the groups' radii.
+    threshold : Optional[Array]
+        ``[K]`` (or scalar) the groups' eq (16a) thresholds (``dehnen_error``).
+    mac : str
+        The criterion.
+    theta : float
+        The geometric opening angle.
+    theta_max : float
+        Eq (16a)'s convergence bound.
+    floor : float
+        The walk's separation floor.
+    order : int
+        Expansion order.
+
+    Returns
+    -------
+    Array
+        ``[K]`` bool: the node's multipole may serve the whole group (it is
+        non-empty, off the group's centre, outside the floor and accepted).
+    """
+    from yggdrax.interactions import WALK_TABLE_POWER0, dehnen_pair_accept
+
+    dtype = src.radius.dtype
+    nradius = src.radius[node]
+    diff = src.centers[node] - centre
+    dist_sq = jnp.sum(diff * diff, axis=-1)
+    rad = jnp.broadcast_to(jnp.asarray(rad, dtype), dist_sq.shape)
+    valid = src.nonempty[node] & (dist_sq > 0.0)
+    if float(floor) > 0.0:
+        reach = nradius + rad + jnp.asarray(floor, dtype)
+        valid = valid & (reach * reach <= dist_sq)
+    if mac == "dehnen_error":
+        # the far field is M2P (no local expansion about the group), so eq (15)
+        # is taken with rho_B = 0 at the distance of the group's closest possible
+        # member, d - r_g: an upper bound for every point of the group
+        cols = WALK_TABLE_POWER0 + int(order)
+        rows = src.table[node]
+        row_a = [rows[..., k] for k in range(cols)]
+        zero = jnp.zeros(dist_sq.shape, dtype)
+        row_b = [zero, jnp.broadcast_to(threshold, dist_sq.shape)] + [
+            zero for _ in range(cols - 2)
+        ]
+        closest = jnp.maximum(jnp.sqrt(dist_sq) - rad, 0.0)
+        return valid & dehnen_pair_accept(
+            row_a=row_a,
+            row_b=row_b,
+            radius_a=nradius,
+            radius_b=zero,
+            dist_sq=closest * closest,
+            order=int(order),
+            theta_max=jnp.asarray(theta_max, dtype),
+        )
+    extent = nradius + rad
+    return valid & (extent * extent <= jnp.asarray(theta * theta, dtype) * dist_sq)
 
 
 def _walk_masks(
@@ -454,7 +614,7 @@ def _walk_masks(
     floor: float,
     order: int,
 ) -> tuple[Array, Array]:
-    """``(far, near)`` node masks of ONE group against every source node.
+    """``(far, near)`` node masks of ONE group against every source node (dense).
 
     Parameters
     ----------
@@ -482,41 +642,19 @@ def _walk_masks(
     tuple[Array, Array]
         ``[nodes]`` far (M2P) and near (P2P leaf) masks.
     """
-    from yggdrax.interactions import WALK_TABLE_POWER0, dehnen_pair_accept
-
     nodes = int(src.radius.shape[0])
-    dtype = src.radius.dtype
-    diff = src.centers[:nodes] - centre[None, :]
-    dist_sq = jnp.sum(diff * diff, axis=1)
-    valid = src.nonempty & (dist_sq > 0.0)
-    if float(floor) > 0.0:
-        reach = src.radius + rad + jnp.asarray(floor, dtype)
-        valid = valid & (reach * reach <= dist_sq)
-    if mac == "dehnen_error":
-        # the far field is M2P (no local expansion about the group), so eq (15)
-        # is taken with rho_B = 0 at the distance of the group's closest possible
-        # member, d - r_g: an upper bound for every point of the group
-        cols = WALK_TABLE_POWER0 + int(order)
-        row_a = [src.table[:, k] for k in range(cols)]
-        zero = jnp.zeros((nodes,), dtype)
-        row_b = [zero, jnp.broadcast_to(threshold, (nodes,))] + [
-            zero for _ in range(cols - 2)
-        ]
-        closest = jnp.maximum(jnp.sqrt(dist_sq) - rad, 0.0)
-        accept = valid & dehnen_pair_accept(
-            row_a=row_a,
-            row_b=row_b,
-            radius_a=src.radius,
-            radius_b=zero,
-            dist_sq=closest * closest,
-            order=int(order),
-            theta_max=jnp.asarray(theta_max, dtype),
-        )
-    else:
-        extent = src.radius + rad
-        accept = valid & (
-            extent * extent <= jnp.asarray(theta * theta, dtype) * dist_sq
-        )
+    accept = _pair_accept(
+        src,
+        jnp.arange(nodes, dtype=jnp.int32),
+        centre[None, :],
+        rad,
+        threshold,
+        mac=mac,
+        theta=theta,
+        theta_max=theta_max,
+        floor=floor,
+        order=order,
+    )
     # visited: every strict ancestor rejected (pointer doubling; the sentinel
     # `nodes` is its own parent and counts as rejected)
     rejected = jnp.concatenate([~accept, jnp.ones((1,), bool)])
@@ -783,86 +921,232 @@ def _compact_pairs(
     return fg, fn, ng, nn, totals
 
 
-def evaluate_target_points(
+def _count_dtype() -> Any:
+    """The MAC-test counter's dtype: ``int64`` under x64 (the default here)."""
+    return jnp.int64 if bool(jax.config.read("jax_enable_x64")) else jnp.int32
+
+
+def _frontier_pairs(
+    src: _SourceTables,
+    centres: Array,
+    radii: Array,
+    thresholds: Array,
+    n_live: Array,
+    *,
+    chunk: int,
+    queue_cap: int,
+    far_cap: int,
+    near_cap: int,
+    walk: dict,
+) -> tuple[Array, Array, Array, Array, Array, Array]:
+    """The frontier walk: every group descends the source tree from the root.
+
+    A ring queue of ``queue_cap`` pending (group, node) pairs, processed
+    ``chunk`` at a time in a ``while_loop`` (breadth first, first in first out).
+    A step pops up to ``chunk`` pairs and tops the chunk up with new groups'
+    (group, root) seeds, so only the groups in flight hold queue entries. Each
+    pair is tested once (:func:`_pair_accept`): accepted -> the far list;
+    rejected leaf -> the near list; rejected internal node -> its two children
+    are queued. The accepted SET is the dense walk's (a node is used iff it is
+    accepted and every ancestor was rejected); only the lists' order differs.
+    Shapes are static; a full queue drops the pushes that do not fit and says so
+    (the peak it would have needed is reported).
+
+    Parameters
+    ----------
+    src : _SourceTables
+        The source tree.
+    centres : Array
+        ``[groups, 3]`` group centres.
+    radii : Array
+        ``[groups]`` group radii.
+    thresholds : Array
+        ``[groups]`` eq (16a) thresholds (unused by the geometric criterion).
+    n_live : Array
+        The live groups (a prefix of the groups): ``int32`` scalar.
+    chunk : int
+        Pairs per step.
+    queue_cap : int
+        Ring queue entries.
+    far_cap : int
+        Far list length.
+    near_cap : int
+        Near list length.
+    walk : dict
+        :func:`_pair_accept`'s static keywords.
+
+    Returns
+    -------
+    tuple[Array, Array, Array, Array, Array, Array]
+        Far groups, far nodes, near groups, near leaves (padding: group 0, node
+        ``nodes``), ``int32 [2]`` the total counts, and ``[2]`` (queue peak,
+        MAC tests).
+    """
+    nodes = int(src.radius.shape[0])
+    width = int(chunk)
+    qcap = int(queue_cap)
+    cdt = _count_dtype()
+    lane = jnp.arange(width, dtype=jnp.int32)
+    is_leaf = jnp.concatenate([src.is_leaf, jnp.ones((1,), bool)])
+    near_ok = jnp.concatenate([src.is_leaf & src.nonempty, jnp.zeros((1,), bool)])
+    has_any = (src.ranges[:, 1] - src.ranges[:, 0] + 1) > 0
+    n_live = jnp.asarray(n_live, jnp.int32)
+
+    def emit(
+        mask: Array, start: Array, cap: int, lst_g: Array, lst_n: Array, g: Array,
+        n: Array,
+    ) -> tuple[Array, Array, Array]:
+        rank = jnp.cumsum(mask, dtype=jnp.int32) - 1
+        pos = jnp.where(mask, start + rank, cap)
+        lst_g = lst_g.at[pos].set(g, mode="drop")
+        lst_n = lst_n.at[pos].set(n, mode="drop")
+        return lst_g, lst_n, start + jnp.sum(mask, dtype=jnp.int32)
+
+    def cond(st: tuple) -> Array:
+        return (st[3] > 0) | (st[4] < n_live)
+
+    def body(st: tuple) -> tuple:
+        qg, qn, head, pend, seed, fg, fn, ng, nn, cnt, peak, tests = st
+        take = jnp.minimum(pend, width)
+        from_q = lane < take
+        qidx = (head + lane) % qcap
+        sid = seed + lane - take
+        from_s = (~from_q) & (sid < n_live)
+        live = from_q | from_s
+        g = jnp.where(from_q, qg[qidx], jnp.where(from_s, sid, 0))
+        n = jnp.where(from_q, qn[qidx], jnp.where(from_s, src.root, nodes))
+        n_in = jnp.where(live, jnp.minimum(n, nodes - 1), 0)
+        accept = live & _pair_accept(
+            src, n_in, centres[g], radii[g], thresholds[g], **walk
+        )
+        rejected = live & ~accept
+        leaf = is_leaf[n]
+        near = rejected & leaf & near_ok[n]
+        opened = rejected & ~leaf & has_any[n]
+        fg, fn, f_end = emit(accept, cnt[0], far_cap, fg, fn, g, n)
+        ng, nn, n_end = emit(near, cnt[1], near_cap, ng, nn, g, n)
+        head = (head + take) % qcap
+        pend = pend - take
+        rank = jnp.cumsum(opened, dtype=jnp.int32) - 1
+        n_open = jnp.sum(opened, dtype=jnp.int32)
+        kids = src.children[n]
+        for k in range(2):
+            slot = pend + 2 * rank + k
+            fits = opened & (slot < qcap)
+            at = jnp.where(fits, (head + slot) % qcap, qcap)
+            qg = qg.at[at].set(g, mode="drop")
+            qn = qn.at[at].set(kids[:, k], mode="drop")
+        want = pend + 2 * n_open
+        peak = jnp.maximum(peak, want)
+        pend = jnp.minimum(want, qcap)
+        seed = seed + jnp.clip(width - take, 0, jnp.maximum(n_live - seed, 0))
+        tests = tests + jnp.sum(live, dtype=cdt)
+        cnt = jnp.stack([f_end, n_end])
+        return qg, qn, head, pend, seed, fg, fn, ng, nn, cnt, peak, tests
+
+    zero = jnp.zeros((), jnp.int32)
+    init = (
+        jnp.zeros((qcap,), jnp.int32),
+        jnp.full((qcap,), nodes, jnp.int32),
+        zero,
+        zero,
+        zero,
+        jnp.zeros((far_cap,), jnp.int32),
+        jnp.full((far_cap,), nodes, jnp.int32),
+        jnp.zeros((near_cap,), jnp.int32),
+        jnp.full((near_cap,), nodes, jnp.int32),
+        jnp.zeros((2,), jnp.int32),
+        zero,
+        jnp.zeros((), cdt),
+    )
+    out = jax.lax.while_loop(cond, body, init)
+    fg, fn, ng, nn, cnt, peak, tests = out[5:]
+    return fg, fn, ng, nn, cnt, jnp.stack([peak.astype(cdt), tests])
+
+
+class _TargetWalk(NamedTuple):
+    """The walk's outcome before the far/near passes (also for tests: pair sets).
+
+    Attributes
+    ----------
+    src : _SourceTables
+        The source tree.
+    perm : Array
+        ``[M]`` the points' Morton order (dead points last).
+    groups : Array
+        ``[groups, G, 3]`` the sorted points.
+    gvalid : Array
+        ``[groups, G]`` live points.
+    lists : tuple
+        ``(far groups, far nodes, near groups, near leaves)``.
+    totals : Array
+        ``int32 [2]`` the far / near pair counts.
+    stats : Array
+        ``[3]`` queue peak, MAC tests, live points.
+    ok : Array
+        Every count fits the plan.
+    eps : float
+        The pair-kernel softening.
+    kernel : str
+        The softening kernel.
+    order : int
+        Expansion order.
+    """
+
+    src: _SourceTables
+    perm: Array
+    groups: Array
+    gvalid: Array
+    lists: tuple
+    totals: Array
+    stats: Array
+    ok: Array
+    eps: float
+    kernel: str
+    order: int
+
+
+def _target_walk(
     provider: Any,
     topology: Any,
-    points: Array,
+    pts_in: Array,
     *,
     plan: TargetPlan,
-    force_scale: Optional[Array] = None,
-    potential: bool = False,
-    return_force_scale: bool = False,
-    mac: Optional[str] = None,
-    softening: Optional[float] = None,
-) -> TargetField:
-    """The field of ``topology``'s sources at ``points``; traced or eager.
-
-    Three passes, every one memory-bounded: the walk, block by block, compacted
-    into flat (group, node) far and (group, leaf) near lists of the plan's
-    total capacities; then the far pairs (M2P) and the near pairs (softened
-    P2P), ``plan.pair_chunk`` at a time, scatter-added into the groups' points.
+    force_scale: Optional[Array],
+    mac: Optional[str],
+    softening: Optional[float],
+    point_mask: Optional[Array],
+) -> _TargetWalk:
+    """Groups and the walk of :func:`evaluate_target_points` (its arguments).
 
     Parameters
     ----------
     provider : Any
-        The :class:`~jaccpot.runtime.fused_provider.FusedForceProvider` the
-        topology was rebuilt by (its engine's ``G``, softening, criterion).
+        The provider.
     topology : Any
-        A :class:`~jaccpot.runtime.fused_topology.FusedTopology` with a full
-        prepared state (a rebuilt one, or an eager prepare's).
-    points : Array
-        ``[M, 3]`` target points; ``M == plan.num_points``.
+        Its topology.
+    pts_in : Array
+        ``[M, 3]``.
     plan : TargetPlan
-        Static shapes (:func:`plan_target_points`).
+        Static shapes.
     force_scale : Optional[Array]
-        ``[M]`` the points' eq (16b) ``f_b`` from a previous evaluation: required
-        under ``mac_type='dehnen_error'`` (the groups' thresholds), ignored
-        otherwise.
-    potential : bool
-        Also return the potential.
-    return_force_scale : bool
-        Also return the points' ``f_b`` for the next evaluation.
+        ``[M]`` (``dehnen_error``).
     mac : Optional[str]
-        Criterion override (:func:`target_mac_type`).
+        Criterion override.
     softening : Optional[float]
-        The points' pair-kernel softening (Plummer-equivalent, the engine's
-        kernel), with the target walk's separation floor following it
-        (``softening_floor``, or the kernel's support factor, times it);
-        ``None`` takes the engine's. A source tree built with a SMALL softening
-        (its own walk stays O(n log n)) can then give the field of a larger one
-        -- a compact cluster's back-reaction on heavy galaxy particles.
+        The points' softening override.
+    point_mask : Optional[Array]
+        ``[M]`` live points.
 
     Returns
     -------
-    TargetField
-        In the points' order and dtype.
-
-    Raises
-    ------
-    ValueError
-        If ``points`` is not ``[plan.num_points, 3]``, or ``dehnen_error`` has no
-        ``force_scale``, or ``softening`` is negative.
+    _TargetWalk
+        The groups and the pair lists.
     """
-    from jaccpot.softening import (
-        resolve_softening_kernel,
-        softening_params,
-        support_factor,
-    )
+    from jaccpot.softening import resolve_softening_kernel, support_factor
 
     engine = provider.engine
     mac_name = target_mac_type(engine, mac)
-    pts_in = jnp.asarray(points)
-    if pts_in.ndim != 2 or tuple(pts_in.shape) != (int(plan.num_points), 3):
-        raise ValueError(
-            f"points must be [{int(plan.num_points)}, 3] (the plan's), got "
-            f"{tuple(pts_in.shape)}"
-        )
-    if mac_name == "dehnen_error" and force_scale is None:
-        raise ValueError(
-            "mac_type='dehnen_error': the target walk needs the points' force "
-            "scale (a previous evaluation's return_force_scale=True, or "
-            "bootstrap_target_force_scale)"
-        )
     kernel = resolve_softening_kernel(getattr(engine, "softening_kernel", None))
     if softening is None:
         eps = float(engine.softening)
@@ -877,15 +1161,21 @@ def evaluate_target_points(
     src = _source_tables(engine, topology, order=order, mac=mac_name)
     dtype = src.radius.dtype
     nodes = int(src.radius.shape[0])
-    block = _walk_block(plan, nodes)
+    dense = plan.walk == "dense"
+    block = _walk_block(plan, nodes) if dense else 1
     pts = pts_in.astype(dtype)
     m = int(plan.num_points)
     gsize = int(plan.group_size)
     ngroups = -(-plan.num_groups // block) * block
     pad = ngroups * gsize - m
-    perm = _morton_order(pts)
+    live_in = None if point_mask is None else jnp.asarray(point_mask, bool)
+    perm = _morton_order(pts, live_in)
     sorted_pts = pts[perm]
     valid = jnp.arange(ngroups * gsize) < m
+    if live_in is not None:
+        valid = valid & jnp.concatenate(
+            [live_in[perm], jnp.zeros((pad,), bool)]
+        )
     if pad:
         sorted_pts = jnp.concatenate(
             [sorted_pts, jnp.broadcast_to(sorted_pts[-1:], (pad, 3))]
@@ -916,23 +1206,168 @@ def evaluate_target_points(
     chunk = int(plan.pair_chunk)
     far_cap = _ceil_to(int(plan.far_capacity), chunk)
     near_cap = _ceil_to(int(plan.near_capacity), chunk)
-    fg, fn, ng, nn, totals = _compact_pairs(
-        src,
-        centres,
-        radii,
-        thr,
-        live_groups,
-        block=block,
-        far_cap=far_cap,
-        near_cap=near_cap,
-        walk=dict(
-            mac=mac_name,
-            theta=float(provider.theta_value),
-            theta_max=float(getattr(engine, "mac_theta_max", 1.0)),
-            floor=floor,
-            order=order,
-        ),
+    walk = dict(
+        mac=mac_name,
+        theta=float(provider.theta_value),
+        theta_max=float(getattr(engine, "mac_theta_max", 1.0)),
+        floor=floor,
+        order=order,
     )
+    n_points = jnp.sum(valid, dtype=_count_dtype())
+    if dense:
+        fg, fn, ng, nn, totals = _compact_pairs(
+            src,
+            centres,
+            radii,
+            thr,
+            live_groups,
+            block=block,
+            far_cap=far_cap,
+            near_cap=near_cap,
+            walk=walk,
+        )
+        tests = jnp.sum(live_groups, dtype=_count_dtype()) * nodes
+        stats = jnp.stack([jnp.zeros((), _count_dtype()), tests, n_points])
+        ok = (totals[0] <= far_cap) & (totals[1] <= near_cap)
+    else:
+        fg, fn, ng, nn, totals, wstats = _frontier_pairs(
+            src,
+            centres,
+            radii,
+            thr,
+            jnp.sum(live_groups, dtype=jnp.int32),
+            chunk=int(plan.walk_chunk),
+            queue_cap=int(plan.queue_capacity),
+            far_cap=far_cap,
+            near_cap=near_cap,
+            walk=walk,
+        )
+        stats = jnp.concatenate([wstats, n_points[None]])
+        ok = (
+            (totals[0] <= far_cap)
+            & (totals[1] <= near_cap)
+            & (wstats[0] <= int(plan.queue_capacity))
+        )
+    return _TargetWalk(
+        src=src,
+        perm=perm,
+        groups=groups,
+        gvalid=gvalid,
+        lists=(fg, fn, ng, nn),
+        totals=totals,
+        stats=stats,
+        ok=ok,
+        eps=eps,
+        kernel=kernel,
+        order=order,
+    )
+
+
+def evaluate_target_points(
+    provider: Any,
+    topology: Any,
+    points: Array,
+    *,
+    plan: TargetPlan,
+    force_scale: Optional[Array] = None,
+    potential: bool = False,
+    return_force_scale: bool = False,
+    mac: Optional[str] = None,
+    softening: Optional[float] = None,
+    point_mask: Optional[Array] = None,
+) -> TargetField:
+    """The field of ``topology``'s sources at ``points``; traced or eager.
+
+    Three passes, every one memory-bounded: the walk (:attr:`TargetPlan.walk`:
+    the frontier walk by default, or the dense sweep), compacted into flat
+    (group, node) far and (group, leaf) near lists of the plan's total
+    capacities; then the far pairs (M2P) and the near pairs (softened P2P),
+    ``plan.pair_chunk`` at a time, scatter-added into the groups' points.
+
+    Parameters
+    ----------
+    provider : Any
+        The :class:`~jaccpot.runtime.fused_provider.FusedForceProvider` the
+        topology was rebuilt by (its engine's ``G``, softening, criterion).
+    topology : Any
+        A :class:`~jaccpot.runtime.fused_topology.FusedTopology` with a full
+        prepared state (a rebuilt one, or an eager prepare's).
+    points : Array
+        ``[M, 3]`` target points; ``M == plan.num_points``.
+    plan : TargetPlan
+        Static shapes (:func:`plan_target_points`).
+    force_scale : Optional[Array]
+        ``[M]`` the points' eq (16b) ``f_b`` from a previous evaluation: required
+        under ``mac_type='dehnen_error'`` (the groups' thresholds), ignored
+        otherwise.
+    potential : bool
+        Also return the potential.
+    return_force_scale : bool
+        Also return the points' ``f_b`` for the next evaluation.
+    mac : Optional[str]
+        Criterion override (:func:`target_mac_type`).
+    softening : Optional[float]
+        The points' pair-kernel softening (Plummer-equivalent, the engine's
+        kernel), with the target walk's separation floor following it
+        (``softening_floor``, or the kernel's support factor, times it);
+        ``None`` takes the engine's. A source tree built with a SMALL softening
+        (its own walk stays O(n log n)) can then give the field of a larger one
+        -- a compact cluster's back-reaction on heavy galaxy particles.
+    point_mask : Optional[Array]
+        ``[M]`` bool: only these points are evaluated (the others get zeros and
+        cost nothing in the walk). A capacity-padded subset (the back-reaction's
+        inner points) keeps a static ``M`` this way.
+
+    Returns
+    -------
+    TargetField
+        In the points' order and dtype.
+
+    Raises
+    ------
+    ValueError
+        If ``points`` is not ``[plan.num_points, 3]``, or ``dehnen_error`` has no
+        ``force_scale``, or ``softening`` is negative.
+    """
+    from jaccpot.softening import softening_params
+
+    engine = provider.engine
+    mac_name = target_mac_type(engine, mac)
+    pts_in = jnp.asarray(points)
+    if pts_in.ndim != 2 or tuple(pts_in.shape) != (int(plan.num_points), 3):
+        raise ValueError(
+            f"points must be [{int(plan.num_points)}, 3] (the plan's), got "
+            f"{tuple(pts_in.shape)}"
+        )
+    if mac_name == "dehnen_error" and force_scale is None:
+        raise ValueError(
+            "mac_type='dehnen_error': the target walk needs the points' force "
+            "scale (a previous evaluation's return_force_scale=True, or "
+            "bootstrap_target_force_scale)"
+        )
+    tw = _target_walk(
+        provider,
+        topology,
+        pts_in,
+        plan=plan,
+        force_scale=force_scale,
+        mac=mac,
+        softening=softening,
+        point_mask=point_mask,
+    )
+    src, groups, gvalid, order, eps, kernel = (
+        tw.src,
+        tw.groups,
+        tw.gvalid,
+        tw.order,
+        tw.eps,
+        tw.kernel,
+    )
+    fg, fn, ng, nn = tw.lists
+    dtype = src.radius.dtype
+    ngroups, gsize = int(groups.shape[0]), int(groups.shape[1])
+    m = int(plan.num_points)
+    chunk = int(plan.pair_chunk)
     want_scale = bool(return_force_scale)
     want_pot = bool(potential)
     zeros3 = jnp.zeros((ngroups, gsize, 3), dtype)
@@ -986,19 +1421,20 @@ def evaluate_target_points(
     (acc, pot, scale), _ = jax.lax.scan(
         near_body, carry, (ng.reshape(-1, chunk), nn.reshape(-1, chunk))
     )
-    ok = (totals[0] <= far_cap) & (totals[1] <= near_cap)
-    inv = jnp.argsort(perm)
     out_dtype = pts_in.dtype
 
     def back(v: Array, tail: tuple) -> Array:
-        return v.reshape((ngroups * gsize,) + tail)[:m][inv].astype(out_dtype)
+        # scatter by the permutation (not a second sort)
+        rows = v.reshape((ngroups * gsize,) + tail)[:m].astype(out_dtype)
+        return jnp.zeros((m,) + tail, out_dtype).at[tw.perm].set(rows)
 
     return TargetField(
         acc=back(acc, (3,)),
         potential=back(pot, ()) if potential else None,
         force_scale=back(scale, ()) if return_force_scale else None,
-        needs=totals,
-        ok=ok,
+        needs=tw.totals,
+        ok=tw.ok,
+        stats=tw.stats,
     )
 
 
@@ -1017,12 +1453,23 @@ def _jitted(provider: Any, plan: TargetPlan, **static: Any) -> Any:
     Returns
     -------
     Any
-        ``jit(run)(topology, points, force_scale) -> TargetField``.
+        ``jit(run)(topology, points, force_scale, point_mask=None) -> TargetField``.
     """
 
-    def run(topology: Any, points: Array, force_scale: Optional[Array]) -> TargetField:
+    def run(
+        topology: Any,
+        points: Array,
+        force_scale: Optional[Array],
+        point_mask: Optional[Array] = None,
+    ) -> TargetField:
         return evaluate_target_points(
-            provider, topology, points, plan=plan, force_scale=force_scale, **static
+            provider,
+            topology,
+            points,
+            plan=plan,
+            force_scale=force_scale,
+            point_mask=point_mask,
+            **static,
         )
 
     return jax.jit(run)
@@ -1035,6 +1482,7 @@ def bootstrap_target_force_scale(
     *,
     plan: TargetPlan,
     softening: Optional[float] = None,
+    point_mask: Optional[Array] = None,
 ) -> tuple[Array, TargetField]:
     """The points' first ``f_b`` under ``dehnen_error``: one geometric pass.
 
@@ -1050,6 +1498,8 @@ def bootstrap_target_force_scale(
         Static shapes.
     softening : Optional[float]
         As in :func:`evaluate_target_points`.
+    point_mask : Optional[Array]
+        As in :func:`evaluate_target_points`.
 
     Returns
     -------
@@ -1059,7 +1509,7 @@ def bootstrap_target_force_scale(
     """
     field = _jitted(
         provider, plan, return_force_scale=True, mac="dehnen", softening=softening
-    )(topology, points, None)
+    )(topology, points, None, point_mask)
     return field.force_scale, field
 
 
@@ -1073,14 +1523,18 @@ def plan_target_points(
     force_scale: Optional[Array] = None,
     group_block: int = 64,
     pair_chunk: int = 128,
-    max_rounds: int = 4,
+    max_rounds: int = 8,
     softening: Optional[float] = None,
+    walk: str = "frontier",
+    walk_chunk: int = 2048,
+    point_mask: Optional[Array] = None,
 ) -> TargetPlan:
     """Size a :class:`TargetPlan` eagerly from the points' current needs.
 
     Starts from small capacities and grows them from the evaluation's ``needs``
-    until it fits, then adds ``headroom`` (moving points stay inside it; a step
-    that does not reports ``ok=False``).
+    (and the frontier queue's peak, :attr:`TargetField.stats`) until it fits,
+    then adds ``headroom`` (moving points stay inside it; a step that does not
+    reports ``ok=False``).
 
     Parameters
     ----------
@@ -1098,7 +1552,7 @@ def plan_target_points(
         As in :func:`evaluate_target_points` (``dehnen_error``); ``None`` there
         bootstraps it with a geometric pass.
     group_block : int
-        Upper bound on the groups walked together.
+        Upper bound on the groups walked together (the dense walk).
     pair_chunk : int
         Pairs evaluated together.
     max_rounds : int
@@ -1106,6 +1560,12 @@ def plan_target_points(
     softening : Optional[float]
         The points' pair-kernel softening the evaluations will use
         (:func:`evaluate_target_points`).
+    walk : str
+        :attr:`TargetPlan.walk`.
+    walk_chunk : int
+        :attr:`TargetPlan.walk_chunk`.
+    point_mask : Optional[Array]
+        As in :func:`evaluate_target_points`.
 
     Returns
     -------
@@ -1122,24 +1582,33 @@ def plan_target_points(
         group_size=int(group_size),
         group_block=int(group_block),
         pair_chunk=int(pair_chunk),
+        walk=str(walk),
+        walk_chunk=int(walk_chunk),
+        queue_capacity=4 * int(walk_chunk),
     )
     if target_mac_type(provider.engine) == "dehnen_error" and force_scale is None:
         for _ in range(int(max_rounds)):
             fb, field = bootstrap_target_force_scale(
-                provider, topology, points, plan=plan, softening=softening
+                provider,
+                topology,
+                points,
+                plan=plan,
+                softening=softening,
+                point_mask=point_mask,
             )
             if bool(field.ok):
                 break
-            plan = plan.grown(field.needs, 1.0)
+            plan = plan.grown(field.needs, 1.0, field.stats)
         force_scale = fb
     for _ in range(int(max_rounds)):
         field = _jitted(provider, plan, softening=softening)(
-            topology, points, force_scale
+            topology, points, force_scale, point_mask
         )
         if bool(field.ok):
-            return plan.grown(field.needs, float(headroom))
-        plan = plan.grown(field.needs, 1.0)
+            return plan.grown(field.needs, float(headroom), field.stats)
+        plan = plan.grown(field.needs, 1.0, field.stats)
     raise RuntimeError(
         f"plan_target_points: no plan fitted in {max_rounds} rounds (last needs "
-        f"{np.asarray(field.needs).tolist()})"
+        f"{np.asarray(field.needs).tolist()}, stats "
+        f"{np.asarray(field.stats).tolist()})"
     )
