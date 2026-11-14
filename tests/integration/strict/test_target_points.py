@@ -326,3 +326,226 @@ def test_a_softening_override_gives_another_kernel_from_a_small_softening_tree(l
     )
     with pytest.raises(ValueError, match="softening"):
         prov.target_field(topo, lane["pts"], plan, softening=-1.0)
+
+
+# --------------------------------------------------------------- session 2 (HH2a)
+def _walk_sets(lane, plan, points=None, mask=None):
+    from jaccpot.runtime.target_points import _target_walk
+
+    tw = _target_walk(
+        lane["prov"],
+        lane["topo"],
+        lane["pts"] if points is None else points,
+        plan=plan,
+        force_scale=lane["fb"],
+        mac=None,
+        softening=None,
+        point_mask=mask,
+    )
+    fg, fn, ng, nn = (np.asarray(a) for a in tw.lists)
+    far, near = (int(v) for v in np.asarray(tw.totals))
+    return (
+        set(zip(fg[:far].tolist(), fn[:far].tolist())),
+        set(zip(ng[:near].tolist(), nn[:near].tolist())),
+        np.asarray(tw.stats),
+    )
+
+
+@pytest.mark.parametrize("far", ["m2p", "local"])
+def test_the_frontier_walk_accepts_the_dense_walks_pair_set(lane, far):
+    """The frontier walk (each group descends from the root, opening only the
+    rejected nodes) uses exactly the dense sweep's (group, node) far pairs and
+    (group, leaf) near pairs, under both criteria and both far-field forms, with
+    far fewer MAC tests."""
+    plan = dataclasses.replace(lane["plan"], far=far, walk="frontier")
+    f_far, f_near, f_stats = _walk_sets(lane, plan)
+    d_far, d_near, d_stats = _walk_sets(lane, dataclasses.replace(plan, walk="dense"))
+    assert f_far == d_far and f_near == d_near
+    assert len(f_far) > 0 and len(f_near) > 0
+    assert 0 < f_stats[1] < d_stats[1]
+    assert 0 < f_stats[0] <= plan.queue_capacity
+    assert int(f_stats[2]) == lane["pts"].shape[0]
+
+
+def test_a_full_frontier_queue_is_reported_and_the_grown_plan_fits(lane):
+    small = dataclasses.replace(lane["plan"], queue_capacity=8, walk_chunk=8)
+    field = lane["prov"].target_field(
+        lane["topo"], lane["pts"], small, force_scale=lane["fb"]
+    )
+    assert not bool(field.ok)
+    assert int(np.asarray(field.stats)[0]) > 8
+    grown = small
+    for _ in range(8):
+        grown = grown.grown(field.needs, 1.0, field.stats)
+        field = lane["prov"].target_field(
+            lane["topo"], lane["pts"], grown, force_scale=lane["fb"]
+        )
+        if bool(field.ok):
+            break
+    assert bool(field.ok)
+    want = lane["prov"].target_field(
+        lane["topo"], lane["pts"], lane["plan"], force_scale=lane["fb"]
+    )
+    np.testing.assert_array_equal(np.asarray(field.needs), np.asarray(want.needs))
+    np.testing.assert_allclose(
+        np.asarray(field.acc), np.asarray(want.acc), rtol=1e-5, atol=1e-6
+    )
+
+
+def test_group_local_expansions_match_a_float64_direct_sum(lane):
+    """``far='local'``: one M2L per (group, node) about the group's centre and an
+    L2P per point, with the group radius in the criterion; at the criterion's
+    tolerance against the direct sum, like the per-point M2P."""
+    from jaccpot.runtime.target_points import plan_target_points
+
+    plan = plan_target_points(
+        lane["prov"], lane["topo"], lane["pts"], force_scale=lane["fb"], far="local"
+    )
+    field = lane["prov"].target_field(
+        lane["topo"], lane["pts"], plan, force_scale=lane["fb"], potential=True
+    )
+    assert bool(field.ok)
+    want_acc, _ = _direct(
+        np.asarray(lane["pts"], np.float64), lane["x"], lane["m"], lane["prov"].engine
+    )
+    acc = np.asarray(field.acc, np.float64)
+    assert np.isfinite(acc).all()
+    for name, sl in _SLICES.items():
+        assert _rel_l2(acc[sl], want_acc[sl]) < _BOUND[lane["mac"]], name
+
+
+def test_a_point_mask_evaluates_only_the_live_points(lane):
+    """Dead points get zeros and no walk; the live points' field is the field of
+    the live subset alone (same groups up to the dead tail)."""
+    from jaccpot.runtime.target_points import evaluate_target_points
+
+    pts = lane["pts"]
+    live = np.zeros(pts.shape[0], bool)
+    live[::3] = True
+    field = evaluate_target_points(
+        lane["prov"],
+        lane["topo"],
+        pts,
+        plan=lane["plan"],
+        force_scale=lane["fb"],
+        point_mask=jnp.asarray(live),
+    )
+    acc = np.asarray(field.acc, np.float64)
+    assert np.all(acc[~live] == 0.0)
+    assert int(np.asarray(field.stats)[2]) == int(live.sum())
+    want, _ = _direct(
+        np.asarray(pts, np.float64)[live], lane["x"], lane["m"], lane["prov"].engine
+    )
+    assert _rel_l2(acc[live], want) < _BOUND[lane["mac"]]
+
+
+@pytest.fixture(scope="module")
+def back_lane():
+    """A compact geometric source set (the cluster) and points spread far around
+    it (the galaxy), with the points' softening larger than the sources' own."""
+    from jaccpot import FastMultipoleMethod, FusedForceProvider
+
+    base = FastMultipoleMethod(preset="galaxy").advanced
+    advanced = dataclasses.replace(
+        base,
+        tree=dataclasses.replace(base.tree, leaf_target=LEAF, cell_min_level=0),
+        runtime=dataclasses.replace(
+            base.runtime, fixed_order=ORDER, cpu_fused_lane=True
+        ),
+        mac_type="dehnen",
+    )
+    solver = FastMultipoleMethod(
+        preset="galaxy",
+        theta=0.5,
+        G=1.0,
+        softening=1e-4,
+        precision="fp32",
+        advanced=advanced,
+    )
+    rng = np.random.default_rng(11)
+    xs = 0.02 * rng.normal(size=(512, 3))
+    ms = np.full(512, 1e-3 / 512)
+    prov, topo = FusedForceProvider.prepare(
+        solver,
+        jnp.asarray(xs, jnp.float32),
+        jnp.asarray(ms, jnp.float32),
+        leaf_size=LEAF,
+        max_order=ORDER,
+    )
+    pts = np.concatenate(
+        [0.03 * rng.normal(size=(96, 3)), rng.uniform(-3.0, 3.0, size=(1952, 3))]
+    )
+    return dict(prov=prov, topo=topo, xs=xs, ms=ms, pts=jnp.asarray(pts, jnp.float32))
+
+
+def test_the_back_reaction_matches_a_direct_sum_and_full_target_points(back_lane):
+    """Outer points take the root multipole, inner ones the walk: the result is
+    at the criterion's tolerance against the float64 direct sum (at the points'
+    softening EPS), and equals the full ``target_points`` evaluation to the
+    multipole's own tolerance; the provider's ``target_field`` dispatches a
+    ``BackReactionPlan``; moving points recompile nothing."""
+    from jaccpot.runtime.target_back_reaction import (
+        evaluate_back_reaction,
+        plan_back_reaction,
+    )
+
+    prov, topo, pts = back_lane["prov"], back_lane["topo"], back_lane["pts"]
+    plan = plan_back_reaction(prov, topo, pts, softening=EPS)
+    assert plan.mp_order == ORDER and plan.theta_mp == pytest.approx(0.5)
+    assert 0 < plan.inner_capacity < pts.shape[0]
+    traces = []
+
+    def run(t, p):
+        traces.append(1)
+        return prov.target_field(t, p, plan, softening=EPS, potential=True)
+
+    fn = jax.jit(run)
+    field = fn(topo, pts)
+    assert bool(field.ok)
+    stats = np.asarray(field.stats)
+    assert 96 <= int(stats[2]) <= plan.inner_capacity
+    for k in range(2):
+        moved = pts + jnp.asarray(
+            1e-4 * np.random.default_rng(k).normal(size=pts.shape), jnp.float32
+        )
+        assert np.isfinite(np.asarray(fn(topo, moved).acc)).all()
+    assert len(traces) == 1
+
+    from jaccpot.softening import pair_factors, softening_params_np
+
+    eng = prov.engine
+    params = softening_params_np(eng.softening_kernel, EPS)
+    p64 = np.asarray(pts, np.float64)
+    dx = p64[:, None, :] - back_lane["xs"][None, :, :]
+    g, psi, _ = pair_factors(
+        np.sum(dx * dx, -1), params, eng.softening_kernel, potential=True, xp=np
+    )
+    want = -np.sum((back_lane["ms"][None, :] * g)[..., None] * dx, axis=1)
+    want_pot = -np.sum(back_lane["ms"][None, :] * psi, axis=1)
+    acc = np.asarray(field.acc, np.float64)
+    assert _rel_l2(acc, want) < _BOUND["dehnen"]
+    assert _rel_l2(acc[96:], want[96:]) < _BOUND["dehnen"]
+    assert np.max(np.abs(np.asarray(field.potential) - want_pot)) < (
+        _BOUND["dehnen"] * np.max(np.abs(want_pot))
+    )
+    full_plan = prov.plan_targets(topo, pts, softening=EPS)
+    full = prov.target_field(topo, pts, full_plan, softening=EPS)
+    assert _rel_l2(acc, np.asarray(full.acc, np.float64)) < _BOUND["dehnen"]
+    direct_call = evaluate_back_reaction(prov, topo, pts, plan=plan, softening=EPS)
+    np.testing.assert_array_equal(np.asarray(direct_call.acc), np.asarray(field.acc))
+
+
+def test_the_back_reactions_inner_overflow_is_reported(back_lane):
+    from jaccpot.runtime.target_back_reaction import (
+        evaluate_back_reaction,
+        plan_back_reaction,
+    )
+
+    prov, topo, pts = back_lane["prov"], back_lane["topo"], back_lane["pts"]
+    plan = plan_back_reaction(prov, topo, pts, softening=EPS, min_inner=32)
+    crowded = jnp.concatenate([0.03 * pts[:1024] / 3.0, pts[1024:]])
+    field = evaluate_back_reaction(prov, topo, crowded, plan=plan, softening=EPS)
+    assert not bool(field.ok)
+    assert int(np.asarray(field.stats)[2]) > plan.inner_capacity
+    with pytest.raises(ValueError, match="mp_order"):
+        plan_back_reaction(prov, topo, pts, mp_order=ORDER + 1)

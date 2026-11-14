@@ -104,6 +104,7 @@ the batch step.
 | `escaper` | 1 x 1 | ESC's escaper cost at 1e8 on ONE card (`escaper_timing.sbatch`): the unclipped Sgr IC with escapers on / off / on-but-none-escape / energy every 10th edge, both MACs; preallocated BFC (ESC: 1e8 on one card needs it) | 8 | 1.5-2 h | 4:00 |
 | `a1` | 1 x 1 | A1's dehnen_error stall (`a1_dehnen_error_stall.sbatch`): the 1e8 bar disc from its step-30 restart (10 steps) and the 1.06e8 merger (5 steps) with the fix (today's default), the force-scale floor and the geometric MAC at theta 0.7; the err rows (8e6 / 2.5e7 / 1e8, floor off / on) | 12 | ~2-2.5 h | 6:00 |
 | `a3` | 1 x 1 | A3's summed drift (the default) vs the legacy order (`a3/position_precision_timing.sbatch`): the runner at 1e8 and 2.6e5, both MACs, A-B-A-B; A3's gate 3 (summed within +10 % at 1e8) | 16 | ~2 h | 4:00 |
+| `hh` | 1 x 1 | HH2a's `target_points` at production scale (`hh/target_points_timing.sbatch`): the galaxy `step` at 1e8 (base) vs `step_with_targets` with 1e4 / 1e5 / 1e6 cluster stars as targets (frontier walk; per-point M2P and per-group local far fields), both MACs; the cluster's back-reaction at all 1e8 galaxy points (`evaluate_back_reaction`, both far fields) and the full `target_points` back-reaction at 1e7 (comparison); the device peak per row | 17 | 1.5-2 h | 3:00 |
 | `m1_node1` | 1 x 4 | M1: momentum of the multi-GPU runner, local vs cross part (`m1/node1.sbatch`): 1 GPU at 1e7 (the yardstick), 4 x 1 GPU at 1e7 (both MACs) and 1e8 | 5 | ~1 h | 2:00 |
 | `m1_node2` | 2 x 4 | M1 over two nodes: 8 x 1 GPU at 1e7 (both MACs) and 1e8 | 3 | ~45 min | 1:30 |
 | `m2g_node1` | 1 x 4 | M2G (`m2g/node1.sbatch`): 4 processes x 1 GPU vs 1 x 4 at 8e6, both MACs, A-vs-A, per-task binding, deterministic arms; collectives probe; bitwise compares + timing | 14 steps | ~2 h | 3:30 |
@@ -119,11 +120,11 @@ for; their scripts are what these jobs run.
 
 ## The node-hour budget
 
-**The default set: ~60 node-hours expected, at most ~117 if every job hit its limit** (`submit_all.sh
+**The default set: ~62 node-hours expected, at most ~120 if every job hit its limit** (`submit_all.sh
 --dry-run` prints the worst case for what it would submit). The expected walls come from the same rows on the
 local shared A100s and from each job's own estimate (compile and setup dominate the multi-GPU rows: 2-10 min
 each); HoreKa's dedicated cards should be faster, not slower. Per job, expected (worst): forward 9 (16), mgrad
-7.5 (12), scaling_b 6.5 (12), grad 4.5 (9), scaling_a 3.5 (8), scaling_mp 3 (6), a1 2.5 (6), a3 2 (4), m2g 4
+7.5 (12), scaling_b 6.5 (12), grad 4.5 (9), scaling_a 3.5 (8), scaling_mp 3 (6), a1 2.5 (6), a3 2 (4), hh 1.75 (3), m2g 4
 (7.5), mesc 4.25 (8), m1 2.5 (5), escaper 1.75 (4), auto 1.5 (3), pins 1.3 (3), s1b 1 (2), preflight 1 (2), m3 5 (10: m3_node4 is four nodes).
 
 **A4 on top** (`--only a4`): the 1-card tier ~60-80 GPU-hours = 15-20 node-hours (charged per GPU), the node tier

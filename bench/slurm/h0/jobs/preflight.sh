@@ -117,6 +117,10 @@ entry m2g bash -c "srun ${MP[*]} $H0_PY bench/multiprocess_gate.py collectives -
   && JAX_COORDINATOR_PORT=$((PORT + 3)) srun ${MP[*]} $H0_PY bench/multiprocess_gate.py run --arm mp --n-per-gpu $((N / GPN)) \
   --repeats 1 --out $OUT/m2g/mp"
 entry a4 env CUDA_VISIBLE_DEVICES="$FIRST_CARD" bash -c "$(declare -f a4_entry); N=$N OUT=$OUT H0_PY=$H0_PY a4_entry"
+# HH2a: one target_points row and one back-reaction row (the galaxy at N, a cluster of N / 64 stars)
+entry hh bash -c "CUDA_VISIBLE_DEVICES=$FIRST_CARD $H0_PY bench/target_points_timing.py --n $N --m $((N / 64)) --mode targets \
+  --mac err --reps 1 --out $OUT/hh/targets.json && CUDA_VISIBLE_DEVICES=$FIRST_CARD $H0_PY bench/target_points_timing.py \
+  --n $N --m $((N / 64)) --mode back --reps 1 --out $OUT/hh/back.json"
 # M3: a sharded checkpoint written by the node's processes and restored elastically by one (orbax in the venv)
 entry m3 bash -c "JAX_COORDINATOR_PORT=$((PORT + 5)) srun ${MP[*]} $H0_PY bench/m3_checkpoint_io.py write --n $N --steps 1 --reps 1 \
   --ckpt $OUT/m3/ck --out $OUT/m3/write && JAX_COORDINATOR_PORT=$((PORT + 6)) srun --ntasks=1 --gres=gpu:1 $H0_PY \

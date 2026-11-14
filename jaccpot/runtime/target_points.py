@@ -16,37 +16,57 @@ sources at ``M`` massless points instead, with the topology untouched:
    bounding box and cut into groups of ``group_size``; a group is a sphere (its
    box centre, the largest member distance). The groups are not a tree and do not
    enter the source tree: they exist only for the walk below.
-3. **One-sided walk.** Every group tests every source node with the source walk's
-   criterion: the geometric opening angle ``(r_n + r_g)^2 <= theta^2 d^2`` with the
+3. **One-sided walk** (:attr:`TargetPlan.walk`). The criterion is the source
+   walk's: the geometric opening angle ``(r_n + r_g)^2 <= theta^2 d^2`` with the
    separation floor (a compact kernel's support), or eq (16a) of Dehnen (2014)
    for ``mac_type='dehnen_error'`` -- the SOURCE node's multipole error against
    the GROUP's threshold ``adaptive_eps * min_b f_b`` over the group's own points
-   (their f_b, never the sources'), with eq (15) for M2P (``rho_B = 0``) at the
-   distance of the group's closest possible member. A node is used if it is accepted and every
-   ancestor was rejected (pointer doubling over the parent array, so the
-   criterion need not be monotone); a leaf whose ancestors were all rejected and
-   that is rejected itself is a near leaf. The walk is dense over groups x nodes
-   (O(groups x nodes) work), run in blocks of groups sized so a block's masks fit
-   ``_WALK_BUDGET_BYTES``; each block's accepted pairs are scattered into FLAT
-   (group, node) far and (group, leaf) near lists at a running offset, whose
-   lengths are the plan's TOTAL capacities.
-4. **Far:** M2P per point -- M2L of the used nodes onto the point itself, L2P at
-   zero offset (the lane's own real-basis operators); a local expansion about the
-   group centre would add a group-radius truncation error to every contribution,
-   coherently, which eq (16a)'s per-interaction control does not bound.
+   (their f_b, never the sources'). A node is used if it is accepted and every
+   ancestor was rejected; a leaf whose ancestors were all rejected and that is
+   rejected itself is a near leaf.
+
+   * ``"frontier"`` (the default, session 2): each group descends the source
+     tree from the root, breadth first, through ONE ring queue of pending
+     (group, node) pairs (``queue_capacity``), ``walk_chunk`` pairs per
+     ``while_loop`` step, new groups' (group, root) seeds topping each chunk up:
+     a pair is tested once; accepted -> far, rejected leaf -> near, rejected
+     internal node -> its two children are queued. The MAC is tested on
+     ``O(groups x accepted x 2)`` pairs instead of every node (at 1e5 sources
+     x 1e3 points 26,268 tests vs the dense 1,507,296; at 1e8 the dense block did
+     not fit an A100). The accepted SET is the dense walk's, pair for pair.
+   * ``"dense"`` (session 1, kept for comparisons): every group tests every
+     node (pointer doubling over the parent array for the ancestors), in blocks
+     sized to ``_WALK_BUDGET_BYTES``.
+
+   Either walk compacts its pairs into FLAT (group, node) far and (group, leaf)
+   near lists whose lengths are the plan's TOTAL capacities.
+4. **Far** (:attr:`TargetPlan.far`). ``"m2p"`` (default): M2P per point -- M2L
+   of the used nodes onto the point itself, L2P at zero offset (the lane's own
+   real-basis operators); eq (15) is taken with ``rho_B = 0`` at the group's
+   closest member. ``"local"``: one M2L per (group, node) into a local
+   expansion about the group's centre and one L2P per point, with the group
+   radius in the criterion (eq 16a two-sided; the geometric angle has it
+   already) -- ``group_size`` times fewer M2L, at a slightly larger error at
+   equal criterion (``docs/production_2026-11.md``, HH2a).
    **Near:** the softened pair kernel of the engine
    (:func:`~jaccpot.softening.masked_pair_factors`) over the near leaves'
    particles; a point on top of a source gets the kernel's finite value. Both
    run ``plan.pair_chunk`` pairs at a time and scatter-add into the points.
 
+A ``point_mask`` evaluates a subset of a static-length point array (the dead
+points sort last, seed no group and get zeros);
+:mod:`jaccpot.runtime.target_back_reaction` uses it for the inner points of a
+compact source set's field at very many points (the hybrid back-reaction).
+
 Everything is traced and static-shaped: the :class:`TargetPlan` (group size,
 total far/near capacities, chunk) is the only static input, so moving points
 recompile nothing. An overflow of either capacity is reported (``ok``,
-``needs``), never silent; :func:`plan_target_points` sizes the capacities
-eagerly.
+``needs``; the frontier queue's peak in ``stats``), never silent;
+:func:`plan_target_points` sizes the capacities eagerly.
 
-**Memory** is bounded by the flat lists (8 bytes per capacity entry), one walk
-block (``_WALK_BUDGET_BYTES``) and one chunk of evaluation temporaries
+**Memory** is bounded by the flat lists (8 bytes per capacity entry), the
+frontier queue (8 bytes per entry) or one dense walk block
+(``_WALK_BUDGET_BYTES``), and one chunk of evaluation temporaries
 (``pair_chunk x group_size`` M2P pairs of ~7 KB at p6, and as many near pairs x
 ``leaf_cap`` slots of ~30 B) -- not by groups x the WORST group's needs. The first
 version gave every group the worst group's capacity: galaxy points next to a
@@ -87,6 +107,8 @@ __all__ = [
 _GEOMETRIC_MACS = ("dehnen", "bh")
 #: the target walks (:attr:`TargetPlan.walk`)
 _WALKS = ("frontier", "dense")
+#: the far-field forms (:attr:`TargetPlan.far`)
+_FARS = ("m2p", "local")
 _TINY = 1e-24
 
 
@@ -129,6 +151,13 @@ class TargetPlan:
         The frontier walk's ring queue (pending (group, node) pairs).
     walk_chunk : int
         Pairs the frontier walk tests per step (also the seeds' granularity).
+    far : str
+        The far field: ``"m2p"`` (default) -- each accepted node's multipole
+        at every point of the group (M2L onto the point, L2P at zero offset);
+        ``"local"`` -- one M2L per (group, node) into a local expansion about
+        the group's centre, then one L2P per point, with the group's radius in
+        the criterion (eq 16a two-sided, ``rho_B`` = the group radius; the
+        geometric angle already has it).
     """
 
     num_points: int
@@ -140,6 +169,7 @@ class TargetPlan:
     walk: str = "frontier"
     queue_capacity: int = 8192
     walk_chunk: int = 2048
+    far: str = "m2p"
 
     def __post_init__(self) -> None:
         for name in (
@@ -154,6 +184,8 @@ class TargetPlan:
         ):
             if int(getattr(self, name)) < 1:
                 raise ValueError(f"TargetPlan.{name} must be >= 1")
+        if self.far not in _FARS:
+            raise ValueError(f"TargetPlan.far must be one of {_FARS}, got {self.far!r}")
         if self.walk not in _WALKS:
             raise ValueError(
                 f"TargetPlan.walk must be one of {_WALKS}, got {self.walk!r}"
@@ -530,6 +562,7 @@ def _pair_accept(
     theta_max: float,
     floor: float,
     order: int,
+    far: str = "m2p",
 ) -> Array:
     """The criterion on ``K`` (group, node) pairs, elementwise.
 
@@ -559,6 +592,10 @@ def _pair_accept(
         The walk's separation floor.
     order : int
         Expansion order.
+    far : str
+        :attr:`TargetPlan.far`: under ``dehnen_error``, ``"m2p"`` takes eq (15)
+        with ``rho_B = 0`` at the group's closest member, ``"local"`` the
+        two-sided form with ``rho_B`` = the group radius at the centre distance.
 
     Returns
     -------
@@ -588,13 +625,19 @@ def _pair_accept(
         row_b = [zero, jnp.broadcast_to(threshold, dist_sq.shape)] + [
             zero for _ in range(cols - 2)
         ]
-        closest = jnp.maximum(jnp.sqrt(dist_sq) - rad, 0.0)
+        if far == "local":
+            # M2L into the group's local expansion: the error of the pair at the
+            # centre distance with both radii (eq 16a; the group sources nothing)
+            radius_b, pair_d2 = rad, dist_sq
+        else:
+            closest = jnp.maximum(jnp.sqrt(dist_sq) - rad, 0.0)
+            radius_b, pair_d2 = zero, closest * closest
         return valid & dehnen_pair_accept(
             row_a=row_a,
             row_b=row_b,
             radius_a=nradius,
-            radius_b=zero,
-            dist_sq=closest * closest,
+            radius_b=radius_b,
+            dist_sq=pair_d2,
             order=int(order),
             theta_max=jnp.asarray(theta_max, dtype),
         )
@@ -613,6 +656,7 @@ def _walk_masks(
     theta_max: float,
     floor: float,
     order: int,
+    far: str = "m2p",
 ) -> tuple[Array, Array]:
     """``(far, near)`` node masks of ONE group against every source node (dense).
 
@@ -636,6 +680,8 @@ def _walk_masks(
         The walk's separation floor.
     order : int
         Expansion order.
+    far : str
+        :attr:`TargetPlan.far` (the criterion's form).
 
     Returns
     -------
@@ -654,6 +700,7 @@ def _walk_masks(
         theta_max=theta_max,
         floor=floor,
         order=order,
+        far=far,
     )
     # visited: every strict ancestor rejected (pointer doubling; the sentinel
     # `nodes` is its own parent and counts as rejected)
@@ -741,6 +788,124 @@ def _far_chunk(
         )
         scale = jnp.where(live, gconst * src.mass[node][:, None] / r2, 0.0)
     return acc, pot, scale
+
+
+def _far_local_chunk(
+    src: _SourceTables,
+    groups: Array,
+    gvalid: Array,
+    centres: Array,
+    grp: Array,
+    node: Array,
+    *,
+    order: int,
+    G: float,
+    eps2_plummer: float,
+    want_scale: bool,
+) -> tuple[Array, Array]:
+    """M2L of one chunk of (group, node) far pairs into the groups' local expansions.
+
+    Parameters
+    ----------
+    src : _SourceTables
+        The source tree.
+    groups : Array
+        ``[groups, G, 3]`` the points.
+    gvalid : Array
+        ``[groups, G]`` live points.
+    centres : Array
+        ``[groups, 3]`` the groups' expansion centres.
+    grp : Array
+        ``[C]`` group per pair.
+    node : Array
+        ``[C]`` source node per pair (``nodes``: padding).
+    order : int
+        Expansion order.
+    G : float
+        Gravitational constant.
+    eps2_plummer : float
+        The Plummer-equivalent softening squared (eq 16b's monopole term).
+    want_scale : bool
+        Also eq (16b)'s force scale at the points.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``[C, (p+1)^2]`` local contributions (zero for padding) and ``[C, G]``
+        the force scale.
+    """
+    from jaccpot.operators.m2l_real_rot_scale import m2l_rot_scale_real_batch
+
+    dtype = src.radius.dtype
+    nodes = int(src.radius.shape[0])
+    live = node < nodes
+    gc = centres[grp]
+    deltas = gc - src.centers[node]
+    deltas = jnp.where(live[:, None], deltas, jnp.ones_like(deltas))
+    loc = m2l_rot_scale_real_batch(src.multipoles[node], deltas, order=int(order))
+    loc = jnp.where(live[:, None], loc, 0.0)
+    scale = jnp.zeros(gvalid[grp].shape, dtype)
+    if want_scale:
+        pts = groups[grp]
+        r2 = jnp.sum((pts - src.centers[node][:, None, :]) ** 2, axis=-1) + (
+            jnp.asarray(eps2_plummer, dtype)
+        )
+        alive = live[:, None] & gvalid[grp]
+        scale = jnp.where(
+            alive, jnp.asarray(G, dtype) * src.mass[node][:, None] / r2, 0.0
+        )
+    return loc, scale
+
+
+def _l2p_groups(
+    locals_: Array,
+    groups: Array,
+    gvalid: Array,
+    centres: Array,
+    *,
+    order: int,
+    G: float,
+    batch: int,
+) -> tuple[Array, Array]:
+    """L2P of every group's local expansion at its points.
+
+    Parameters
+    ----------
+    locals_ : Array
+        ``[groups, (p+1)^2]``.
+    groups : Array
+        ``[groups, G, 3]``.
+    gvalid : Array
+        ``[groups, G]``.
+    centres : Array
+        ``[groups, 3]``.
+    order : int
+        Expansion order.
+    G : float
+        Gravitational constant.
+    batch : int
+        Groups per ``lax.map`` step.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``[groups, G, 3]`` acceleration, ``[groups, G]`` potential.
+    """
+    from jaccpot.operators.real_p2m_l2p import evaluate_local_real_with_grad
+
+    gconst = jnp.asarray(G, locals_.dtype)
+
+    def one(xs: tuple) -> tuple[Array, Array]:
+        loc, pts, ok, c = xs
+        grad, phi = jax.vmap(
+            lambda d: evaluate_local_real_with_grad(loc, d, order=int(order))
+        )(c[None, :] - pts)
+        acc = jnp.where(ok[:, None], -gconst * grad, 0.0)
+        return acc, jnp.where(ok, -gconst * phi, 0.0)
+
+    return jax.lax.map(
+        one, (locals_, groups, gvalid, centres), batch_size=max(1, int(batch))
+    )
 
 
 def _near_chunk(
@@ -1077,6 +1242,8 @@ class _TargetWalk(NamedTuple):
         ``[groups, G, 3]`` the sorted points.
     gvalid : Array
         ``[groups, G]`` live points.
+    centres : Array
+        ``[groups, 3]`` the groups' centres.
     lists : tuple
         ``(far groups, far nodes, near groups, near leaves)``.
     totals : Array
@@ -1097,6 +1264,7 @@ class _TargetWalk(NamedTuple):
     perm: Array
     groups: Array
     gvalid: Array
+    centres: Array
     lists: tuple
     totals: Array
     stats: Array
@@ -1116,6 +1284,7 @@ def _target_walk(
     mac: Optional[str],
     softening: Optional[float],
     point_mask: Optional[Array],
+    tables: Optional[_SourceTables] = None,
 ) -> _TargetWalk:
     """Groups and the walk of :func:`evaluate_target_points` (its arguments).
 
@@ -1137,6 +1306,8 @@ def _target_walk(
         The points' softening override.
     point_mask : Optional[Array]
         ``[M]`` live points.
+    tables : Optional[_SourceTables]
+        The topology's :func:`_source_tables` when the caller has them.
 
     Returns
     -------
@@ -1158,7 +1329,11 @@ def _target_walk(
         factor = getattr(engine, "softening_floor", None)
         floor = float(support_factor(kernel) if factor is None else factor) * eps
     order = int(provider.max_order)
-    src = _source_tables(engine, topology, order=order, mac=mac_name)
+    src = (
+        _source_tables(engine, topology, order=order, mac=mac_name)
+        if tables is None
+        else tables
+    )
     dtype = src.radius.dtype
     nodes = int(src.radius.shape[0])
     dense = plan.walk == "dense"
@@ -1212,6 +1387,7 @@ def _target_walk(
         theta_max=float(getattr(engine, "mac_theta_max", 1.0)),
         floor=floor,
         order=order,
+        far=str(plan.far),
     )
     n_points = jnp.sum(valid, dtype=_count_dtype())
     if dense:
@@ -1253,6 +1429,7 @@ def _target_walk(
         perm=perm,
         groups=groups,
         gvalid=gvalid,
+        centres=centres,
         lists=(fg, fn, ng, nn),
         totals=totals,
         stats=stats,
@@ -1329,8 +1506,6 @@ def evaluate_target_points(
         If ``points`` is not ``[plan.num_points, 3]``, or ``dehnen_error`` has no
         ``force_scale``, or ``softening`` is negative.
     """
-    from jaccpot.softening import softening_params
-
     engine = provider.engine
     mac_name = target_mac_type(engine, mac)
     pts_in = jnp.asarray(points)
@@ -1345,6 +1520,70 @@ def evaluate_target_points(
             "scale (a previous evaluation's return_force_scale=True, or "
             "bootstrap_target_force_scale)"
         )
+    return _evaluate(
+        provider,
+        topology,
+        pts_in,
+        plan=plan,
+        force_scale=force_scale,
+        potential=potential,
+        return_force_scale=return_force_scale,
+        mac=mac,
+        softening=softening,
+        point_mask=point_mask,
+        tables=None,
+    )
+
+
+def _evaluate(
+    provider: Any,
+    topology: Any,
+    pts_in: Array,
+    *,
+    plan: TargetPlan,
+    force_scale: Optional[Array],
+    potential: bool,
+    return_force_scale: bool,
+    mac: Optional[str],
+    softening: Optional[float],
+    point_mask: Optional[Array],
+    tables: Optional[_SourceTables],
+) -> TargetField:
+    """:func:`evaluate_target_points` after its checks, with optional tables.
+
+    Parameters
+    ----------
+    provider : Any
+        The provider.
+    topology : Any
+        Its topology.
+    pts_in : Array
+        ``[M, 3]`` checked points.
+    plan : TargetPlan
+        Static shapes.
+    force_scale : Optional[Array]
+        As in :func:`evaluate_target_points`.
+    potential : bool
+        As in :func:`evaluate_target_points`.
+    return_force_scale : bool
+        As in :func:`evaluate_target_points`.
+    mac : Optional[str]
+        As in :func:`evaluate_target_points`.
+    softening : Optional[float]
+        As in :func:`evaluate_target_points`.
+    point_mask : Optional[Array]
+        As in :func:`evaluate_target_points`.
+    tables : Optional[_SourceTables]
+        Precomputed :func:`_source_tables` (``None``: computed here).
+
+    Returns
+    -------
+    TargetField
+        As :func:`evaluate_target_points`.
+    """
+    from jaccpot.softening import softening_params
+
+    engine = provider.engine
     tw = _target_walk(
         provider,
         topology,
@@ -1354,6 +1593,7 @@ def evaluate_target_points(
         mac=mac,
         softening=softening,
         point_mask=point_mask,
+        tables=tables,
     )
     src, groups, gvalid, order, eps, kernel = (
         tw.src,
@@ -1414,10 +1654,47 @@ def evaluate_target_points(
         )
         return accumulate(carry, grp, out), None
 
+    def far_local_body(carry: tuple, xs: tuple) -> tuple[tuple, None]:
+        loc, f = carry
+        grp, node = xs
+        dloc, df = _far_local_chunk(
+            src,
+            groups,
+            gvalid,
+            tw.centres,
+            grp,
+            node,
+            order=order,
+            G=float(engine.G),
+            eps2_plummer=eps * eps,
+            want_scale=want_scale,
+        )
+        loc = loc.at[grp].add(dloc)
+        f = f.at[grp].add(df) if want_scale else f
+        return (loc, f), None
+
     carry = (zeros3, zeros1, zeros1)
-    carry, _ = jax.lax.scan(
-        far_body, carry, (fg.reshape(-1, chunk), fn.reshape(-1, chunk))
-    )
+    if plan.far == "local":
+        ncoef = int(src.multipoles.shape[1])
+        (loc, scale0), _ = jax.lax.scan(
+            far_local_body,
+            (jnp.zeros((ngroups, ncoef), src.multipoles.dtype), zeros1),
+            (fg.reshape(-1, chunk), fn.reshape(-1, chunk)),
+        )
+        acc0, pot0 = _l2p_groups(
+            loc,
+            groups,
+            gvalid,
+            tw.centres,
+            order=order,
+            G=float(engine.G),
+            batch=max(1, chunk // gsize),
+        )
+        carry = (acc0.astype(dtype), pot0.astype(dtype), scale0)
+    else:
+        carry, _ = jax.lax.scan(
+            far_body, carry, (fg.reshape(-1, chunk), fn.reshape(-1, chunk))
+        )
     (acc, pot, scale), _ = jax.lax.scan(
         near_body, carry, (ng.reshape(-1, chunk), nn.reshape(-1, chunk))
     )
@@ -1528,6 +1805,7 @@ def plan_target_points(
     walk: str = "frontier",
     walk_chunk: int = 2048,
     point_mask: Optional[Array] = None,
+    far: str = "m2p",
 ) -> TargetPlan:
     """Size a :class:`TargetPlan` eagerly from the points' current needs.
 
@@ -1566,6 +1844,8 @@ def plan_target_points(
         :attr:`TargetPlan.walk_chunk`.
     point_mask : Optional[Array]
         As in :func:`evaluate_target_points`.
+    far : str
+        :attr:`TargetPlan.far`.
 
     Returns
     -------
@@ -1585,6 +1865,7 @@ def plan_target_points(
         walk=str(walk),
         walk_chunk=int(walk_chunk),
         queue_capacity=4 * int(walk_chunk),
+        far=str(far),
     )
     if target_mac_type(provider.engine) == "dehnen_error" and force_scale is None:
         for _ in range(int(max_rounds)):

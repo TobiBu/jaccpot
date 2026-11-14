@@ -86,6 +86,7 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only
     # deferred, as ``fmm_evaluate`` defers it: the gradient lane's modules stay out
     # of the forward lane's import graph
     from ._large_n_grad import LargeNGradPlan, LargeNGradStatics
+    from .target_back_reaction import BackReactionPlan
     from .target_points import TargetField, TargetPlan
 
 __all__ = [
@@ -1323,7 +1324,7 @@ class FusedForceProvider:
         self,
         topology: FusedTopology,
         points: Array,
-        plan: "TargetPlan",
+        plan: Union["TargetPlan", "BackReactionPlan"],
         *,
         force_scale: Optional[Array] = None,
         potential: bool = False,
@@ -1342,8 +1343,11 @@ class FusedForceProvider:
             From :meth:`rebuild` (or an eager prepare).
         points : Array
             ``[plan.num_points, 3]``.
-        plan : TargetPlan
-            From :meth:`plan_targets`.
+        plan : Union[TargetPlan, BackReactionPlan]
+            From :meth:`plan_targets`; or a
+            :func:`~jaccpot.runtime.target_back_reaction.plan_back_reaction`
+            plan (compact sources, very many points: the outer points take the
+            root multipole, :func:`~jaccpot.runtime.target_back_reaction.evaluate_back_reaction`).
         force_scale : Optional[Array]
             The points' f_b from the previous evaluation (``dehnen_error``).
         potential : bool
@@ -1359,9 +1363,15 @@ class FusedForceProvider:
         TargetField
             ``acc``, ``potential``, ``force_scale``, ``needs``, ``ok``.
         """
+        from .target_back_reaction import BackReactionPlan, evaluate_back_reaction
         from .target_points import evaluate_target_points
 
-        return evaluate_target_points(
+        evaluate = (
+            evaluate_back_reaction
+            if isinstance(plan, BackReactionPlan)
+            else evaluate_target_points
+        )
+        return evaluate(
             self,
             topology,
             points,
