@@ -394,8 +394,13 @@ def test_a_full_frontier_queue_is_reported_and_the_grown_plan_fits(lane):
 
 def test_group_local_expansions_match_a_float64_direct_sum(lane):
     """``far='local'``: one M2L per (group, node) about the group's centre and an
-    L2P per point, with the group radius in the criterion; at the criterion's
-    tolerance against the direct sum, like the per-point M2P."""
+    L2P per point, with the group radius in the criterion. On compact groups
+    (inside, the clump, on top of sources) it is at the criterion's tolerance
+    against the direct sum, like the per-point M2P; on the SPARSE far-box groups
+    (32 points spread over a 2-unit box) eq (16a)'s per-interaction bound adds up
+    over the many nodes such a wide group accepts (dehnen_error: 6.8e-4 there
+    against M2P's 5e-6), so that slice gets 3x the bound -- why M2P stays the
+    default."""
     from jaccpot.runtime.target_points import plan_target_points
 
     plan = plan_target_points(
@@ -411,7 +416,8 @@ def test_group_local_expansions_match_a_float64_direct_sum(lane):
     acc = np.asarray(field.acc, np.float64)
     assert np.isfinite(acc).all()
     for name, sl in _SLICES.items():
-        assert _rel_l2(acc[sl], want_acc[sl]) < _BOUND[lane["mac"]], name
+        bound = _BOUND[lane["mac"]] * (3.0 if name == "far" else 1.0)
+        assert _rel_l2(acc[sl], want_acc[sl]) < bound, name
 
 
 def test_a_point_mask_evaluates_only_the_live_points(lane):
