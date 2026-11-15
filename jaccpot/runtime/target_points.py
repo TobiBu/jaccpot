@@ -417,7 +417,8 @@ class _SourceTables(NamedTuple):
     radius : Array
         ``[nodes]`` the walk's exact COM radii.
     multipoles : Array
-        ``[nodes + 1, (p+1)^2]`` packed real multipoles (sentinel row zero).
+        ``[nodes, (p+1)^2]`` packed real multipoles. No sentinel row (a copy of
+        ~2.4 GB at 1e8 sources): padding pairs read it clipped and are masked.
     mass : Array
         ``[nodes + 1]`` node masses (sentinel zero).
     nonempty : Array
@@ -553,9 +554,7 @@ def _source_tables(
     return _SourceTables(
         centers=jnp.concatenate([centers, jnp.zeros((1, 3), pos.dtype)]),
         radius=radius,
-        multipoles=jnp.concatenate(
-            [packed, jnp.zeros((1, packed.shape[1]), packed.dtype)]
-        ),
+        multipoles=packed,
         mass=jnp.concatenate([mass, jnp.zeros((1,), pos.dtype)]),
         nonempty=(counts > 0) & (mass != 0.0),
         is_leaf=jnp.arange(nodes) >= internal,
@@ -788,7 +787,8 @@ def _far_chunk(
     deltas = pts - centres[:, None, :]
     deltas = jnp.where(live[..., None], deltas, jnp.ones_like(deltas))
     mult = jnp.broadcast_to(
-        src.multipoles[node][:, None, :], (chunk, gsize, src.multipoles.shape[1])
+        jnp.take(src.multipoles, node, axis=0, mode="clip")[:, None, :],
+        (chunk, gsize, src.multipoles.shape[1]),
     )
     locals_ = m2l_rot_scale_real_batch(
         mult.reshape(chunk * gsize, -1), deltas.reshape(chunk * gsize, 3), order=order
@@ -861,7 +861,9 @@ def _far_local_chunk(
     gc = centres[grp]
     deltas = gc - src.centers[node]
     deltas = jnp.where(live[:, None], deltas, jnp.ones_like(deltas))
-    loc = m2l_rot_scale_real_batch(src.multipoles[node], deltas, order=int(order))
+    loc = m2l_rot_scale_real_batch(
+        jnp.take(src.multipoles, node, axis=0, mode="clip"), deltas, order=int(order)
+    )
     loc = jnp.where(live[:, None], loc, 0.0)
     scale = jnp.zeros(gvalid[grp].shape, dtype)
     if want_scale:
