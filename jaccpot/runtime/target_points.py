@@ -9,9 +9,11 @@ moves the topology. This module evaluates the field of a :class:`FusedTopology`'
 sources at ``M`` massless points instead, with the topology untouched:
 
 1. **Upward pass.** The topology keeps its local expansions, not its multipoles,
-   so the sources' P2M/M2M is run again on the topology's tree
-   (``prepare_upward_sweep``: the rebuild's own sweep, about the COMs) with the
-   walk's exact COM radii (:func:`~jaccpot.runtime._mac_geometry.com_mac_geometry`).
+   so the sources' P2M/M2M is run again on the topology's tree (the rebuild's own
+   real sweep, ``prepare_real_upward_sweep``) about the COMs the locals were
+   expanded about (``local_data.centers``, reused: no mass-moment pass), with the
+   walk's exact COM radii (:func:`~jaccpot.runtime._mac_geometry.com_mac_geometry`);
+   a node's mass is its monopole.
 2. **Target groups.** The points are sorted along a Morton curve of their own
    bounding box and cut into groups of ``group_size``; a group is a sphere (its
    box centre, the largest member distance). The groups are not a tree and do not
@@ -477,6 +479,8 @@ def _source_tables(
     """
     from yggdrax.interactions import WALK_TABLE_THRESHOLD
 
+    from jaccpot.upward.real_tree_expansions import prepare_real_upward_sweep
+
     from ._mac_geometry import com_mac_geometry
     from ._walk_criterion import dehnen_walk_table
 
@@ -486,14 +490,24 @@ def _source_tables(
     mas = jnp.asarray(tree.masses_sorted, pos.dtype)
     leaf_cap = int(prepared.max_leaf_size)
     num_levels = engine._resolve_upward_num_levels(tree)
-    upward = engine.prepare_upward_sweep(
+    nodes = int(jnp.asarray(tree.node_ranges).shape[0])
+    # the topology's locals are expanded about the same COMs the rebuild's
+    # sweep computed (bitwise): reusing them skips the mass-moment pass, whose
+    # float64 prefix sums over every particle were this program's largest
+    # buffers at 1e8 (a 7.7 GiB request on an A100 next to the galaxy's state)
+    local = getattr(prepared, "local_data", None)
+    known = None if local is None else getattr(local, "centers", None)
+    if known is not None and tuple(jnp.shape(known)) != (nodes, 3):
+        known = None
+    upward = prepare_real_upward_sweep(
         tree,
         pos,
         mas,
         max_order=int(order),
-        center_mode="com",
         max_leaf_size=leaf_cap,
-        defer_geometry=True,
+        leaf_batch_size=getattr(engine, "upward_leaf_batch_size", None),
+        static_num_levels=num_levels,
+        centers=known,
     )
     centers = jnp.asarray(upward.multipoles.centers, pos.dtype)
     packed = jnp.asarray(upward.multipoles.packed)
@@ -503,9 +517,10 @@ def _source_tables(
     radius = jnp.asarray(radius, pos.dtype) * jnp.asarray(
         float(getattr(engine, "dehnen_radius_scale", 1.0) or 1.0), pos.dtype
     )
-    mass = jnp.asarray(upward.mass_moments.mass, pos.dtype)
+    # the monopole is the node's mass (summed in the working dtype: within
+    # ~1e-5 of the float64 prefix sums, which the criterion does not notice)
+    mass = jnp.asarray(packed[:, 0], pos.dtype)
     ranges = jnp.asarray(tree.node_ranges, jnp.int32)
-    nodes = int(ranges.shape[0])
     internal = int(jnp.asarray(tree.left_child).shape[0])
     counts = ranges[:, 1] - ranges[:, 0] + 1
     raw_parent = jnp.asarray(tree.parent, jnp.int32)

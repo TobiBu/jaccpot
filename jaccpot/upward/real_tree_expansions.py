@@ -575,6 +575,7 @@ def prepare_real_upward_sweep(
     max_leaf_size: int,
     leaf_batch_size: Optional[int] = None,
     static_num_levels: Optional[int] = None,
+    centers: Optional[Array] = None,
 ) -> RealTreeUpwardData:
     """Native real-basis upward sweep (COM centers): P2M leaves + M2M by level.
 
@@ -620,6 +621,12 @@ def prepare_real_upward_sweep(
     static_num_levels : Optional[int]
         Concrete tree depth, or ``None`` (the default) to derive it from the
         padded ``level_offsets`` shape. See above. Clamped to at least 1.
+    centers : Optional[Array]
+        ``[nodes, 3]`` the nodes' centres of mass when the caller has them (a
+        topology's ``local_data.centers``, the same COMs): skips the mass-moment
+        pass, whose float64 prefix sums over every particle are the sweep's
+        largest buffers at 1e8 (``target_points``, HH2a). ``None`` (the default)
+        computes them.
 
     Returns
     -------
@@ -639,8 +646,10 @@ def prepare_real_upward_sweep(
 
     from jaccpot.runtime._forward_seams import jnp_stage
 
-    mass_moments = tree_mass_moments(tree, positions_sorted, masses_sorted)
-    centers = jnp.asarray(mass_moments.center_of_mass, dtype=positions_sorted.dtype)
+    if centers is None:
+        mass_moments = tree_mass_moments(tree, positions_sorted, masses_sorted)
+        centers = mass_moments.center_of_mass
+    centers = jnp.asarray(centers, dtype=positions_sorted.dtype)
 
     total_nodes = int(jnp.asarray(tree.parent).shape[0])
     num_internal = int(jnp.asarray(tree.left_child).shape[0])
