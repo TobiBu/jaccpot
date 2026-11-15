@@ -1675,7 +1675,9 @@ points served).
   | 1e5 x 1e4 (same) | 254,243 | 14,743,239 | 58 |
   | 1e6 x 1e4 (galaxy -> stars, geometric, GPU, leaf 64 p6) | 324,335 | 37,820,103 | 117 |
   | 1e6 x 1e4 (same, `dehnen_error` 1e-4) | 167,493 | 37,820,103 | 226 |
-  | 2e5 galaxy points x 1e4 stars (back-reaction, all points through the walk) | 811,258 | — | — |
+  | 1e4 stars -> 1e6 galaxy points (back-reaction direction, all points through the walk, GPU, geometric) | 296,340 | 63,968,750 | 216 |
+  | same, `dehnen_error` | 63,298 | 63,968,750 | 1,011 |
+  | 2e5 galaxy points x 1e4 stars (back-reaction, all points through the walk, CPU) | 811,258 | — | — |
   | 1e8 x 1e5 (galaxy -> stars, `dehnen_error`, GPU) | HH2A_1E8_TESTS | 3125 x ~1.2e7 = ~3.8e10 | HH2A_1E8_RATIO |
 
   The frontier count is ~2x the accepted far + near pairs (each accepted or near pair costs its own test and its
@@ -1807,6 +1809,10 @@ walk; `needs` = far / near pairs:
   | | | | | local | 9.36e-5 (1.84e-4) | same | same | same |
   | | | | `dehnen_error` 1e-4 | m2p | 1.61e-4 (3.15e-4) | 81,373 / 2,530 | 167,493 | 10,116 |
   | | | | | local | 1.36e-4 (3.39e-4) | 82,458 / 2,595 | 169,793 | 11,160 |
+  | | cluster -> galaxy points | 1e4 x 1e6 | geometric 0.5 | m2p | 1.81e-6 (1.57e-6) | 36,839 / 126,712 | 296,340 | 10,490 |
+  | | | | | local | 3.29e-4 (1.51e-2) | same | same | same |
+  | | | | `dehnen_error` 1e-4 | m2p | 1.78e-6 (2.60e-6) | 35,255 / 11,977 | 63,298 | 1,982 |
+  | | | | | local | 5.56e-5 (2.83e-3) | 380,615 / 203,141 | 1,136,804 | 18,734 |
 
   The dense walk gave the same needs and the same rel-L2 to 3 digits in every row where it ran (1e5 x 1e3 and 1e6 x
   1e4, both directions). The galaxy -> stars errors are at the criterion's tolerance for these settings; the
