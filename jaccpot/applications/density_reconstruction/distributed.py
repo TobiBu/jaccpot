@@ -1,4 +1,4 @@
-"""The reconstruction's observation operator on a multi-device mesh.
+"""The reconstruction's observation operator on a multi-device mesh: the fused mesh lane.
 
 Why this module exists, stated plainly, because the measurement that forced it
 is a negative result about the alternative.
@@ -8,7 +8,8 @@ multiple GPUs, so parameter count is bounded by aggregate device memory rather
 than a single device's*. The obvious way to try that is to shard the parameter
 array and let XLA follow -- which is what
 :func:`~jaccpot.applications.density_reconstruction.fit.run_fit`'s ``devices``
-argument does. **It does not work, and the measurement says so:**
+argument does. **It does not work, and the measurement says so** (September
+2026, on the radix path of tag ``paper-i-sep2026``):
 
 =========  =====================  ==============  ==================
 devices    strong-scaling wall    mean gradient   largest N that ran
@@ -18,86 +19,71 @@ devices    strong-scaling wall    mean gradient   largest N that ran
 4          825 s                  51.9 s          1 048 576
 =========  =====================  ==============  ==================
 
-The ceiling does not move and the per-gradient cost gets monotonically *worse*.
-The reason is structural: jaccpot's radix force evaluation is written over one
-full particle array, so a sharded input is all-gathered before the work starts
-and re-sharded afterwards. Parameter sharding therefore buys communication and
-nothing else. It distributes where the numbers are *stored*, not where the force
-is *computed*, and it is the latter that sets the ceiling.
+The ceiling does not move and the per-gradient cost gets monotonically *worse*:
+a force evaluation written over one full particle array all-gathers a sharded
+input before the work starts. Parameter sharding distributes where the numbers
+are *stored*, not where the force is *computed*, and it is the latter that sets
+the ceiling.
 
-What does distribute the computation is jaccpot's own distributed FMM -- the
-section 5 path, ``jaccpot.distributed.fmm`` -- which partitions the *sources*
-across devices and exchanges halos. This module drives that path
-differentiably, so the claim can be tested as stated instead of asserted.
+What does distribute the computation is jaccpot's multi-GPU force, which
+partitions the *sources* across devices. This module drives it differentiably.
 
-The frozen readout, and why it is the same contract as everywhere else
----------------------------------------------------------------------
-The distributed evaluator has no separate prepare/state seam: it rebuilds its
-per-device trees *inside* the call, and returns accelerations in each device's
-own tree order together with the global ids naming those rows. That returned
-``gid`` is the only trustworthy readout map -- ``partition_for_devices``'s
-docstring records, with a pinned test, that reusing the *input* ``gid_flat``
-compares each particle's force against a Morton neighbour's and is "plausible,
-smooth, and wrong by tens of percent".
+The lane: ``FusedMeshForce`` and its gradient (WP-G)
+----------------------------------------------------
+Until 2026-11 this module drove ``jaccpot.distributed.fmm``'s
+``make_force_evaluator``, the section-5 path of September. The production
+multi-GPU force is now the fused mesh lane
+(:class:`~jaccpot.distributed.template_force.FusedMeshForce`), and since WP-G
+(#510) it is differentiable: :func:`~jaccpot.distributed.grad.make_mesh_grad_fn`
+wraps ``FusedMeshForce.differentiable_shard`` in the mesh's ``shard_map``, so a
+scalar loss built outside it differentiates with plain ``jax.grad``. On each
+device the topology is rebuilt from the inputs' stopped gradients, the cross
+layout of that trace is frozen, and the production kernels run at the live
+positions with their reverses; the exchanges are never transposed. The WP-G gates
+(``tests/distributed/test_mesh_grad_gates.py``) check it against central
+differences, an exact direct sum and the single card on 2 and 4 devices.
 
-Since the readout permutation is an output, it is a tracer under ``jax.grad``
-and cannot index anything. :meth:`DistributedForwardOperator.prepare` therefore
-calls the evaluator once *concretely*, at the current positions, and freezes the
-tracer rows it reports. That is not a workaround: holding the permutation
-constant while differentiating the numeric pipeline is exactly hard decision 5,
-and exactly what the radix path's prepared state does. The same rebuild-per-
-iteration structure applies, with the same switching boundaries between epochs.
+What is frozen, and why it is the same contract as everywhere else
+------------------------------------------------------------------
+:meth:`DistributedForwardOperator.prepare` places the combined source + tracer
+set on the mesh as Morton domains
+(:func:`~jaccpot.distributed.rollout.decompose`), prepares the mesh force on that
+placement and freezes two things for the epoch: **which device owns which
+particle** (the row of each global id) and **which output rows are tracers**.
+Within the epoch the force rebuilds each device's tree inside every call, as the
+September path did; between epochs the placement is redone. Holding the readout
+constant while the numeric pipeline is differentiated is hard decision 5, and
+what the radix path's prepared state does. The mesh force returns rows in input
+order (each device's rows as placed), so the readout is the placement's own
+``ids``, with no output permutation to resolve.
 
-Verified before this module was written: on a two-device forced-CPU mesh at
-N=256, M=32, the tracer field this produces agrees with
-:func:`jaccpot.autodiff.direct_sum_gravitational_acceleration` over the same
-combined set to **6.2e-16** relative L2, and the gradient is finite. (A first
-attempt appeared to disagree by exactly 2.000, which is the signature of a sign
-convention, and it was the hand-rolled oracle in the probe that had the sign
-backwards, not the operator. Using jaccpot's own direct sum settled it.)
-
-The ceiling is the path's, not the defaults'
--------------------------------------------
-The ceiling this path reaches is well below the single-device radix operator's
--- P=393216 at two devices and P=786432 at four, against P=3145728 on one
-device -- and it doubles with device count, which is the claim. Since every
-buffer cap in ``DistributedFMMConfig`` auto-sizes from ``N``, the obvious
-suspicion was that the number describes a default rather than the method.
-Measured, and it does not (``bench/payoff_static/distributed_caps_probe.py``):
-
-======== =================================== ==========================
-N        caps                                two devices
-======== =================================== ==========================
-131072   auto-sized                          OK, no overflow
-131072   max_pair_queue=4e6                  OK, no overflow
-131072   max_pair_queue=1e6                  OK, no overflow
-131072   pair_queue=1e6, interactions=512    OK, no overflow
-262144   auto-sized                          out of memory (617 s)
-262144   max_pair_queue=4e6                  out of memory (52 s)
-262144   max_pair_queue=1e6                  out of memory (51 s)
-262144   pair_queue=1e6, interactions=512    out of memory (51 s)
-======== =================================== ==========================
-
-Tightening the pair queue by orders of magnitude changes how long the failure
-takes, not whether it happens, and the failing allocation is 3.35 GiB in every
-tightened case. So the ceiling stands as a property of this path.
+The mesh force installs a capacity plan that must be active for every trace AND
+call of its programs: :meth:`DistributedForwardOperator.program_context` returns
+it, and ``run_fit`` enters it around the gradient step.
 
 What this operator does not offer
 ---------------------------------
 No leaf blocks, so no regularisers. The penalties in
-:mod:`~jaccpot.applications.density_reconstruction.loss` are built on the radix
-prepared state's leaf partition, which has no counterpart here.
-:meth:`leaf_blocks` returns ``None`` and ``run_fit`` refuses a non-zero
-regularisation weight rather than silently running an unregularised fit -- which
-matters, because fig17(d) exists to show what dropping the regularisers does.
+:mod:`~jaccpot.applications.density_reconstruction.loss` are built on one global
+leaf partition, which the per-device trees do not have. :meth:`leaf_blocks`
+returns ``None`` and ``run_fit`` refuses a non-zero regularisation weight rather
+than silently running an unregularised fit -- which matters, because fig17(d)
+exists to show what dropping the regularisers does.
+
+The mass-dependent criterion (``mac_type="dehnen_error"``, the fused lane's
+production default) is refused for the reason
+:func:`~jaccpot.applications.density_reconstruction.forward.assert_no_differentiated_mac`
+gives; the default here is the geometric ``"dehnen"`` test.
 """
 
 from __future__ import annotations
 
-import dataclasses
+import inspect
+import math
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, ContextManager, Dict, Optional, Sequence, Union
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.typing import ArrayLike
@@ -111,51 +97,53 @@ __all__ = [
 
 @dataclass(frozen=True)
 class DistributedPartition:
-    """One partition of the combined particle set, with its readout frozen.
+    """One placement of the combined particle set on the mesh, readout frozen.
 
     The distributed analogue of a radix ``FMMPreparedState``: built host-side
     from concrete positions, held constant while the numeric pipeline is
-    differentiated, and rebuilt between iterations.
+    differentiated, and rebuilt between epochs.
 
     Attributes
     ----------
-    evaluator : Any
-        The compiled differentiable force evaluator for this partition's caps.
+    force : Any
+        The prepared ``FusedMeshForce``, with its gradient statics.
+    grad_fn : Any
+        :func:`~jaccpot.distributed.grad.make_mesh_grad_fn` of ``force``:
+        ``f(positions, masses, counts, ids) -> (acceleration, bits)``.
     gid_index : jnp.ndarray
-        ``(rows,)`` int32 global id of each layout row, clamped at 0 so it can
-        index; ``real_mask`` says which entries mean anything.
+        ``(ndev * cap,)`` int32 global id of each mesh row, clamped at 0 so it
+        can index; ``real_mask`` says which rows mean anything.
     real_mask : jnp.ndarray
-        ``(rows, 1)`` bool, ``False`` on padding rows.
+        ``(ndev * cap, 1)`` bool, ``False`` on padding rows.
     pad_positions : jnp.ndarray
-        ``(rows, 3)`` the partitioner's own layout, used verbatim for padding
-        rows so their geometry is exactly what it chose.
-    mass_flat : jnp.ndarray
-        ``(rows,)`` masses in layout order. Constant: masses are frozen.
-    gid_flat : jnp.ndarray
-        ``(rows,)`` the input global-id array the evaluator expects.
+        ``(ndev * cap, 3)`` the placement's own positions, used verbatim for
+        padding rows (each sits on a live particle of its device) so no
+        cotangent reaches them.
+    masses : jnp.ndarray
+        ``(ndev * cap,)`` masses in row order, zero on padding. Constant: masses
+        are frozen.
     counts : jnp.ndarray
-        ``(ndev,)`` real particle count per device.
+        ``(ndev,)`` live rows per device.
+    ids : jnp.ndarray
+        ``(ndev * cap,)`` int32 global ids, ``-1`` on padding.
     tracer_rows : jnp.ndarray
-        ``(M,)`` int32 output rows holding the tracers, ordered by global id.
-        Frozen from a concrete forward call; see the module docstring.
-    layout_shape : Tuple[int, ...]
-        Shape the evaluator expects for ``pos_flat``.
+        ``(M,)`` int32 mesh rows holding the tracers, ordered by global id.
     cap : int
-        Per-device capacity.
+        Rows per device.
     diagnostics : Dict[str, Any]
-        The evaluator's overflow counters from the concrete probe call, so a
-        run records whether any buffer overflowed.
+        The probe call's per-device bits (``0``: the lists are ones the reverses
+        read) and live counts, so a run records whether any device failed.
     """
 
-    evaluator: Any
+    force: Any
+    grad_fn: Any
     gid_index: jnp.ndarray
     real_mask: jnp.ndarray
     pad_positions: jnp.ndarray
-    mass_flat: jnp.ndarray
-    gid_flat: jnp.ndarray
+    masses: jnp.ndarray
     counts: jnp.ndarray
+    ids: jnp.ndarray
     tracer_rows: jnp.ndarray
-    layout_shape: Tuple[int, ...]
     cap: int
     diagnostics: Dict[str, Any]
 
@@ -166,15 +154,16 @@ class DistributedForwardOperator:
 
     Mirrors :class:`~jaccpot.applications.density_reconstruction.forward.ForwardOperator`'s
     surface -- ``prepare``, ``evaluate_at_topology``, ``evaluate``,
-    ``leaf_blocks``, ``record`` -- so ``run_fit`` drives either without knowing
-    which it has.
+    ``leaf_blocks``, ``program_context``, ``record`` -- so ``run_fit`` drives
+    either without knowing which it has.
 
     Attributes
     ----------
-    config : Any
-        The ``DistributedFMMConfig`` in use.
+    solver : Any
+        The ``FastMultipoleMethod`` the mesh force evaluates with
+        (:func:`~jaccpot.applications.density_reconstruction.forward.fused_solver`).
     mesh : Any
-        The device mesh.
+        The 1-D device mesh.
     num_devices : int
         Device count.
     tracer_positions : np.ndarray
@@ -184,20 +173,25 @@ class DistributedForwardOperator:
     num_sources : int
         ``N``.
     softening : float
-        Plummer softening, recorded because hard decision 6 says so.
+        Softening length, recorded because hard decision 6 says so.
     order : int
         Expansion order.
     leaf_size : int
-        Leaf size.
+        Cell-leaf size.
     theta : float
         Acceptance parameter.
-    mac_type : Optional[str]
+    mac_type : str
         The MAC in use.
-    partitioner : str
-        Domain decomposition used by ``partition_for_devices``.
+    working_dtype : str
+        Working precision.
+    capacity_headroom : float
+        Rows per device over an even split, for the sample-sort's imbalance.
+    cross_caps : Any
+        ``CrossCapacities`` for the cross-domain exchange, or ``"auto"`` to have
+        the mesh force size them at its first prepare.
     """
 
-    config: Any
+    solver: Any
     mesh: Any
     num_devices: int
     tracer_positions: np.ndarray
@@ -207,8 +201,10 @@ class DistributedForwardOperator:
     order: int
     leaf_size: int
     theta: float
-    mac_type: Optional[str]
-    partitioner: str
+    mac_type: str
+    working_dtype: str
+    capacity_headroom: float
+    cross_caps: Any
 
     @property
     def num_tracers(self: "DistributedForwardOperator") -> int:
@@ -262,7 +258,7 @@ class DistributedForwardOperator:
     def prepare(
         self: "DistributedForwardOperator", source_positions: Any
     ) -> DistributedPartition:
-        """Partition the particles and freeze the readout permutation.
+        """Place the particles on the mesh, prepare the force, freeze the readout.
 
         Parameters
         ----------
@@ -272,78 +268,122 @@ class DistributedForwardOperator:
         Returns
         -------
         DistributedPartition
-            The partition, its compiled evaluator, and the frozen tracer rows.
+            The placement, its prepared mesh force and gradient function, and
+            the frozen tracer rows.
 
         Raises
         ------
         RuntimeError
-            If the concrete probe call reports fewer tracer rows than there are
-            tracers. That means the readout could not be resolved, and every
-            number downstream would be quietly wrong -- the exact failure
-            ``partition_for_devices``'s docstring warns about.
+            If the placement does not hold every particle exactly once, or the
+            probe call reports a device whose lists the gradient's reverses
+            cannot read (its gradient would be NaN, and every step of the epoch
+            with it).
         """
-        from jaccpot.distributed.fmm import make_force_evaluator, partition_for_devices
+        from jaccpot.distributed.grad import make_mesh_grad_fn
+        from jaccpot.distributed.rollout import decompose
+        from jaccpot.distributed.template_force import FusedMeshForce
 
         combined = np.asarray(
             self.combined_positions(np.asarray(source_positions)), dtype=np.float64
         )
         masses = self.combined_masses()
-        part = partition_for_devices(
-            combined,
-            masses,
-            int(self.num_devices),
-            leaf_size=int(self.config.leaf_size),
-            partitioner=self.partitioner,
-        )
-        evaluator = make_force_evaluator(
-            self.config,
-            int(self.num_devices),
-            part["cap"],
+        total = int(combined.shape[0])
+        ndev = int(self.num_devices)
+        cap = int(math.ceil(total / ndev * float(self.capacity_headroom)))
+        shard, _ = decompose(
             self.mesh,
-            jit=True,
-            differentiable=True,
+            combined,
+            np.zeros_like(combined),
+            masses,
+            cap=cap,
+            num_samples=int(min(64, max(8, total // (4 * ndev)))),
         )
-
-        pos_flat = jnp.asarray(part["pos_flat"])
-        mass_flat = jnp.asarray(part["mass_flat"])
-        gid_flat = jnp.asarray(part["gid_flat"])
-        counts = jnp.asarray(part["counts"])
-
-        # One concrete call, to learn the readout permutation. It is an OUTPUT
-        # of the evaluator, so it is a tracer under jax.grad and cannot index
-        # anything; freezing it here is hard decision 5 applied to this path.
-        _accel, out_gid, diag = evaluator(pos_flat, mass_flat, gid_flat, counts)
-        out = np.asarray(out_gid).reshape(-1)
-        rows = np.where(out >= int(self.num_sources))[0]
-        rows = rows[np.argsort(out[rows])]
-        if rows.size != self.num_tracers:
+        ids = np.asarray(shard.ids).astype(np.int64)
+        live_ids = ids[ids >= 0]
+        if live_ids.size != total or np.unique(live_ids).size != total:
             raise RuntimeError(
-                f"distributed readout resolved {rows.size} tracer rows but the "
-                f"operator has {self.num_tracers}; the returned gid is the only "
-                "trustworthy readout map and it did not name every tracer"
+                f"the mesh placement holds {live_ids.size} live rows "
+                f"({np.unique(live_ids).size} distinct) for {total} particles"
             )
 
-        gid_host = np.asarray(gid_flat).reshape(-1)
-        return DistributedPartition(
-            evaluator=evaluator,
-            gid_index=jnp.asarray(np.maximum(gid_host, 0).astype(np.int32)),
-            real_mask=jnp.asarray((gid_host >= 0)[:, None]),
-            pad_positions=pos_flat.reshape(-1, 3),
-            mass_flat=mass_flat,
-            gid_flat=gid_flat,
-            counts=counts,
-            tracer_rows=jnp.asarray(rows.astype(np.int32)),
-            layout_shape=tuple(pos_flat.shape),
-            cap=int(part["cap"]),
-            diagnostics=_diagnostics_record(diag),
+        force = FusedMeshForce(
+            self.solver,
+            self.mesh,
+            leaf_size=int(self.leaf_size),
+            max_order=int(self.order),
+            theta=float(self.theta),
+            cross_caps=self.cross_caps,
         )
+        force.prepare(shard.positions, shard.masses, shard.count)
+        force.with_grad_plan(shard.positions, shard.masses, shard.count)
+        grad_fn = make_mesh_grad_fn(force)
+
+        rows = np.where(ids >= int(self.num_sources))[0]
+        rows = rows[np.argsort(ids[rows])]
+        partition = DistributedPartition(
+            force=force,
+            grad_fn=grad_fn,
+            gid_index=jnp.asarray(np.maximum(ids, 0).astype(np.int32)),
+            real_mask=jnp.asarray((ids >= 0)[:, None]),
+            pad_positions=jnp.asarray(shard.positions),
+            masses=jnp.asarray(shard.masses),
+            counts=jnp.asarray(shard.count),
+            ids=jnp.asarray(shard.ids),
+            tracer_rows=jnp.asarray(rows.astype(np.int32)),
+            cap=cap,
+            diagnostics={},
+        )
+        # One concrete call, to read every device's verdict on its lists.
+        with force.context():
+            force.before_trace()
+            _acc, bits = jax.jit(grad_fn)(
+                partition.pad_positions,
+                partition.masses,
+                partition.counts,
+                partition.ids,
+            )
+        bits_host = np.asarray(bits).astype(np.int64).reshape(-1)
+        partition.diagnostics.update(
+            {
+                "bits": bits_host.tolist(),
+                "counts": np.asarray(shard.count).astype(np.int64).tolist(),
+                "cap": cap,
+                "failed": bool(np.any(bits_host != 0)),
+            }
+        )
+        if partition.diagnostics["failed"]:
+            raise RuntimeError(
+                f"mesh force bits {bits_host.tolist()}: some device's lists are "
+                "not ones the gradient's reverses read (overflow, a cross pair "
+                "hash mismatch, or an asymmetric list); its gradient would be NaN"
+            )
+        return partition
+
+    def program_context(
+        self: "DistributedForwardOperator", partition: DistributedPartition
+    ) -> ContextManager[Any]:
+        """The mesh force's capacity plan, for every trace and call at ``partition``.
+
+        Parameters
+        ----------
+        partition : DistributedPartition
+            From :meth:`prepare`.
+
+        Returns
+        -------
+        ContextManager[Any]
+            ``partition.force.context()``.
+        """
+        return partition.force.context()
 
     def evaluate_at_topology(
         self: "DistributedForwardOperator",
         partition: DistributedPartition,
         source_positions: ArrayLike,
     ) -> jnp.ndarray:
-        """Accelerations at the tracers, at this partition's frozen readout.
+        """Accelerations at the tracers, at this partition's frozen placement.
+
+        Trace and call it under :meth:`program_context` (``run_fit`` does).
 
         Parameters
         ----------
@@ -358,26 +398,25 @@ class DistributedForwardOperator:
             ``(M, 3)`` accelerations at the tracer positions, in tracer order.
         """
         combined = self.combined_positions(source_positions)
-        # Real rows gather from the live parameters; padding rows keep the
-        # partitioner's own coordinates, so their geometry is exactly what it
-        # chose and no cotangent reaches them.
-        scattered = jnp.where(
+        # Live rows gather from the live parameters; padding rows keep the
+        # placement's own coordinates, so no cotangent reaches them.
+        rows = jnp.where(
             partition.real_mask,
             combined[partition.gid_index],
             partition.pad_positions,
         )
-        accelerations, _gid, _diag = partition.evaluator(
-            scattered.reshape(partition.layout_shape),
-            partition.mass_flat,
-            partition.gid_flat,
-            partition.counts,
+        # This runs at trace time: a new program must not read the walk caps
+        # record another trace left on the engine.
+        partition.force.before_trace()
+        accelerations, _bits = partition.grad_fn(
+            rows, partition.masses, partition.counts, partition.ids
         )
-        return accelerations.reshape(-1, 3)[partition.tracer_rows]
+        return accelerations[partition.tracer_rows]
 
     def evaluate(
         self: "DistributedForwardOperator", source_positions: Any
     ) -> jnp.ndarray:
-        """Repartition from ``source_positions`` and evaluate.
+        """Re-place from ``source_positions`` and evaluate.
 
         Parameters
         ----------
@@ -389,28 +428,30 @@ class DistributedForwardOperator:
         jnp.ndarray
             ``(M, 3)`` accelerations at the tracers.
         """
-        return self.evaluate_at_topology(
-            self.prepare(source_positions), jnp.asarray(source_positions)
-        )
+        partition = self.prepare(source_positions)
+        sources = jnp.asarray(source_positions)
+        with self.program_context(partition):
+            return jax.jit(lambda s: self.evaluate_at_topology(partition, s))(sources)
 
     def leaf_blocks(
-        self: "DistributedForwardOperator", partition: DistributedPartition
+        self: "DistributedForwardOperator", partition: Optional[DistributedPartition]
     ) -> None:
-        """Return ``None``: this path exposes no leaf partition.
+        """Return ``None``: this path exposes no global leaf partition.
 
         Parameters
         ----------
-        partition : DistributedPartition
-            Unused; present so the signature matches the radix operator's.
+        partition : Optional[DistributedPartition]
+            Unused; present so the signature matches the single-card operators'.
 
         Returns
         -------
         None
-            The regularisers are built on the radix prepared state's leaf
-            blocks and have no counterpart here. ``run_fit`` refuses a non-zero
+            The regularisers are built on one global leaf partition, which the
+            per-device trees do not have. ``run_fit`` refuses a non-zero
             regularisation weight against this operator rather than silently
             running an unregularised fit.
         """
+        del partition
         return None
 
     def record(self: "DistributedForwardOperator") -> Dict[str, Any]:
@@ -419,51 +460,29 @@ class DistributedForwardOperator:
         Returns
         -------
         Dict[str, Any]
-            Counts, accuracy settings, and -- named explicitly -- the fact that
-            this is the distributed force evaluation and not parameter
+            Counts, accuracy settings, the lane, and -- named explicitly -- the
+            fact that this is the distributed force evaluation and not parameter
             sharding. A wall-clock from one is not comparable with the other.
         """
+        engine = getattr(self.solver, "_impl", self.solver)
+        caps = self.cross_caps
         return {
             "N": int(self.num_sources),
             "M": int(self.num_tracers),
             "softening": float(self.softening),
+            "softening_kernel": getattr(engine, "softening_kernel", None),
             "order": int(self.order),
             "leaf_size": int(self.leaf_size),
             "theta": float(self.theta),
             "mac_type": self.mac_type,
+            "working_dtype": self.working_dtype,
             "num_devices": int(self.num_devices),
-            "partitioner": self.partitioner,
+            "capacity_headroom": float(self.capacity_headroom),
+            "cross_caps": (caps if isinstance(caps, str) else dict(vars(caps))),
+            "lane": "fused_mesh",
+            "partitioner": "sfc",
             "sharding_mode": "distributed_force_evaluation",
         }
-
-
-def _diagnostics_record(diag: Any) -> Dict[str, Any]:
-    """Summarise the evaluator's diagnostic counters.
-
-    Parameters
-    ----------
-    diag : Any
-        The third element of the evaluator's return, one row per device.
-
-    Returns
-    -------
-    Dict[str, Any]
-        Per-field lists plus an ``overflowed`` flag. An overflowed buffer means
-        interactions were dropped, so a force from such a run is wrong and the
-        artifact has to say so.
-    """
-    from jaccpot.distributed.fmm import DIAG_FIELDS
-
-    values = np.asarray(diag)
-    counters = {
-        field: values[:, index].tolist() for index, field in enumerate(DIAG_FIELDS)
-    }
-    overflow_fields = [f for f in DIAG_FIELDS if "overflow" in f or "dropped" in f]
-    return {
-        "counters": counters,
-        "overflow_fields": overflow_fields,
-        "overflowed": bool(any(any(counters.get(f, [])) for f in overflow_fields)),
-    }
 
 
 def make_distributed_forward_operator(
@@ -474,12 +493,15 @@ def make_distributed_forward_operator(
     num_devices: int,
     softening: float,
     order: int = 4,
-    theta: float = 0.5,
+    theta: float = 0.6,
     leaf_size: int = 64,
     basis: str = "real",
     mac_type: Optional[str] = None,
-    nearfield_backend: Optional[str] = None,
-    partitioner: str = "rcb",
+    working_dtype: str = "float64",
+    softening_kernel: Optional[str] = None,
+    leaf_capacity: Union[int, str] = "auto",
+    capacity_headroom: float = 1.3,
+    partitioner: str = "sfc",
     devices: Optional[Sequence[Any]] = None,
     caps: Optional[Dict[str, int]] = None,
 ) -> DistributedForwardOperator:
@@ -494,42 +516,41 @@ def make_distributed_forward_operator(
     num_sources : int
         ``N``.
     num_devices : int
-        Devices to partition the sources across.
+        Devices to place the particles across.
     softening : float
-        Plummer softening length (hard decision 6).
+        Softening length (hard decision 6).
     order : int
         Expansion order.
     theta : float
         Acceptance parameter.
     leaf_size : int
-        Leaf size.
+        Cell-leaf size.
     basis : str
         Expansion basis.
     mac_type : Optional[str]
-        Multipole acceptance criterion, or ``None`` for the config default.
-        Mass-dependent variants are refused, for the reason
+        Multipole acceptance criterion, or ``None`` for the geometric
+        ``"dehnen"``. Mass-dependent variants are refused, for the reason
         :func:`~jaccpot.applications.density_reconstruction.forward.assert_no_differentiated_mac`
         gives: zero-mass tracers have no force scale to drive them.
-    nearfield_backend : Optional[str]
-        Near-field lane, or ``None`` for the config default.
+    working_dtype : str
+        ``"float64"`` (default) or ``"float32"``.
+    softening_kernel : Optional[str]
+        Pair softening kernel, or ``None`` for the solver's (``ferrers3``).
+    leaf_capacity : Union[int, str]
+        The per-device cell tree's leaf capacity, ``"auto"`` by default.
+    capacity_headroom : float
+        Rows per device over an even split, for the sample-sort's imbalance.
     partitioner : str
-        ``partition_for_devices`` domain decomposition.
+        ``"sfc"``, the only placement the mesh lane has (Morton domains by a
+        sample sort). The September path's ``"rcb"`` is gone with it, and asking
+        for it raises rather than measuring a different decomposition.
     devices : Optional[Sequence[Any]]
         Explicit device list; defaults to the first ``num_devices`` JAX sees.
     caps : Optional[Dict[str, int]]
-        Overrides for ``DistributedFMMConfig``'s buffer caps --
-        ``max_pair_queue``, ``max_interactions_per_node``,
-        ``max_neighbors_per_leaf``, ``process_block`` and the ``cross_*``
-        variants. They all default to ``None``, meaning auto-sized from ``N``,
-        and the auto-sized values are what set the memory ceiling this path
-        hits. Exposed so a ceiling can be reported at *tuned* caps rather than
-        only at the defaults -- a number measured at whatever the defaults
-        happened to choose is a statement about the defaults.
-
-        A cap that is too small does not fail loudly: it silently drops
-        interactions and returns a wrong force. Check
-        :attr:`DistributedPartition.diagnostics`'s ``overflowed`` flag, which
-        every run records, before believing a force from tightened caps.
+        Overrides for :class:`~jaccpot.distributed.cross.CrossCapacities`, the
+        cross-domain exchange's buffers. ``None`` lets the mesh force size them
+        at its first prepare. (The September path's ``DistributedFMMConfig``
+        caps -- ``max_pair_queue`` and friends -- do not exist on this lane.)
 
     Returns
     -------
@@ -541,21 +562,26 @@ def make_distributed_forward_operator(
     ValueError
         If ``tracer_positions`` is not ``(M, 3)``, if fewer devices are visible
         than requested -- a scaling point taken on a different device count is
-        not the point that was asked for -- or if ``caps`` names a field
-        ``DistributedFMMConfig`` does not have.
+        not the point that was asked for -- if ``partitioner`` is not ``"sfc"``,
+        or if ``caps`` names a field ``CrossCapacities`` does not have.
     """
-    import jax
-    from yggdrax.distributed import make_mesh
-
     from jaccpot.applications.density_reconstruction.forward import (
+        FUSED_DEFAULT_MAC,
         assert_no_differentiated_mac,
+        fused_solver,
     )
-    from jaccpot.distributed import DistributedFMMConfig
+    from jaccpot.distributed.cross import CrossCapacities
+    from jaccpot.distributed.fused import AXIS_NAME
 
     assert_no_differentiated_mac(mac_type=mac_type, has_tracers=True)
     tracers = np.asarray(tracer_positions, dtype=np.float64)
     if tracers.ndim != 2 or tracers.shape[1] != 3:
         raise ValueError(f"tracer_positions must be (M, 3), got {tracers.shape}")
+    if partitioner != "sfc":
+        raise ValueError(
+            f"partitioner={partitioner!r}: the fused mesh lane places particles "
+            "as Morton domains ('sfc') only"
+        )
 
     available = list(devices) if devices is not None else list(jax.devices())
     if len(available) < int(num_devices):
@@ -565,31 +591,34 @@ def make_distributed_forward_operator(
         )
     chosen = available[: int(num_devices)]
 
-    overrides: Dict[str, Any] = dict(
-        order=int(order),
-        theta=float(theta),
-        leaf_size=int(leaf_size),
-        basis=str(basis),
-        softening=float(softening),
-    )
-    if mac_type is not None:
-        overrides["mac_type"] = mac_type
-    if nearfield_backend is not None:
-        overrides["nearfield_backend"] = nearfield_backend
+    cross_caps: Any = "auto"
     if caps:
-        known = {f.name for f in dataclasses.fields(DistributedFMMConfig)}
+        # A plain class: its fields are its constructor's keywords.
+        known = set(inspect.signature(CrossCapacities.__init__).parameters) - {"self"}
         unknown = sorted(set(caps) - known)
         if unknown:
             raise ValueError(
-                f"unknown DistributedFMMConfig cap(s) {unknown}; known fields "
-                f"include {sorted(n for n in known if 'cap' in n or 'max_' in n)}"
+                f"unknown CrossCapacities field(s) {unknown}; known: {sorted(known)}"
             )
-        overrides.update({name: int(value) for name, value in caps.items()})
-    config = dataclasses.replace(DistributedFMMConfig(), **overrides)
+        cross_caps = CrossCapacities(
+            **{name: int(value) for name, value in caps.items()}
+        )
 
+    mac = FUSED_DEFAULT_MAC if mac_type is None else str(mac_type)
+    solver = fused_solver(
+        softening=softening,
+        order=order,
+        theta=theta,
+        leaf_size=leaf_size,
+        mac_type=mac,
+        basis=basis,
+        working_dtype=working_dtype,
+        softening_kernel=softening_kernel,
+        leaf_capacity=leaf_capacity,
+    )
     return DistributedForwardOperator(
-        config=config,
-        mesh=make_mesh(int(num_devices), devices=chosen),
+        solver=solver,
+        mesh=jax.sharding.Mesh(np.asarray(chosen), (AXIS_NAME,)),
         num_devices=int(num_devices),
         tracer_positions=tracers,
         source_mass=float(source_mass),
@@ -598,6 +627,8 @@ def make_distributed_forward_operator(
         order=int(order),
         leaf_size=int(leaf_size),
         theta=float(theta),
-        mac_type=mac_type,
-        partitioner=str(partitioner),
+        mac_type=mac,
+        working_dtype=str(working_dtype),
+        capacity_headroom=float(capacity_headroom),
+        cross_caps=cross_caps,
     )

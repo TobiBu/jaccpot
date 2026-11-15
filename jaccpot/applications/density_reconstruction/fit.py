@@ -50,8 +50,19 @@ records which was used -- a wall-clock number is not comparable across the two.
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    ContextManager,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import jax
 import jax.numpy as jnp
@@ -313,6 +324,27 @@ def _operator_lacks_leaf_blocks(operator: Any) -> bool:
         return False
 
 
+def _program_context(operator: Any, state: Any) -> ContextManager[Any]:
+    """The context an operator's programs at ``state`` must trace and run under.
+
+    Parameters
+    ----------
+    operator : Any
+        A forward operator.
+    state : Any
+        Its prepared state.
+
+    Returns
+    -------
+    ContextManager[Any]
+        ``operator.program_context(state)`` where the operator declares one (the
+        distributed operator's mesh force installs its capacity plan there, for
+        every trace AND call), else a no-op.
+    """
+    hook = getattr(operator, "program_context", None)
+    return nullcontext() if hook is None else hook(state)
+
+
 def _shard_parameters(params: Any, devices: Sequence[Any]) -> Any:
     """Place a parameter pytree across a 1-D device mesh.
 
@@ -457,15 +489,16 @@ def run_fit(
                 dtype=np.float64,
             )
         )
-        initial_data_misfit = float(
-            data_misfit(
-                operator.evaluate_at_topology(
-                    probe_state, parameterization.to_positions(params)
-                ),
-                observed_device,
-                scale=scale,
+        with _program_context(operator, probe_state):
+            initial_data_misfit = float(
+                data_misfit(
+                    operator.evaluate_at_topology(
+                        probe_state, parameterization.to_positions(params)
+                    ),
+                    observed_device,
+                    scale=scale,
+                )
             )
-        )
         regularization = config.regularization.resolved(initial_data_misfit)
         del probe_state
 
@@ -562,8 +595,9 @@ def run_fit(
 
         assert epoch_step is not None  # set on the first iteration by construction
         t0 = time.perf_counter()
-        (loss_value, components), grads = epoch_step(params)
-        loss_value = jax.block_until_ready(loss_value)
+        with _program_context(operator, state):
+            (loss_value, components), grads = epoch_step(params)
+            loss_value = jax.block_until_ready(loss_value)
         elapsed = time.perf_counter() - t0
         totals["gradient"] += elapsed
         if iteration == 0:

@@ -62,8 +62,9 @@ longer on the evaluation path.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Sequence, Tuple, Union
+from contextlib import nullcontext
+from dataclasses import dataclass, field
+from typing import Any, Callable, ContextManager, Dict, Optional, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -74,11 +75,23 @@ from jaccpot import FastMultipoleMethod
 
 __all__ = [
     "ForwardOperator",
+    "FusedForwardOperator",
+    "FUSED_DEFAULT_MAC",
+    "FusedPreparedTopology",
+    "LANES",
     "MASS_DEPENDENT_MAC_TYPES",
     "assert_masses_frozen_and_equal",
     "assert_no_differentiated_mac",
+    "fused_solver",
     "make_forward_operator",
 ]
+
+#: The two evaluation lanes. ``"radix"``: the general path (``preset="accurate"``
+#: by default), whose prepared state is an ``FMMPreparedState``; section 3's
+#: validation configuration. ``"fused"``: the production fused lane
+#: (``FusedForceProvider``, static cell leaves, the flat walk, the S8 gradient
+#: kernels), which sections 4-7 measure.
+LANES: Tuple[str, ...] = ("radix", "fused")
 
 #: MAC variants whose accept/reject decision depends on masses. Refused when
 #: tracers are present: their criterion would see zero-mass tracers as sources
@@ -398,13 +411,31 @@ class ForwardOperator:
 
         return leaf_blocks_from_state(state, num_sources=self.num_sources)
 
+    def program_context(self: "ForwardOperator", state: Any) -> ContextManager[Any]:
+        """Return the context every trace and call at ``state`` must run under.
+
+        Parameters
+        ----------
+        state : Any
+            Prepared state from :meth:`prepare`; unused here.
+
+        Returns
+        -------
+        ContextManager[Any]
+            A no-op on this operator. The distributed operator installs its
+            mesh force's capacity plan here, which must be active for the trace
+            AND each call of a program; ``run_fit`` enters it around both.
+        """
+        del state
+        return nullcontext()
+
     def record(self: "ForwardOperator") -> Dict[str, Any]:
         """Return the operator configuration for a results JSON.
 
         Returns
         -------
         Dict[str, Any]
-            ``N``, ``M``, softening, order, leaf size, theta and MAC.
+            ``N``, ``M``, softening, order, leaf size, theta, MAC and lane.
         """
         return {
             "N": int(self.num_sources),
@@ -414,10 +445,278 @@ class ForwardOperator:
             "leaf_size": int(self.leaf_size),
             "theta": None if self.theta is None else float(self.theta),
             "mac_type": self.mac_type,
+            "lane": "radix",
             # Named so it can never be confused with the distributed force
             # evaluation, whose wall-clock is not comparable with this one's.
             "sharding_mode": "single_device_or_parameter_sharding",
         }
+
+
+@dataclass(frozen=True)
+class FusedPreparedTopology:
+    """One fused-lane topology epoch: what :meth:`FusedForwardOperator.prepare` returns.
+
+    The fused counterpart of a radix ``FMMPreparedState``: built from concrete
+    positions, captured as a constant while the numeric pipeline is
+    differentiated, rebuilt between epochs.
+
+    Attributes
+    ----------
+    provider : Any
+        The ``FusedForceProvider`` whose template this topology was rebuilt
+        from; its :meth:`differentiable_accelerations` is the differentiated map.
+    topology : Any
+        ``FusedTopology`` from ``rebuild(..., keep_far_list=True)``. Its
+        ``prepared`` is the ``LargeNPreparedState`` the leaf blocks and the
+        switch diagnostics read.
+    plan : Any
+        The ``LargeNGradPlan`` of ``topology``'s lists.
+    bounds : Tuple[np.ndarray, np.ndarray]
+        The Morton box the topology was cut in.
+    """
+
+    provider: Any
+    topology: Any
+    plan: Any
+    bounds: Tuple[np.ndarray, np.ndarray]
+
+    @property
+    def prepared(self: "FusedPreparedTopology") -> Any:
+        """Return the ``LargeNPreparedState`` inside the topology.
+
+        Returns
+        -------
+        Any
+            ``topology.prepared``.
+        """
+        return self.topology.prepared
+
+
+@dataclass(frozen=True)
+class FusedForwardOperator(ForwardOperator):
+    """:class:`ForwardOperator` on the production fused lane.
+
+    The same surface and the same invariants: zero-mass tracers appended, the
+    tracer block sliced, the topology frozen per epoch. What changes is the
+    evaluation. :meth:`prepare` rebuilds a ``FusedForceProvider`` template's
+    topology at the epoch's positions (static cell leaves, the flat walk, the far
+    list kept) and checks the lists are ones the S8 reverses can read;
+    :meth:`evaluate_at_topology` is the provider's ``differentiable_accelerations``
+    on that topology at the live positions -- the production kernels, each with
+    its reverse.
+
+    Zero-mass tracers on this lane were checked before it was adopted: a probe
+    with half the tracers inside the source ball and half in a tracer-only
+    cluster outside it (so some cells hold no mass) gave finite fields and
+    gradients, within 7.6e-4 / 6.2e-4 relative L2 of the direct sum with the same
+    softening kernel (N=1024, p4, theta 0.6, CPU fused route, fp64).
+
+    Attributes
+    ----------
+    working_dtype : str
+        The lane's working precision, ``"float64"`` or ``"float32"``.
+    softening_kernel : Optional[str]
+        Pair softening kernel, or ``None`` for jaccpot's default (``ferrers3``,
+        the same as the radix lane's, so ground truth generated on either lane
+        uses the same kernel as a fit on this one).
+    leaf_capacity : Union[int, str]
+        ``TreeConfig.leaf_capacity`` of the cell tree; ``"auto"`` sizes it at the
+        first prepare.
+    """
+
+    working_dtype: str = "float64"
+    softening_kernel: Optional[str] = None
+    leaf_capacity: Union[int, str] = "auto"
+    _cache: Dict[str, Any] = field(
+        default_factory=dict, compare=False, repr=False, hash=False
+    )
+
+    def _cubic(self: "FusedForwardOperator") -> bool:
+        engine = getattr(self.fmm, "_impl", self.fmm)
+        return bool(getattr(engine, "_tree_cubic_bounds", True))
+
+    def _bounds(
+        self: "FusedForwardOperator", combined: np.ndarray
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        from jaccpot.distributed.fused import host_mesh_bounds
+
+        lo, hi = host_mesh_bounds([combined], [combined.shape[0]], cubic=self._cubic())
+        return jnp.asarray(lo), jnp.asarray(hi)
+
+    def _provider(
+        self: "FusedForwardOperator",
+        combined: np.ndarray,
+        bounds: Tuple[jnp.ndarray, jnp.ndarray],
+        *,
+        fresh: bool,
+    ) -> Tuple[Any, Callable[..., Any]]:
+        """Return the cached provider and its jitted rebuild, or make them here.
+
+        The provider's template (cell-leaf capacity, walk caps, level plan) is
+        sized at the positions it is prepared at, so it is made once and reused
+        by every epoch; ``fresh`` re-prepares it at ``combined`` when an epoch's
+        rebuild outgrew it.
+
+        Parameters
+        ----------
+        combined : np.ndarray
+            ``(N + M, 3)`` source and tracer positions to prepare at.
+        bounds : Tuple[jnp.ndarray, jnp.ndarray]
+            The Morton box for the prepare.
+        fresh : bool
+            Re-prepare even when a provider is cached.
+
+        Returns
+        -------
+        Tuple[Any, Callable[..., Any]]
+            The ``FusedForceProvider`` and the jitted
+            ``rebuild(x, m, lo, hi) -> (topology, plan, ok)``.
+        """
+        if fresh or "provider" not in self._cache:
+            from jaccpot import FusedForceProvider
+
+            provider, _ = FusedForceProvider.prepare(
+                self.fmm,
+                jnp.asarray(combined),
+                self.masses(),
+                leaf_size=self.leaf_size,
+                max_order=self.order,
+                theta=self.theta,
+                bounds=bounds,
+                differentiable=True,
+            )
+
+            def rebuild(x: Any, m: Any, lo: Any, hi: Any) -> Tuple[Any, ...]:
+                topology = provider.rebuild(x, m, bounds=(lo, hi), keep_far_list=True)
+                plan, symmetric = provider.grad_plan(topology)
+                ok = jnp.asarray(symmetric)
+                if topology.refresh_ok is not None:
+                    ok = ok & topology.refresh_ok
+                if topology.tree_overflow is not None:
+                    ok = ok & ~topology.tree_overflow
+                return topology, plan, ok
+
+            self._cache["provider"] = provider
+            self._cache["rebuild"] = jax.jit(rebuild)
+            self._cache["prepares"] = int(self._cache.get("prepares", 0)) + 1
+        return self._cache["provider"], self._cache["rebuild"]
+
+    def prepare(self: "FusedForwardOperator", source_positions: Any) -> Any:
+        """Rebuild the fused topology at ``source_positions`` and freeze it.
+
+        Host-side and not differentiated, by contract.
+
+        Parameters
+        ----------
+        source_positions : Any
+            ``(N, 3)`` concrete positions.
+
+        Returns
+        -------
+        Any
+            A :class:`FusedPreparedTopology`.
+
+        Raises
+        ------
+        RuntimeError
+            If the rebuild overflows the template or yields lists the gradient's
+            reverses cannot read, even after the template was re-prepared at
+            these positions. A gradient on such lists is wrong (the provider's own
+            ``differentiable_step`` makes it NaN), so it is refused here.
+        """
+        combined = np.asarray(
+            self.combined_positions(np.asarray(source_positions)), dtype=np.float64
+        )
+        bounds = self._bounds(combined)
+        for fresh in (False, True):
+            provider, rebuild = self._provider(combined, bounds, fresh=fresh)
+            topology, plan, ok = rebuild(
+                jnp.asarray(combined), self.masses(), bounds[0], bounds[1]
+            )
+            if bool(ok):
+                return FusedPreparedTopology(
+                    provider=provider,
+                    topology=topology,
+                    plan=plan,
+                    bounds=(np.asarray(bounds[0]), np.asarray(bounds[1])),
+                )
+        raise RuntimeError(
+            "the fused lane's rebuild overflowed or returned lists the gradient "
+            "cannot read (asymmetric, or a saturated far list), even with the "
+            "template re-prepared at these positions"
+        )
+
+    def evaluate_at_topology(
+        self: "FusedForwardOperator", state: Any, source_positions: ArrayLike
+    ) -> jnp.ndarray:
+        """Accelerations at the tracers, at the frozen fused topology ``state``.
+
+        Parameters
+        ----------
+        state : Any
+            A :class:`FusedPreparedTopology` from :meth:`prepare`.
+        source_positions : ArrayLike
+            ``(N, 3)`` source positions, differentiated. NumPy or JAX.
+
+        Returns
+        -------
+        jnp.ndarray
+            ``(M, 3)`` accelerations at the tracer positions.
+        """
+        accelerations = state.provider.differentiable_accelerations(
+            state.topology,
+            self.combined_positions(source_positions),
+            self.masses(),
+            plan=state.plan,
+        )
+        return accelerations[self.num_sources :]
+
+    def leaf_blocks(self: "FusedForwardOperator", state: Any) -> Any:
+        """Return the frozen cell-leaf partition the regularisers are built on.
+
+        Parameters
+        ----------
+        state : Any
+            A :class:`FusedPreparedTopology`.
+
+        Returns
+        -------
+        Any
+            A :class:`~jaccpot.applications.density_reconstruction.loss.LeafBlocks`
+            from the topology's ``LargeNPreparedState``, which carries the same
+            radix ``tree.topology`` and leaf CSR fields the radix state does.
+            Unused cell-leaf slots span no particles and come out empty.
+        """
+        from jaccpot.applications.density_reconstruction.loss import (
+            leaf_blocks_from_state,
+        )
+
+        return leaf_blocks_from_state(state.prepared, num_sources=self.num_sources)
+
+    def record(self: "FusedForwardOperator") -> Dict[str, Any]:
+        """Return the operator configuration for a results JSON.
+
+        Returns
+        -------
+        Dict[str, Any]
+            The radix record's fields, with ``lane="fused"``, the working
+            precision, the softening kernel actually in use, the leaf capacity
+            and how many times the template was prepared.
+        """
+        engine = getattr(self.fmm, "_impl", self.fmm)
+        out = super().record()
+        out.update(
+            {
+                "lane": "fused",
+                "working_dtype": self.working_dtype,
+                "softening_kernel": getattr(
+                    engine, "softening_kernel", self.softening_kernel
+                ),
+                "leaf_capacity": self.leaf_capacity,
+                "template_prepares": int(self._cache.get("prepares", 0)),
+            }
+        )
+        return out
 
 
 def make_forward_operator(
@@ -433,6 +732,10 @@ def make_forward_operator(
     preset: str = "accurate",
     basis: str = "real",
     differentiate_mac: bool = False,
+    lane: str = "radix",
+    working_dtype: str = "float64",
+    softening_kernel: Optional[str] = None,
+    leaf_capacity: Union[int, str] = "auto",
 ) -> ForwardOperator:
     """Configure the observation operator and enforce its invariants.
 
@@ -455,22 +758,33 @@ def make_forward_operator(
     mac_type : Optional[str]
         Multipole acceptance criterion. Mass-dependent variants are refused.
     preset : str
-        jaccpot preset; ``"accurate"`` by default.
+        jaccpot preset of the radix lane; ``"accurate"`` by default. Ignored on
+        the fused lane, which is ``preset="large_n_gpu"`` with cell leaves.
     basis : str
         Expansion basis; ``"real"``, the only basis since the 2026-10 cleanup (``"solidfmm"`` is an alias).
     differentiate_mac : bool
         Must be ``False``; see :func:`assert_no_differentiated_mac`.
+    lane : str
+        ``"radix"`` (default) or ``"fused"``; see :data:`LANES`.
+    working_dtype : str
+        Fused lane only: ``"float64"`` (default) or ``"float32"``.
+    softening_kernel : Optional[str]
+        Fused lane only: pair softening kernel, ``None`` for the solver's.
+    leaf_capacity : Union[int, str]
+        Fused lane only: the cell tree's leaf capacity, ``"auto"`` by default.
 
     Returns
     -------
     ForwardOperator
-        The configured operator.
+        The configured operator: a :class:`FusedForwardOperator` on the fused
+        lane.
 
     Raises
     ------
     ValueError
-        If ``tracer_positions`` is not ``(M, 3)``. The MAC checks raise from
-        :func:`assert_no_differentiated_mac` and are documented there.
+        If ``tracer_positions`` is not ``(M, 3)``, or ``lane`` or
+        ``working_dtype`` is not one of the known values. The MAC checks raise
+        from :func:`assert_no_differentiated_mac` and are documented there.
     """
     assert_no_differentiated_mac(
         mac_type=mac_type, has_tracers=True, differentiate_mac=differentiate_mac
@@ -478,6 +792,23 @@ def make_forward_operator(
     tracers = np.asarray(tracer_positions, dtype=np.float64)
     if tracers.ndim != 2 or tracers.shape[1] != 3:
         raise ValueError(f"tracer_positions must be (M, 3), got {tracers.shape}")
+    if lane not in LANES:
+        raise ValueError(f"lane must be one of {LANES}, got {lane!r}")
+    if lane == "fused":
+        return _make_fused_forward_operator(
+            tracers=tracers,
+            source_mass=source_mass,
+            num_sources=num_sources,
+            softening=softening,
+            order=order,
+            theta=theta,
+            leaf_size=leaf_size,
+            mac_type=mac_type,
+            basis=basis,
+            working_dtype=working_dtype,
+            softening_kernel=softening_kernel,
+            leaf_capacity=leaf_capacity,
+        )
     kwargs: Dict[str, Any] = dict(
         preset=preset, basis=basis, softening=float(softening)
     )
@@ -498,4 +829,183 @@ def make_forward_operator(
         leaf_size=int(leaf_size),
         theta=theta,
         mac_type=mac_type,
+    )
+
+
+#: The MAC the fused operator uses when none is given: the geometric Dehnen
+#: test at ``theta``. The fused lane's production default, ``"dehnen_error"``,
+#: is mass-dependent and refused with zero-mass tracers.
+FUSED_DEFAULT_MAC: str = "dehnen"
+
+
+def fused_solver(
+    *,
+    softening: float,
+    order: int,
+    theta: Optional[float],
+    leaf_size: int,
+    mac_type: str,
+    basis: str = "real",
+    working_dtype: str = "float64",
+    softening_kernel: Optional[str] = None,
+    leaf_capacity: Union[int, str] = "auto",
+) -> FastMultipoleMethod:
+    """The solver the fused operators (single card and mesh) evaluate with.
+
+    ``preset="large_n_gpu"`` on a static radix tree of Morton cell leaves -- the
+    configuration the production fused lane runs and the WP-G gradient gates
+    test -- with the CPU route switched on. That route has no effect on a GPU
+    backend; on a CPU backend it runs the lane instead of falling back to the
+    general path, with the Pallas kernels interpreted, so a test on CPU checks
+    the same programs and the same near-field layout a card runs (slowly).
+
+    Parameters
+    ----------
+    softening : float
+        Softening length.
+    order : int
+        Expansion order (``fixed_order``).
+    theta : Optional[float]
+        Opening angle, or ``None`` for the preset's.
+    leaf_size : int
+        Particles per cell leaf at most (``TreeConfig.leaf_target``).
+    mac_type : str
+        Multipole acceptance criterion.
+    basis : str
+        Expansion basis.
+    working_dtype : str
+        ``"float64"`` or ``"float32"``.
+    softening_kernel : Optional[str]
+        Pair softening kernel, or ``None`` for the solver's.
+    leaf_capacity : Union[int, str]
+        ``TreeConfig.leaf_capacity``.
+
+    Returns
+    -------
+    FastMultipoleMethod
+        The configured solver.
+
+    Raises
+    ------
+    ValueError
+        If ``working_dtype`` is not ``"float64"`` or ``"float32"``.
+    """
+    from jaccpot.config import (
+        FMMAdvancedConfig,
+        NearFieldConfig,
+        RuntimePolicyConfig,
+        TreeConfig,
+    )
+
+    dtypes = {"float64": jnp.float64, "float32": jnp.float32}
+    if working_dtype not in dtypes:
+        raise ValueError(
+            f"working_dtype must be one of {sorted(dtypes)}, got {working_dtype!r}"
+        )
+    kwargs: Dict[str, Any] = dict(
+        preset="large_n_gpu",
+        basis=basis,
+        G=1.0,
+        softening=float(softening),
+        working_dtype=dtypes[working_dtype],
+        fixed_order=int(order),
+        # The production setting, and on the CPU route the one that takes the
+        # card's near-field layout: the CSR lane (kernels interpreted), with the
+        # materialised per-particle "pairs" payload declined. Without it, small N
+        # on CPU selects that payload, whose layout has no reverse
+        # (``prepare_large_n_grad_plan`` refuses it).
+        use_pallas=True,
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(
+                mode="static_radix",
+                leaf_target=int(leaf_size),
+                leaf_partition="cells",
+                leaf_capacity=leaf_capacity,
+            ),
+            nearfield=NearFieldConfig(mode="auto"),
+            mac_type=mac_type,
+            runtime=RuntimePolicyConfig(cpu_fused_lane=True),
+        ),
+    )
+    if theta is not None:
+        kwargs["theta"] = float(theta)
+    if softening_kernel is not None:
+        kwargs["softening_kernel"] = softening_kernel
+    return FastMultipoleMethod(**kwargs)
+
+
+def _make_fused_forward_operator(
+    *,
+    tracers: np.ndarray,
+    source_mass: float,
+    num_sources: int,
+    softening: float,
+    order: int,
+    theta: Optional[float],
+    leaf_size: int,
+    mac_type: Optional[str],
+    basis: str,
+    working_dtype: str,
+    softening_kernel: Optional[str],
+    leaf_capacity: Union[int, str],
+) -> FusedForwardOperator:
+    """Build :class:`FusedForwardOperator`; see :func:`make_forward_operator`.
+
+    Parameters
+    ----------
+    tracers : np.ndarray
+        ``(M, 3)`` validated tracer positions.
+    source_mass : float
+        The one mass every source carries.
+    num_sources : int
+        ``N``.
+    softening : float
+        Softening length.
+    order : int
+        Expansion order.
+    theta : Optional[float]
+        Opening angle, or ``None`` for the preset's.
+    leaf_size : int
+        Cell-leaf size.
+    mac_type : Optional[str]
+        MAC, or ``None`` for :data:`FUSED_DEFAULT_MAC`.
+    basis : str
+        Expansion basis.
+    working_dtype : str
+        Working precision.
+    softening_kernel : Optional[str]
+        Pair softening kernel.
+    leaf_capacity : Union[int, str]
+        Cell-leaf capacity.
+
+    Returns
+    -------
+    FusedForwardOperator
+        The configured operator.
+    """
+    mac = FUSED_DEFAULT_MAC if mac_type is None else str(mac_type)
+    fmm = fused_solver(
+        softening=softening,
+        order=order,
+        theta=theta,
+        leaf_size=leaf_size,
+        mac_type=mac,
+        basis=basis,
+        working_dtype=working_dtype,
+        softening_kernel=softening_kernel,
+        leaf_capacity=leaf_capacity,
+    )
+    return FusedForwardOperator(
+        fmm=fmm,
+        tracer_positions=tracers,
+        source_mass=float(source_mass),
+        num_sources=int(num_sources),
+        softening=float(softening),
+        order=int(order),
+        leaf_size=int(leaf_size),
+        theta=theta,
+        mac_type=mac,
+        working_dtype=str(working_dtype),
+        softening_kernel=softening_kernel,
+        leaf_capacity=leaf_capacity,
     )

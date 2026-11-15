@@ -232,6 +232,94 @@ def _combine(left: np.ndarray, right: np.ndarray) -> np.ndarray:
         return _splitmix64(left ^ _splitmix64(right + _STREAM_SALT))
 
 
+def _as_prepared(state: Any) -> Any:
+    """Return the prepared state the structure is read from.
+
+    Parameters
+    ----------
+    state : Any
+        A radix ``FMMPreparedState``, or a fused epoch
+        (:class:`~jaccpot.applications.density_reconstruction.forward.FusedPreparedTopology`),
+        whose ``LargeNPreparedState`` carries the same radix ``tree.topology`` and
+        leaf CSR fields.
+
+    Returns
+    -------
+    Any
+        The state itself, or the fused epoch's ``LargeNPreparedState``.
+    """
+    from jaccpot.applications.density_reconstruction.forward import (
+        FusedPreparedTopology,
+    )
+
+    return state.prepared if isinstance(state, FusedPreparedTopology) else state
+
+
+def _near_lists(near: Any) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The leaf neighbour CSR, with any capacity padding cut off.
+
+    Parameters
+    ----------
+    near : Any
+        A ``NodeNeighborList``. The fused lane pads ``neighbors`` to a fixed
+        capacity past ``offsets[-1]``; the radix lane does not, so the cut is a
+        no-op there.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray, np.ndarray]
+        ``(offsets, neighbors, counts)`` as int64, ``neighbors`` exactly
+        ``offsets[-1]`` long.
+    """
+    offsets = _host(near.offsets).astype(np.int64)
+    neighbors = _host(near.neighbors).astype(np.int64)
+    counts = _host(near.counts).astype(np.int64)
+    live = int(offsets[-1]) if offsets.size else 0
+    return offsets, neighbors[:live], counts
+
+
+def _far_lists(state: Any) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """The far node-pair list as live ``(sources, targets, offsets)``.
+
+    Parameters
+    ----------
+    state : Any
+        A prepared state. The radix lane keeps ``interactions`` (one target per
+        pair, with row offsets); the fused lane keeps ``compact_far_pairs``, a
+        target-sorted CSR padded past ``far_pair_count`` whose ``targets`` field
+        holds the row offsets.
+
+    Returns
+    -------
+    Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]
+        ``None`` when the state kept no far list.
+    """
+    far = getattr(state, "interactions", None)
+    if far is not None:
+        return (
+            _host(far.sources).astype(np.int64),
+            _host(far.targets).astype(np.int64),
+            _host(far.offsets).astype(np.int64),
+        )
+    compact = getattr(state, "compact_far_pairs", None)
+    if compact is None:
+        return None
+    from jaccpot.runtime._interaction_cache import (
+        TargetSortedFarPairs,
+        far_pair_targets,
+    )
+
+    live = int(_host(compact.far_pair_count))
+    sources = _host(compact.sources).astype(np.int64)[:live]
+    targets = _host(far_pair_targets(compact)).astype(np.int64)[:live]
+    offsets = (
+        _host(compact.targets).astype(np.int64)
+        if isinstance(compact, TargetSortedFarPairs)
+        else np.zeros((0,), dtype=np.int64)
+    )
+    return sources, targets, offsets
+
+
 def _expansion_order(state: Any) -> int:
     """Recover the expansion order from a prepared state's multipole width.
 
@@ -249,6 +337,9 @@ def _expansion_order(state: Any) -> int:
         so it enters the fingerprint only to stop two runs at different orders
         comparing equal.
     """
+    local_order = getattr(state, "local_order", None)
+    if local_order is not None:
+        return int(local_order)
     try:
         width = int(_host(state.upward.multipoles.multipoles).shape[-1])
     except Exception:  # pragma: no cover - backend without packed multipoles
@@ -275,10 +366,12 @@ def fingerprint_prepared_state(state: Any) -> TopologyFingerprint:
         unchanged. Morton codes are deliberately not included; see the module
         docstring.
     """
+    state = _as_prepared(state)
     tree = state.tree
     topo = tree.topology
     near = state.neighbor_list
-    far = state.interactions
+    far = _far_lists(state)
+    near_offsets, near_neighbors, near_counts = _near_lists(near)
     empty = np.zeros((0,), dtype=np.int64)
     return TopologyFingerprint(
         num_particles=int(tree.num_particles),
@@ -305,13 +398,11 @@ def fingerprint_prepared_state(state: Any) -> TopologyFingerprint:
         ),
         node_ranges=digest_arrays(_host(topo.node_ranges)),
         far_pairs=digest_arrays(
-            empty if far is None else _host(far.sources),
-            empty if far is None else _host(far.targets),
-            empty if far is None else _host(far.offsets),
+            empty if far is None else far[0],
+            empty if far is None else far[1],
+            empty if far is None else far[2],
         ),
-        near_pairs=digest_arrays(
-            _host(near.offsets), _host(near.neighbors), _host(near.counts)
-        ),
+        near_pairs=digest_arrays(near_offsets, near_neighbors, near_counts),
     )
 
 
@@ -568,10 +659,11 @@ def radix_structure(
         or pairs; the sampled near-field sets add O(sample x partners), which
         does not grow with ``N``.
     """
+    state = _as_prepared(state)
     tree = state.tree
     topo = tree.topology
     near = state.neighbor_list
-    far = state.interactions
+    far = _far_lists(state)
 
     particle_indices = _host(topo.particle_indices).astype(np.int64)
     num_particles = int(particle_indices.size)
@@ -612,14 +704,15 @@ def radix_structure(
 
     # Direct-summation reach: every source in a neighbouring leaf, plus the
     # particle's own leaf minus itself.
-    offsets = _host(near.offsets).astype(np.int64)
-    neighbors = _host(near.neighbors).astype(np.int64)
-    counts = _host(near.counts).astype(np.int64)
+    offsets, neighbors, counts = _near_lists(near)
     size_of_node = np.zeros(int(node_ranges.shape[0]), dtype=np.int64)
     size_of_node[leaf_nodes] = leaf_sizes
     if neighbors.size:
+        # Clipped: reduceat refuses an index equal to the length, which the
+        # fused lane's unused cell-leaf slots (empty rows at the end of the CSR)
+        # carry. Their counts are zero, so the masked sum below drops them.
         per_leaf_neighbour_total = np.add.reduceat(
-            size_of_node[neighbors], offsets[:-1]
+            size_of_node[neighbors], np.minimum(offsets[:-1], neighbors.size - 1)
         )
         per_leaf_neighbour_total = np.where(counts > 0, per_leaf_neighbour_total, 0)
     else:
@@ -638,10 +731,7 @@ def radix_structure(
     if far is None:
         far_pair_keys = np.zeros((0,), dtype=np.uint64)
     else:
-        far_pair_keys = _canonical_pair_keys(
-            node_keys[_host(far.sources).astype(np.int64)],
-            node_keys[_host(far.targets).astype(np.int64)],
-        )
+        far_pair_keys = _canonical_pair_keys(node_keys[far[0]], node_keys[far[1]])
 
     # Evenly spaced ids rather than a random draw: the sample must be the SAME
     # particles at every rebuild for the sets to be comparable, and an id-based
