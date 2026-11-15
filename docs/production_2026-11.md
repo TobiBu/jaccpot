@@ -1757,7 +1757,7 @@ through exactly this substitution (a script that patches the provider's `plan_ta
   walks, both far forms, the back-reaction).
 - *GPU at 1e8 + 1e5* (gate 4): HH2A_GPU_1E8
 - *GPU at 1e6 + 1e4 through the nornax scheme* (session 1's gate config, 100 slow steps): HH2A_GPU_1E6
-- *Identity:* `w6-main-cpu` (main 122b2228) vs `hh2a-tip-cpu`: HH2A_IDENTITY
+- *Identity:* `w6-main-cpu` (main 122b2228) vs `hh2a-tip-cpu`: **PASS 36/36** (recorded at 4daea585; later commits change docstrings and docs only)
 - *CI:* `integration-strict-targets` as CI runs it (coverage, `-n 2`, typecheck 0): 26 passed / 2 skipped in 8.7 min
   (cap 25), peak RSS 3.45 GB; top-level `tests/unit` guards with typecheck=1 pass; `test_shards.py check` rc 0.
 
