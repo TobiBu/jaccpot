@@ -555,3 +555,32 @@ def test_the_back_reactions_inner_overflow_is_reported(back_lane):
     assert int(np.asarray(field.stats)[2]) > plan.inner_capacity
     with pytest.raises(ValueError, match="mp_order"):
         plan_back_reaction(prov, topo, pts, mp_order=ORDER + 1)
+
+
+def test_planning_from_sources_rebuilds_in_program(lane):
+    """``TargetSources`` in place of a topology: each planning round rebuilds the
+    sources' topology inside its program (no eager state needs to stay resident:
+    at 1e8 it did not leave room on an A100), and sizes the same plan."""
+    from jaccpot.runtime.target_points import (
+        TargetSources,
+        bootstrap_target_force_scale,
+        plan_target_points_from_sources,
+    )
+
+    prov = lane["prov"]
+    fb_src = (
+        prov.accelerations(lane["topo"], force_scale=True)[1]
+        if prov.scale_carry
+        else None
+    )
+    plan = plan_target_points_from_sources(
+        prov, lane["xf"], lane["mf"], lane["pts"], source_force_scale=fb_src
+    )
+    assert plan == lane["plan"]
+    if lane["fb"] is not None:
+        fb, _ = bootstrap_target_force_scale(
+            prov, TargetSources(lane["xf"], lane["mf"], fb_src), lane["pts"], plan=plan
+        )
+        np.testing.assert_allclose(
+            np.asarray(fb), np.asarray(lane["fb"]), rtol=1e-6, atol=0
+        )

@@ -99,9 +99,11 @@ from jaxtyping import Array
 __all__ = [
     "TargetField",
     "TargetPlan",
+    "TargetSources",
     "bootstrap_target_force_scale",
     "evaluate_target_points",
     "plan_target_points",
+    "plan_target_points_from_sources",
     "target_mac_type",
 ]
 
@@ -1750,6 +1752,31 @@ def _evaluate(
     )
 
 
+class TargetSources(NamedTuple):
+    """Sources to rebuild a topology from INSIDE a planning program.
+
+    Accepted wherever :func:`plan_target_points` and
+    :func:`bootstrap_target_force_scale` take a topology: each planning round
+    then rebuilds (``provider.rebuild``), as a step does, so no eager prepared
+    state has to stay resident beside the target program (at 1e8 sources an
+    eager topology is ~25 GB of an A100's 40).
+
+    Attributes
+    ----------
+    positions : Array
+        ``[N, 3]`` source positions.
+    masses : Array
+        ``[N]`` source masses.
+    force_scale : Optional[Array]
+        ``[N]`` the sources' f_b for a ``dehnen_error`` rebuild (``None``
+        otherwise).
+    """
+
+    positions: Array
+    masses: Array
+    force_scale: Optional[Array]
+
+
 def _jitted(provider: Any, plan: TargetPlan, **static: Any) -> Any:
     """``evaluate_target_points`` as one compiled program (the eager planner's).
 
@@ -1774,6 +1801,10 @@ def _jitted(provider: Any, plan: TargetPlan, **static: Any) -> Any:
         force_scale: Optional[Array],
         point_mask: Optional[Array] = None,
     ) -> TargetField:
+        if isinstance(topology, TargetSources):
+            topology = provider.rebuild(
+                topology.positions, topology.masses, force_scale=topology.force_scale
+            )
         return evaluate_target_points(
             provider,
             topology,
@@ -1854,7 +1885,8 @@ def plan_target_points(
     provider : Any
         The provider.
     topology : Any
-        A topology at the sources' current positions.
+        A topology at the sources' current positions, or :class:`TargetSources`
+        (each round rebuilds it in-program).
     points : Array
         ``[M, 3]`` the points now.
     group_size : int
@@ -1928,3 +1960,50 @@ def plan_target_points(
         f"{np.asarray(field.needs).tolist()}, stats "
         f"{np.asarray(field.stats).tolist()})"
     )
+
+
+def plan_target_points_from_sources(
+    provider: Any,
+    positions: Array,
+    masses: Array,
+    points: Array,
+    *,
+    source_force_scale: Optional[Array] = None,
+    **kwargs: Any,
+) -> TargetPlan:
+    """:func:`plan_target_points` without a resident topology.
+
+    Each planning round's program rebuilds the sources' topology itself (as
+    ``step`` / ``step_with_targets`` do), so the caller can drop an eager
+    prepare's state first: the galaxy -> stars plan at 1e8 sources ran out of
+    memory on an A100 next to the eager topology (HH2a).
+
+    Parameters
+    ----------
+    provider : Any
+        The provider.
+    positions : Array
+        ``[N, 3]`` the sources now.
+    masses : Array
+        ``[N]`` their masses.
+    points : Array
+        ``[M, 3]`` the points now.
+    source_force_scale : Optional[Array]
+        ``[N]`` the sources' f_b (a ``dehnen_error`` provider's rebuild needs
+        it: ``accelerations(topology, force_scale=True)``).
+    **kwargs : Any
+        :func:`plan_target_points`'s keywords.
+
+    Returns
+    -------
+    TargetPlan
+        As :func:`plan_target_points`.
+    """
+    sources = TargetSources(
+        positions=jnp.asarray(positions),
+        masses=jnp.asarray(masses),
+        force_scale=(
+            None if source_force_scale is None else jnp.asarray(source_force_scale)
+        ),
+    )
+    return plan_target_points(provider, sources, points, **kwargs)
