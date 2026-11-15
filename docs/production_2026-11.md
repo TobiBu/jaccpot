@@ -1648,7 +1648,9 @@ re-ran the sources' upward sweep through `engine.prepare_upward_sweep`, which co
 - the source multipoles carry no sentinel row any more (`jnp.concatenate` copied the whole `[nodes, 49]` array,
   ~2.4 GB at 1.2e7 nodes); padding pairs read them clipped and are masked.
 - Compiled temporaries of the tables program at 2e5 sources on the CPU route: 789 -> 693 MiB (there the jnp M2M
-  dominates; on the GPU P2M, M2M and the COM radii are Pallas kernels). HH2A_MEM_STAGES
+  dominates; on the GPU P2M, M2M and the COM radii are Pallas kernels). GPU compile-only stages at 2e7 sources (6.6e6 nodes, after an eager prepare that holds
+  4.96 GB): mass moments 105 MB of temporaries, the upward sweep 192 MB plus its 1.30 GB of multipoles, the COM radii
+  375 MB, the whole geometric bootstrap evaluation 1.70 GB.
 
 **1. The frontier walk** (`TargetPlan.walk="frontier"`, the default; `"dense"` is kept for comparisons). Each group
 descends the source tree from the root, breadth first, through ONE ring queue of pending (group, node) pairs
@@ -1812,7 +1814,12 @@ walk; `needs` = far / near pairs:
 - *Moving points recompile nothing:* one trace for three point sets in every row above and in the tests (both
   walks, both far forms, the back-reaction).
 - *GPU at 1e8 + 1e5* (gate 4): HH2A_GPU_1E8
-- *GPU at 1e6 + 1e4 through the nornax scheme* (session 1's gate config, 100 slow steps): HH2A_GPU_1E6
+- *GPU at 1e6 + 1e4 through the nornax scheme* (session 1's gate config, 100 slow steps): card 6, 100 slow steps (dt 1e-3, n_sub 16; the galaxy preset under `dehnen_error`,
+  leaf 64, p6; the cluster eps_c = r_c / 20), through the two-part `prepare` above: verdicts ok in every segment,
+  dE/E 1.94e-9 / 7.09e-9 / 8.98e-9 / -1.64e-9 per segment (session 1: 1.94e-9 / 7.09e-9 / 8.99e-9 / -1.65e-9),
+  |dP| <= 1.3e-10, the cluster's internal energy within ±0.61 % of W_cc (session 1 the same), device peak **1.01 GiB**
+  (session 1's). Plans: stars far 123,136 / near 3,840 (frontier, queue 20,480); the back-reaction's inner
+  `target_points` holds 1,024 of the 1e6 galaxy points (`hh2a/runs/gpu_functional_1e6_1e4.json`).
 - *Identity:* `w6-main-cpu` (main 122b2228) vs `hh2a-tip-cpu`: **PASS 36/36** (`hh2a-tip-cpu` at 4daea585, and `hh2a-tip2-cpu` at 991a9f1b after the `prepare_real_upward_sweep(centers=)` change)
 - *CI:* `integration-strict-targets` as CI runs it (coverage, `-n 2`, typecheck 0): 26 passed / 2 skipped in 8.7 min
   (cap 25), peak RSS 3.45 GB; top-level `tests/unit` guards with typecheck=1 pass; `test_shards.py check` rc 0.
@@ -1822,7 +1829,8 @@ walk; `needs` = far / near pairs:
 node: `step_<mac>_1e8` (the base), `targets_<mac>_<far>_1e8_{1e4,1e5,1e6}`, `back_<far>_1e8_1e5`,
 `backfull_1e7_1e5`; the summary prints each target row's cost over the step and the device peak. Submit with the
 bundle (`bash bench/slurm/h0/submit_all.sh --only hh`, or the default set). CPU smoke: `SMOKE=1 ... --only hh`
-HH2A_SMOKE.
+passes on the development machine (preflight entry 295 s, the job's 5 smoke rows 473 s;
+  `SMOKE=1 H0_LOCAL_ENV=<env> H0_PREFLIGHT_ONLY=hh bash bench/slurm/h0/submit_all.sh --only hh`).
 
 **Left on #302 (stays open):** gradients through the target walk; `dehnen_theta`; `mac_force_scale_floor` on the
 points; the solver facade's `target_points=` (a frozen-surface change, not cheap: not done); the mesh. Done now: the
