@@ -1826,10 +1826,48 @@ walk; `needs` = far / near pairs:
 
   The dense walk gave the same needs and the same rel-L2 to 3 digits in every row where it ran (1e5 x 1e3 and 1e6 x
   1e4, both directions). The galaxy -> stars errors are at the criterion's tolerance for these settings; the
-  back-reaction direction's are far below it. HH2A_SCALE_MORE
+  back-reaction direction's are far below it. 
 - *Moving points recompile nothing:* one trace for three point sets in every row above and in the tests (both
   walks, both far forms, the back-reaction).
-- *GPU at 1e8 + 1e5* (gate 4): HH2A_GPU_1E8
+- *GPU at 1e8 + 1e5* (gate 4): the lead's probe script with the two-part `prepare` (`hh2a/scripts/probe_1e8_hh2a.py`; Hernquist galaxy 1e8 under
+  `dehnen_error` 1e-4, leaf 64, p6, ferrers3 eps 0.005; Plummer cluster 1e5, geometric θ 0.5; one A100, contended:
+  walls are not timings). Five attempts, each fixing what the previous one found:
+
+  | attempt | where it stopped | fix |
+  |---|---|---|
+  | lead, session 1's code | galaxy -> stars plan, 7.56 GiB | — |
+  | 1 (frontier walk) | same place, 7.71 GiB | fix 0. (no mass-moment passes, no multipole copy) |
+  | 2 | same place, 4.68 GiB (the p6 source multipoles next to the ~25 GB eager topology) | `TargetSources` planning |
+  | 3 | the back-reaction plan did not converge in 8 rounds (queue doubled from 8192 toward 1.25e6) | queue x8 per re-plan, 12 rounds |
+  | 4, 5 | both directions evaluated; then nornax's `initial_state` (one program: the galaxy step + both directions + the Hermite start) | below |
+
+  Attempt 5 (21:16-21:35, card 7), per stage:
+  - `prepare` (the eager galaxy prepare, both plans, the cluster prepare): device peak **27.05 GB** (the eager
+    prepare's own; 5.6 GB in use after it);
+  - galaxy -> stars (`step_with_targets` at 1e8 x 1e5): ok, needs far 929,318 / near 39,985, queue peak 65,606,
+    **1,935,481 MAC tests**; the device peak did not move;
+  - back-reaction over all 1e8 galaxy points: ok, 15,029 inner points (the walk), needs far 354,415 / near 3,662,745
+    (galaxy points inside the galaxy softening's reach of the cluster core take its stars directly: the kernel is
+    not Newtonian there), queue peak 1,247,250, 8,034,076 MAC tests; the device peak did not move;
+  - accuracy against an fp64 direct sum on the device: galaxy -> stars rel-L2 **2.80e-4** (p999 4.46e-4; 512 stars
+    against all 1e8 galaxy particles), back-reaction rel-L2 **3.15e-6** (p999 6.41e-6; 8,000 galaxy points, half of
+    them the nearest to the cluster).
+  - Compile-only memory of the programs at 1e8 + 1e5 (`hh2a/scripts/mem_1e8.py`, card 7, after the same prepare):
+
+    | program | temporaries | arguments | outputs |
+    |---|---|---|---|
+    | the galaxy provider's `step` | 14.39 GiB | 1.86 GiB | 1.12 GiB |
+    | `step_with_targets` (galaxy -> 1e5 stars) | 14.39 GiB (+5 KB) | 1.86 GiB | 1.12 GiB |
+    | the back-reaction alone (cluster rebuild + 1e8 points) | 0.20 GiB | 1.12 GiB | 1.12 GiB |
+    | nornax `slow_accelerations` (both directions, summed) | 18.00 GiB | 1.87 GiB | 1.49 GiB |
+    | nornax `initial_state` | 15.39 GiB | 2.99 GiB | 4.11 GiB |
+
+    The target evaluations fit inside the galaxy step's own peak; composing both directions in one program costs
+    +3.6 GiB of temporaries (the back-reaction's 1e8-row outputs live beside the step's).
+  - Attempt 5 then stopped in `initial_state`: a 15.39 GiB block was not available. XLA's rematerialisation log:
+    the program needs 27.12 GiB (28.07 before rematerialisation) against a limit of 25.51 GiB on that card at that
+    moment (a shared card, and a BFC pool fragmented by the eager prepare's 27 GB peak in the same process).
+    HH2A_GPU_1E8_RETRY
 - *GPU at 1e6 + 1e4 through the nornax scheme* (session 1's gate config, 100 slow steps): card 6, 100 slow steps (dt 1e-3, n_sub 16; the galaxy preset under `dehnen_error`,
   leaf 64, p6; the cluster eps_c = r_c / 20), through the two-part `prepare` above: verdicts ok in every segment,
   dE/E 1.94e-9 / 7.09e-9 / 8.98e-9 / -1.64e-9 per segment (session 1: 1.94e-9 / 7.09e-9 / 8.99e-9 / -1.65e-9),
