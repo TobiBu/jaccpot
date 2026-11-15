@@ -1734,7 +1734,17 @@ the points against the fp64 direct sum, i.e. against the cluster's own force the
 | all points through `target_points` | 1.2e-6 (9.9e-6) | | 2e5 | 811,258 |
 
 The defaults are kept: 1.4e-5 of the cluster's own field is far below the galaxy step's error (the cluster's field
-at a galaxy particle is ~M_c / M_g = 1e-4 of the galaxy's, so this is ~1e-9 of the total force). HH2A_BACK_GPU
+at a galaxy particle is ~M_c / M_g = 1e-4 of the galaxy's, so this is ~1e-9 of the total force). On the GPU (1e6 Hernquist galaxy points around a 1e5-star cluster, R = 0.061, leaf 64, p6), rel-L2 (p999):
+
+| θ_mp | order 2 | order 4 | order 6 (= p, default) | inner points | inner MAC tests |
+|---|---|---|---|---|---|
+| 0.5 (default) | 1.2e-5 (1.3e-4) | 3.2e-6 (3.2e-5) | **2.2e-6 (1.05e-5)** | 148 | 55,555 |
+| 0.3 | 3.1e-6 (4.4e-5) | 2.0e-6 (4.5e-6) | 2.0e-6 (3.0e-6) | 750 | 257,306 |
+| 0.2 | 2.1e-6 (1.1e-5) | 2.2e-6 (2.9e-6) | 2.1e-6 (2.9e-6) | 2,530 | 536,574 |
+| all 1e6 points through `target_points` | | | 2.1e-6 (3.1e-6) | 1e6 | 2,442,278 |
+
+The default is within 7.4e-7 of the full evaluation; its compiled temporaries are 186 MB (the order-6 M2P of one
+32,768-point slice; 19 MB at order 2), independent of the number of points.
 
 **The call change for nornax** (`FusedHybridForce.prepare`, `nornax/adapters/jaccpot_hybrid.py`; HH2b / the lead
 apply it, nornax was not edited here). Two parts:
