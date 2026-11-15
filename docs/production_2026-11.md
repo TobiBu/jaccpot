@@ -1677,10 +1677,15 @@ against an fp64 direct sum at EQUAL criterion (rel-L2, the 99.9th percentile in 
 | 1e5 x 1e3, geometric θ 0.6 (CPU, p4) | 8.59e-4 (1.3e-3) | 8.64e-4 (1.4e-3) | 4.1e5 / 1.3e4 |
 | 1e5 x 1e3, `dehnen_error` 1e-4 (CPU, p4) | 4.13e-4 (8.5e-4) | 4.58e-4 (9.7e-4) | 3.4e5 / 1.1e4 |
 | 1024 Gaussian x 32 points spread over a 2-unit box at 3-5, `dehnen_error` | 5e-6 | 6.8e-4 | — |
+| 1e3-star cluster x 1e5 galaxy points (back-reaction direction), geometric θ 0.5 (CPU, p4) | 8.8e-7 (8.8e-6) | 3.6e-3 (0.11) | 1.1e5 / 3.6e3 |
+| same, `dehnen_error` 1e-4 | 1.7e-6 (8.4e-6) | 1.9e-5 (2.5e-3) | 1.8e5 / 2.0e5 |
 
-On a compact target set (a cluster's stars) `local` gives the same accuracy for ~1/32 of the M2L work. On a sparse,
-wide group it does not: the group accepts many nodes and eq (16a)'s per-interaction bound adds up coherently (session
-1's observation, still there with the two-sided criterion). **Default: `m2p`** (per-point error control whatever the
+On a compact target set (a cluster's stars) `local` gives the same accuracy for ~1/32 of the M2L work. On sparse,
+wide groups it does not: the local expansion's truncation goes as `((r_n + r_g) / d)^(p+1)` where M2P's goes as
+`(r_n / d)^(p+1)` at the same acceptance, so under the geometric angle the galaxy-point groups of the back-reaction
+direction lose three orders of magnitude (p999 11 %); under eq (16a) the two-sided bound holds per interaction but
+a wide group accepts many nodes and the bounds add up coherently (session 1's observation), and it opens 36x more
+far pairs. **Default: `m2p`** (per-point error control whatever the
 groups look like). Whether M2P binds at production scale is a timing question: the HoreKa job `hh` times `targets`
 with both far forms at 1e8 x {1e4, 1e5, 1e6}; switch the default (or let the planner pick `local` for compact
 groups) on those numbers.

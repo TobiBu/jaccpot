@@ -157,7 +157,11 @@ class TargetPlan:
         ``"local"`` -- one M2L per (group, node) into a local expansion about
         the group's centre, then one L2P per point, with the group's radius in
         the criterion (eq 16a two-sided, ``rho_B`` = the group radius; the
-        geometric angle already has it).
+        geometric angle already has it). For COMPACT target groups only (a
+        cluster's stars: the same accuracy for ~1/32 of the M2L work): on
+        sparse wide groups its truncation, ``((r_n + r_g)/d)^(p+1)`` against
+        M2P's ``(r_n/d)^(p+1)``, costs orders of magnitude
+        (``docs/production_2026-11.md``, HH2a).
     """
 
     num_points: int
