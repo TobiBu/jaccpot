@@ -1628,12 +1628,27 @@ passed. `test-distributed-multiprocess`: M2's refusal scenario now asks for `che
 
 ## HH2a — `target_points` at production scale (hybrid Hermite session 2, wave 6, 2026-11-15)
 
-Session 1 (## HH) built `target_points` with a dense group x node walk. At 1e8 that walk did not fit: the lead's
-probe (galaxy 1e8 + cluster 1e5, one A100, 2026-11-15 00:09) ran out of memory in `plan_target_points` for the
-galaxy -> stars direction (7.56 GiB request; the dense walk's minimum block is one group over all
-1.2e7 galaxy nodes). This session replaces the walk, adds a group-local far field as an option, and gives the
-back-reaction (the cluster's field at all 1e8 galaxy particles) its own memory-bounded API. `target_points` stays
-opt-in; the default path is unchanged (identity below).
+Session 1 (## HH) built `target_points` with a dense group x node walk. The lead's probe (galaxy 1e8 + cluster
+1e5, one A100, 2026-11-15 00:09, session 1's code) ran out of memory in `plan_target_points` for the galaxy -> stars
+direction (a 7.56 GiB request), before any step. This session replaces the walk, adds a group-local far field as an
+option, gives the back-reaction (the cluster's field at all 1e8 galaxy particles) its own memory-bounded API, and
+fixes what actually ran out of memory at 1e8 (0. below). `target_points` stays opt-in; the default path is unchanged
+(identity below).
+
+**0. The 1e8 OOM was the source upward pass, not the walk.** With the frontier walk in place the same probe failed
+the same way (7.71 GiB, 02:07, card 2, the geometric bootstrap program of `plan_target_points`). The target program
+re-ran the sources' upward sweep through `engine.prepare_upward_sweep`, which computes the node mass moments TWICE
+(once for itself, once inside `prepare_real_upward_sweep`), each as float64 prefix sums over every source (`m`,
+`m x` and their prefixes: several GB at 1e8), next to the resident eager galaxy state. Fix:
+- `_source_tables` calls `prepare_real_upward_sweep(..., centers=local_data.centers)`: the topology's locals are
+  expanded about the same COMs the sweep would compute (bitwise equal, eager and rebuilt topologies, both MACs), so
+  no mass-moment pass runs; a node's mass is its monopole `packed[:, 0]` (within 6.4e-6 relative of the float64 sums;
+  the session-1-settings accuracy is unchanged to the digit). `centers=` is a new optional argument of
+  `prepare_real_upward_sweep` (default `None`: unchanged; identity below).
+- the source multipoles carry no sentinel row any more (`jnp.concatenate` copied the whole `[nodes, 49]` array,
+  ~2.4 GB at 1.2e7 nodes); padding pairs read them clipped and are masked.
+- Compiled temporaries of the tables program at 2e5 sources on the CPU route: 789 -> 693 MiB (there the jnp M2M
+  dominates; on the GPU P2M, M2M and the COM radii are Pallas kernels). HH2A_MEM_STAGES
 
 **1. The frontier walk** (`TargetPlan.walk="frontier"`, the default; `"dense"` is kept for comparisons). Each group
 descends the source tree from the root, breadth first, through ONE ring queue of pending (group, node) pairs
@@ -1757,7 +1772,7 @@ through exactly this substitution (a script that patches the provider's `plan_ta
   walks, both far forms, the back-reaction).
 - *GPU at 1e8 + 1e5* (gate 4): HH2A_GPU_1E8
 - *GPU at 1e6 + 1e4 through the nornax scheme* (session 1's gate config, 100 slow steps): HH2A_GPU_1E6
-- *Identity:* `w6-main-cpu` (main 122b2228) vs `hh2a-tip-cpu`: **PASS 36/36** (recorded at 4daea585; later commits change docstrings and docs only)
+- *Identity:* `w6-main-cpu` (main 122b2228) vs `hh2a-tip-cpu`: **PASS 36/36** (`hh2a-tip-cpu` at 4daea585, and `hh2a-tip2-cpu` at 991a9f1b after the `prepare_real_upward_sweep(centers=)` change)
 - *CI:* `integration-strict-targets` as CI runs it (coverage, `-n 2`, typecheck 0): 26 passed / 2 skipped in 8.7 min
   (cap 25), peak RSS 3.45 GB; top-level `tests/unit` guards with typecheck=1 pass; `test_shards.py check` rc 0.
 
