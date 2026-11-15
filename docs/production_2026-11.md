@@ -1733,33 +1733,53 @@ The defaults are kept: 1.4e-5 of the cluster's own field is far below the galaxy
 at a galaxy particle is ~M_c / M_g = 1e-4 of the galaxy's, so this is ~1e-9 of the total force). HH2A_BACK_GPU
 
 **The call change for nornax** (`FusedHybridForce.prepare`, `nornax/adapters/jaccpot_hybrid.py`; HH2b / the lead
-apply it, nornax was not edited here):
+apply it, nornax was not edited here). Two parts:
+
+1. *Plan galaxy -> stars after dropping the eager topology.* At 1e8 the eager prepare's state (~25 GB on an A100;
+   4.96 GB at 2e7) left no room for the target program's order-6 source multipoles (a 4.68 GiB request, 03:45,
+   card 2, with fix 0. in place). `TargetSources(positions, masses, force_scale)` goes where a topology goes in
+   `plan_target_points` / `bootstrap_target_force_scale`: each planning round rebuilds in its own program, as a step
+   does (`plan_target_points_from_sources` is the same as a function). The plan equals the eager topology's (test).
+2. *The back-reaction plan* is `plan_back_reaction`.
 
 ```python
+         f_b_g = None
+         if gal.scale_carry:
+             _, f_b_g = gal.accelerations(topo, force_scale=True)
++        del topo
++        gal.engine.clear_prepared_state_cache()
++        from jaccpot.runtime.target_points import (
++            TargetSources, bootstrap_target_force_scale, plan_target_points)
++        sources = TargetSources(jnp.asarray(xg), jnp.asarray(mg), f_b_g)
+         xc_w = jnp.asarray(xc, jnp.asarray(xg).dtype)
+-        plan_c = gal.plan_targets(topo, xc_w, group_size=group_size, headroom=headroom)
++        plan_c = plan_target_points(gal, sources, xc_w, group_size=group_size, headroom=headroom)
+         f_b_c = None
+         if gal.scale_carry:
+-            from jaccpot.runtime.target_points import bootstrap_target_force_scale
+-
+-            f_b_c, _ = bootstrap_target_force_scale(gal, topo, xc_w, plan=plan_c)
+-        del topo
++            f_b_c, _ = bootstrap_target_force_scale(gal, sources, xc_w, plan=plan_c)
+         ...
 -            plan_g = clu.plan_targets(
--                ctopo,
--                jnp.asarray(xg),
--                group_size=group_size,
--                headroom=headroom,
--                softening=float(gal.engine.softening),
--            )
 +            from jaccpot.runtime.target_back_reaction import plan_back_reaction
 +
 +            plan_g = plan_back_reaction(
 +                clu,
-+                ctopo,
-+                jnp.asarray(xg),
-+                group_size=group_size,
-+                headroom=headroom,
-+                softening=float(gal.engine.softening),
-+            )
+                 ctopo,
+                 jnp.asarray(xg),
+                 group_size=group_size,
+                 headroom=headroom,
+                 softening=float(gal.engine.softening),
+             )
 ```
 
-`slow_accelerations` keeps `self.cluster.target_field(ctopo, xg, self.galaxy_plan, softening=self.back_softening)`:
-the provider dispatches the `BackReactionPlan`, the result is a `TargetField` with `needs` `int32 [2]`.
-`galaxy_plan`'s type changes from `TargetPlan` to `BackReactionPlan` (both frozen, hashable). The GPU gates below ran
-through exactly this substitution (a script that patches the provider's `plan_targets` for the one call that passes
-`softening=`).
+`slow_accelerations` and `energy` are unchanged: `self.cluster.target_field(ctopo, xg, self.galaxy_plan,
+softening=...)` dispatches the `BackReactionPlan`, and the result is a `TargetField` with `needs` `int32 [2]`.
+`galaxy_plan`'s type changes from `TargetPlan` to `BackReactionPlan` (both frozen, hashable). The GPU gates and nornax's
+`tests/integration/test_jaccpot_hybrid.py` (4/4, CPU) ran through exactly this `prepare`
+(`hh2a/scripts/adapter_patch.py` replaces `FusedHybridForce.prepare`; nornax unchanged).
 
 **Gates.**
 - *Accuracy vs fp64 direct, equal settings to session 1* (4000 Gaussian sources, 700 points, leaf 16, p4, ferrers3
