@@ -1867,7 +1867,19 @@ walk; `needs` = far / near pairs:
   - Attempt 5 then stopped in `initial_state`: a 15.39 GiB block was not available. XLA's rematerialisation log:
     the program needs 27.12 GiB (28.07 before rematerialisation) against a limit of 25.51 GiB on that card at that
     moment (a shared card, and a BFC pool fragmented by the eager prepare's 27 GB peak in the same process).
-    HH2A_GPU_1E8_RETRY
+    The limit is not fragmentation (the async allocator gave the same 25.51 GiB): it is JAX's default
+    `XLA_PYTHON_CLIENT_MEM_FRACTION` of 0.75 (a 30 GiB pool, minus what is resident). The production benches set
+    0.95 (`bench/slurm/*`); the lead's probe and attempts 1-6 did not.
+  - **Attempt 7 (0.95, 23:50-00:16, card 7): PASS through the nornax scheme.** `initial_state` ok, the energy ledger
+    ok, one full hybrid slow step (dt 1e-3, n_sub 16): both verdicts ok, dE/E -2.52e-9, |dP| <= 4.9e-12, the
+    cluster's internal energy moved 2.4e-5 of W_cc; **device peak 27.76 GB for the whole run** (the eager prepare
+    alone: 27.05 GB). Accuracy as attempt 5 (2.80e-4 / 3.12e-6). (Its second segment ran out because the probe kept
+    the initial state beside the new one, 12 GB resident at 1e8.)
+  - **Attempt 8 (0.95, the initial state released, 00:17-00:45, card 7): PASS, two hybrid slow steps**, rc 0: both
+    verdicts ok in both segments, dE/E -2.52e-9 / -4.69e-9, |dP| <= 9.8e-12, the cluster's internal energy -4.6e-5 of
+    W_cc after two steps; **device peak 27.75 GB for the whole run** (the eager prepare 27.05 GB; 7.6 GB resident
+    between steps). The hybrid additions at 1e8 galaxy + 1e5 cluster fit on the same A100 next to the galaxy, with
+    0.7 GB above the galaxy's own prepare peak (`hh2a/runs/probe_1e8_1e5.json`).
 - *GPU at 1e6 + 1e4 through the nornax scheme* (session 1's gate config, 100 slow steps): card 6, 100 slow steps (dt 1e-3, n_sub 16; the galaxy preset under `dehnen_error`,
   leaf 64, p6; the cluster eps_c = r_c / 20), through the two-part `prepare` above: verdicts ok in every segment,
   dE/E 1.94e-9 / 7.09e-9 / 8.98e-9 / -1.64e-9 per segment (session 1: 1.94e-9 / 7.09e-9 / 8.99e-9 / -1.65e-9),
