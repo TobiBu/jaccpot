@@ -218,7 +218,7 @@ class TargetPlan:
         stats : Optional[Any]
             The evaluation's :attr:`TargetField.stats`: its first entry (the
             frontier queue's peak) sizes ``queue_capacity``; an overflowed queue
-            (peak above the capacity) at least doubles it, since a dropped
+            (peak above the capacity) grows it at least 8x, since a dropped
             subtree hides its own pending pairs.
 
         Returns
@@ -233,7 +233,12 @@ class TargetPlan:
         if stats is not None:
             peak = int(np.asarray(stats).reshape(-1)[0])
             if peak > queue:
-                queue = max(2 * queue, _ceil_to(peak * 2, int(self.walk_chunk)))
+                # an overflowed queue under-reports: the dropped subtrees' own
+                # pending pairs are never seen, so the peak saturates near the
+                # capacity; grow geometrically fast (x8) so a plan converges in
+                # a few rounds (the 1e8 back-reaction needed 1.25e6 entries from
+                # a start of 8192)
+                queue = max(8 * queue, _ceil_to(peak * 2, int(self.walk_chunk)))
             queue = max(queue, _ceil_to(peak * headroom, int(self.walk_chunk)))
         return dataclasses.replace(
             self,
@@ -1866,7 +1871,7 @@ def plan_target_points(
     force_scale: Optional[Array] = None,
     group_block: int = 64,
     pair_chunk: int = 128,
-    max_rounds: int = 8,
+    max_rounds: int = 12,
     softening: Optional[float] = None,
     walk: str = "frontier",
     walk_chunk: int = 2048,
