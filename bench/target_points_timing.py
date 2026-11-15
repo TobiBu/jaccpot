@@ -64,7 +64,9 @@ def _solver(mac: str, *, eps: float, theta: float, leaf: int, order: int, cpu: b
     base = FastMultipoleMethod(preset="galaxy").advanced
     adv = dataclasses.replace(
         base,
-        runtime=dataclasses.replace(base.runtime, fixed_order=order, cpu_fused_lane=cpu),
+        runtime=dataclasses.replace(
+            base.runtime, fixed_order=order, cpu_fused_lane=cpu
+        ),
         mac_type="dehnen_error" if mac == "err" else "dehnen",
     )
     crit = (
@@ -144,7 +146,9 @@ def main() -> None:
     t0 = time.perf_counter()
     if a.mode in ("step", "targets"):
         prov, topo = FusedForceProvider.prepare(
-            _solver(a.mac, eps=eps_g, theta=a.theta, leaf=a.leaf, order=a.order, cpu=cpu),
+            _solver(
+                a.mac, eps=eps_g, theta=a.theta, leaf=a.leaf, order=a.order, cpu=cpu
+            ),
             xg_d,
             mg_d,
             leaf_size=a.leaf,
@@ -223,7 +227,14 @@ def main() -> None:
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w") as fh:
         json.dump(row, fh, indent=1, default=str)
-    print(json.dumps({k: row[k] for k in ("mode", "n", "m", "mac", "far", "ms_min", "peak_bytes")}))
+    print(
+        json.dumps(
+            {
+                k: row[k]
+                for k in ("mode", "n", "m", "mac", "far", "ms_min", "peak_bytes")
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

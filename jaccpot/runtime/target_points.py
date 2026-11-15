@@ -1087,7 +1087,13 @@ def _compact_pairs(
 
 
 def _count_dtype() -> Any:
-    """The MAC-test counter's dtype: ``int64`` under x64 (the default here)."""
+    """The MAC-test counter's dtype.
+
+    Returns
+    -------
+    Any
+        ``int64`` under x64 (the default here), else ``int32``.
+    """
     return jnp.int64 if bool(jax.config.read("jax_enable_x64")) else jnp.int32
 
 
@@ -1158,7 +1164,12 @@ def _frontier_pairs(
     n_live = jnp.asarray(n_live, jnp.int32)
 
     def emit(
-        mask: Array, start: Array, cap: int, lst_g: Array, lst_n: Array, g: Array,
+        mask: Array,
+        start: Array,
+        cap: int,
+        lst_g: Array,
+        lst_n: Array,
+        g: Array,
         n: Array,
     ) -> tuple[Array, Array, Array]:
         rank = jnp.cumsum(mask, dtype=jnp.int32) - 1
@@ -1313,6 +1324,11 @@ def _target_walk(
     -------
     _TargetWalk
         The groups and the pair lists.
+
+    Raises
+    ------
+    ValueError
+        If ``softening`` is negative.
     """
     from jaccpot.softening import resolve_softening_kernel, support_factor
 
@@ -1348,9 +1364,7 @@ def _target_walk(
     sorted_pts = pts[perm]
     valid = jnp.arange(ngroups * gsize) < m
     if live_in is not None:
-        valid = valid & jnp.concatenate(
-            [live_in[perm], jnp.zeros((pad,), bool)]
-        )
+        valid = valid & jnp.concatenate([live_in[perm], jnp.zeros((pad,), bool)])
     if pad:
         sorted_pts = jnp.concatenate(
             [sorted_pts, jnp.broadcast_to(sorted_pts[-1:], (pad, 3))]

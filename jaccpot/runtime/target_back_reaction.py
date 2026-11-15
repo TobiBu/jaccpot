@@ -391,13 +391,9 @@ def evaluate_back_reaction(
     if potential:
         pot = pot.at[idx].add(jnp.where(live, field.potential.astype(dtype), 0.0))
     if return_force_scale:
-        scale = scale.at[idx].add(
-            jnp.where(live, field.force_scale.astype(dtype), 0.0)
-        )
+        scale = scale.at[idx].add(jnp.where(live, field.force_scale.astype(dtype), 0.0))
     out = pts.dtype
-    stats = jnp.stack(
-        [field.stats[0], field.stats[1], count.astype(_count_dtype())]
-    )
+    stats = jnp.stack([field.stats[0], field.stats[1], count.astype(_count_dtype())])
     return TargetField(
         acc=acc.astype(out),
         potential=pot.astype(out) if potential else None,
