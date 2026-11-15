@@ -1767,7 +1767,28 @@ through exactly this substitution (a script that patches the provider's `plan_ta
   coincident 2.9e-5), `dehnen_error` 1e-4 **4.010e-5** (2.5e-5 / 9.4e-5 / 4.8e-6 / 2.0e-5): session 1's 3.0e-4 /
   4.0e-5, slice for slice.
 - *At scale* (the HH IC: Hernquist galaxy, Plummer cluster of r_c 0.005, M_c 1e-4 at R = 1; galaxy eps 0.005):
-  HH2A_SCALE_TABLE
+  rel-L2 (99.9th percentile) of the field at the points against an fp64 direct sum (a 1e3-2e3 point subsample of
+the targets; for the back-reaction direction 2e3 random galaxy points plus the 1e3 nearest the cluster), the frontier
+walk; `needs` = far / near pairs:
+
+  | where | direction | sources x points | criterion | far | rel-L2 (p999) | needs | MAC tests | queue peak |
+  |---|---|---|---|---|---|---|---|---|
+  | CPU, leaf 16 p4 | galaxy -> stars | 1e5 x 1e3 | geometric 0.6 | m2p | 8.59e-4 (1.31e-3) | 12,904 / 246 | 26,268 | 2,112 |
+  | | | | | local | 8.64e-4 (1.38e-3) | same | same | same |
+  | | | | `dehnen_error` 1e-4 | m2p | 4.13e-4 (8.45e-4) | 10,678 / 503 | 22,330 | 1,772 |
+  | | | | | local | 4.58e-4 (9.66e-4) | 10,671 / 528 | 22,366 | 1,812 |
+  | | | 1e5 x 1e4 | geometric 0.6 | m2p | 8.09e-4 (1.36e-3) | 125,025 / 2,253 | 254,243 | 20,548 |
+  | | | | `dehnen_error` 1e-4 | m2p | 3.93e-4 (8.23e-4) | 102,920 / 4,490 | 214,507 | 17,010 |
+  | | cluster -> galaxy points | 1e3 x 1e5 | geometric 0.5 | m2p | 8.75e-7 (8.76e-6) | 3,588 / 47,438 | 99,313 | 14,860 |
+  | | | | `dehnen_error` 1e-4 | m2p | 1.72e-6 (8.42e-6) | 5,631 / 4,467 | 17,097 | 1,640 |
+  | GPU, leaf 64 p6 | galaxy -> stars | 1e6 x 1e4 | geometric 0.6 | m2p | 9.21e-5 (1.62e-4) | 159,526 / 2,798 | 324,335 | 20,036 |
+  | | | | | local | 9.36e-5 (1.84e-4) | same | same | same |
+  | | | | `dehnen_error` 1e-4 | m2p | 1.61e-4 (3.15e-4) | 81,373 / 2,530 | 167,493 | 10,116 |
+  | | | | | local | 1.36e-4 (3.39e-4) | 82,458 / 2,595 | 169,793 | 11,160 |
+
+  The dense walk gave the same needs and the same rel-L2 to 3 digits in every row where it ran (1e5 x 1e3 and 1e6 x
+  1e4, both directions). The galaxy -> stars errors are at the criterion's tolerance for these settings; the
+  back-reaction direction's are far below it. HH2A_SCALE_MORE
 - *Moving points recompile nothing:* one trace for three point sets in every row above and in the tests (both
   walks, both far forms, the back-reaction).
 - *GPU at 1e8 + 1e5* (gate 4): HH2A_GPU_1E8
