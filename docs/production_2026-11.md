@@ -1678,10 +1678,10 @@ points served).
   | 1e4 stars -> 1e6 galaxy points (back-reaction direction, all points through the walk, GPU, geometric) | 296,340 | 63,968,750 | 216 |
   | same, `dehnen_error` | 63,298 | 63,968,750 | 1,011 |
   | 2e5 galaxy points x 1e4 stars (back-reaction, all points through the walk, CPU) | 811,258 | — | — |
-  | 1e8 x 1e5 (galaxy -> stars, `dehnen_error`, GPU) | HH2A_1E8_TESTS | 3125 x ~1.2e7 = ~3.8e10 | HH2A_1E8_RATIO |
+  | 1e8 x 1e5 (galaxy -> stars, `dehnen_error`, GPU; nodes from the 4.68 GiB p6 multipole allocation) | 1,935,481 | 3125 x ~2.56e7 = ~8.0e10 | ~41,000 |
 
   The frontier count is ~2x the accepted far + near pairs (each accepted or near pair costs its own test and its
-  parent's). Queue peaks: 20,036 entries at 1e6 x 1e4 geometric (160 kB), HH2A_1E8_QUEUE at 1e8 x 1e5.
+  parent's). Queue peaks: 20,036 entries at 1e6 x 1e4 geometric (160 kB), 65,606 at 1e8 x 1e5 (the back-reaction's inner walk: 1.25e6 entries, 10 MB) at 1e8 x 1e5.
 - **Compiled temporaries** of the evaluation (CPU `memory_analysis` at 1e5, GPU at 1e6): frontier 48-52 MB, dense
   163-199 MB (CPU, 1e5) / 52-54 MB (GPU, 1e6: the walk budget shrinks its block).
 
