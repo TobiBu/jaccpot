@@ -1625,3 +1625,279 @@ passed. `test-distributed-multiprocess`: M2's refusal scenario now asks for `che
 - Checkpoints are synchronous (the segment edge waits for the write); orbax's async checkpointer would overlap it
   with the next segment: decide on the HoreKa numbers.
 - A single card -> mesh restore reads the whole `.npz` on every process; fine up to a single card's N.
+
+## HH2a — `target_points` at production scale (hybrid Hermite session 2, wave 6, 2026-11-15)
+
+Session 1 (## HH) built `target_points` with a dense group x node walk. The lead's probe (galaxy 1e8 + cluster
+1e5, one A100, 2026-11-15 00:09, session 1's code) ran out of memory in `plan_target_points` for the galaxy -> stars
+direction (a 7.56 GiB request), before any step. This session replaces the walk, adds a group-local far field as an
+option, gives the back-reaction (the cluster's field at all 1e8 galaxy particles) its own memory-bounded API, and
+fixes what actually ran out of memory at 1e8 (0. below). `target_points` stays opt-in; the default path is unchanged
+(identity below).
+
+**0. The 1e8 OOM was the source upward pass, not the walk.** With the frontier walk in place the same probe failed
+the same way (7.71 GiB, 02:07, card 2, the geometric bootstrap program of `plan_target_points`). The target program
+re-ran the sources' upward sweep through `engine.prepare_upward_sweep`, which computes the node mass moments TWICE
+(once for itself, once inside `prepare_real_upward_sweep`), each as float64 prefix sums over every source (`m`,
+`m x` and their prefixes: several GB at 1e8), next to the resident eager galaxy state. Fix:
+- `_source_tables` calls `prepare_real_upward_sweep(..., centers=local_data.centers)`: the topology's locals are
+  expanded about the same COMs the sweep would compute (bitwise equal, eager and rebuilt topologies, both MACs), so
+  no mass-moment pass runs; a node's mass is its monopole `packed[:, 0]` (within 6.4e-6 relative of the float64 sums;
+  the session-1-settings accuracy is unchanged to the digit). `centers=` is a new optional argument of
+  `prepare_real_upward_sweep` (default `None`: unchanged; identity below).
+- the source multipoles carry no sentinel row any more (`jnp.concatenate` copied the whole `[nodes, 49]` array,
+  ~2.4 GB at 1.2e7 nodes); padding pairs read them clipped and are masked.
+- Compiled temporaries of the tables program at 2e5 sources on the CPU route: 789 -> 693 MiB (there the jnp M2M
+  dominates; on the GPU P2M, M2M and the COM radii are Pallas kernels). GPU compile-only stages at 2e7 sources (6.6e6 nodes, after an eager prepare that holds
+  4.96 GB): mass moments 105 MB of temporaries, the upward sweep 192 MB plus its 1.30 GB of multipoles, the COM radii
+  375 MB, the whole geometric bootstrap evaluation 1.70 GB.
+
+**1. The frontier walk** (`TargetPlan.walk="frontier"`, the default; `"dense"` is kept for comparisons). Each group
+descends the source tree from the root, breadth first, through ONE ring queue of pending (group, node) pairs
+(`queue_capacity`), `walk_chunk` pairs per `while_loop` step; when the queue holds fewer than a chunk, new groups'
+(group, root) seeds top it up, so only the groups in flight hold entries. A pair is tested once: accepted -> far;
+rejected leaf -> near; rejected internal node -> its two children are queued. Both criteria (the geometric angle
+with the separation floor; eq (16a) with the points' own f_b) are one elementwise function shared with the dense
+walk. Shapes are static: a full queue drops the pushes that do not fit, reports its peak (`TargetField.stats`) and
+`ok=False`; `TargetPlan.grown(needs, headroom, stats)` and `plan_target_points` grow it. `TargetField.needs` keeps
+its `int32 [2]` (far, near), so nornax's adapter carries it unchanged; `stats` is new: (queue peak, MAC tests,
+points served).
+
+- **Same interaction set** (gate 2): the frontier walk's far (group, node) and near (group, leaf) pair SETS equal the
+  dense walk's, pair for pair, under both criteria and both far forms (test; at N 1024 x 160 points: far 28 / 110,
+  near 861 / 779 for geometric / `dehnen_error`). Only the lists' order differs, so the scatter-add sums differ at
+  round-off (rel-L2 vs the direct sum equal to 3 digits in every row below).
+- **MAC tests per evaluation** (counted, not timed):
+
+  | sources x points (direction, criterion) | frontier | dense (groups x nodes) | ratio |
+  |---|---|---|---|
+  | 1e5 x 1e3 (galaxy -> stars, geometric, CPU, leaf 16 p4) | 26,268 | 1,507,296 | 57 |
+  | 1e5 x 1e4 (same) | 254,243 | 14,743,239 | 58 |
+  | 1e6 x 1e4 (galaxy -> stars, geometric, GPU, leaf 64 p6) | 324,335 | 37,820,103 | 117 |
+  | 1e6 x 1e4 (same, `dehnen_error` 1e-4) | 167,493 | 37,820,103 | 226 |
+  | 1e4 stars -> 1e6 galaxy points (back-reaction direction, all points through the walk, GPU, geometric) | 296,340 | 63,968,750 | 216 |
+  | same, `dehnen_error` | 63,298 | 63,968,750 | 1,011 |
+  | 2e5 galaxy points x 1e4 stars (back-reaction, all points through the walk, CPU) | 811,258 | — | — |
+  | 1e8 x 1e5 (galaxy -> stars, `dehnen_error`, GPU; nodes from the 4.68 GiB p6 multipole allocation) | 1,935,481 | 3125 x ~2.56e7 = ~8.0e10 | ~41,000 |
+
+  The frontier count is ~2x the accepted far + near pairs (each accepted or near pair costs its own test and its
+  parent's). Queue peaks: 20,036 entries at 1e6 x 1e4 geometric (160 kB), 65,606 at 1e8 x 1e5 (the back-reaction's inner walk: 1.25e6 entries, 10 MB) at 1e8 x 1e5.
+- **Compiled temporaries** of the evaluation (CPU `memory_analysis` at 1e5, GPU at 1e6): frontier 48-52 MB, dense
+  163-199 MB (CPU, 1e5) / 52-54 MB (GPU, 1e6: the walk budget shrinks its block).
+
+**2. Group local expansions** (`TargetPlan.far="local"`, opt-in; `"m2p"` stays the default). One M2L per (group,
+node) into a local expansion about the group's centre and one L2P per point, with the group radius in the criterion
+(eq (16a) two-sided, `rho_B` = the group radius at the centre distance; the geometric angle had it already). Measured
+against an fp64 direct sum at EQUAL criterion (rel-L2, the 99.9th percentile in brackets):
+
+| sources x points, criterion | `m2p` | `local` | M2L evaluations m2p / local |
+|---|---|---|---|
+| 1e6 galaxy x 1e4 stars, geometric θ 0.6 (GPU, p6) | 9.21e-5 (1.6e-4) | 9.36e-5 (1.8e-4) | 5.1e6 / 1.6e5 |
+| 1e5 x 1e3, geometric θ 0.6 (CPU, p4) | 8.59e-4 (1.3e-3) | 8.64e-4 (1.4e-3) | 4.1e5 / 1.3e4 |
+| 1e5 x 1e3, `dehnen_error` 1e-4 (CPU, p4) | 4.13e-4 (8.5e-4) | 4.58e-4 (9.7e-4) | 3.4e5 / 1.1e4 |
+| 1024 Gaussian x 32 points spread over a 2-unit box at 3-5, `dehnen_error` | 5e-6 | 6.8e-4 | — |
+| 1e3-star cluster x 1e5 galaxy points (back-reaction direction), geometric θ 0.5 (CPU, p4) | 8.8e-7 (8.8e-6) | 3.6e-3 (0.11) | 1.1e5 / 3.6e3 |
+| same, `dehnen_error` 1e-4 | 1.7e-6 (8.4e-6) | 1.9e-5 (2.5e-3) | 1.8e5 / 2.0e5 |
+
+On a compact target set (a cluster's stars) `local` gives the same accuracy for ~1/32 of the M2L work. On sparse,
+wide groups it does not: the local expansion's truncation goes as `((r_n + r_g) / d)^(p+1)` where M2P's goes as
+`(r_n / d)^(p+1)` at the same acceptance, so under the geometric angle the galaxy-point groups of the back-reaction
+direction lose three orders of magnitude (p999 11 %); under eq (16a) the two-sided bound holds per interaction but
+a wide group accepts many nodes and the bounds add up coherently (session 1's observation), and it opens 36x more
+far pairs. **Default: `m2p`** (per-point error control whatever the
+groups look like). Whether M2P binds at production scale is a timing question: the HoreKa job `hh` times `targets`
+with both far forms at 1e8 x {1e4, 1e5, 1e6}; switch the default (or let the planner pick `local` for compact
+groups) on those numbers.
+
+**3. The back-reaction at 1e8** (`jaccpot.runtime.target_back_reaction`). `plan_back_reaction(provider, topology,
+points, *, theta_mp=None, mp_order=None, r_min=0, softening=None, headroom=1.5, ...)` -> `BackReactionPlan`;
+`evaluate_back_reaction(provider, topology, points, *, plan, force_scale=None, potential=False,
+return_force_scale=False, softening=None)` -> `TargetField`; and `FusedForceProvider.target_field` dispatches a
+`BackReactionPlan` to it (3 lines in `fused_provider.py`). The split:
+- points at `|x - c| >= r_in = max(r_min, R / theta_mp, R + floor)` (c the cluster's COM = the root's expansion centre,
+  R the root's exact COM radius, floor the walk's separation floor at the points' softening) take the root
+  multipole truncated at `mp_order`, per point, `slice_size` points per `fori_loop` step: no sort, no groups, no
+  per-point lists. With the defaults (`theta_mp` = the provider's θ, `mp_order` = its p) this is exactly the target
+  walk's own root acceptance for a single point;
+- the points inside are compacted into a static capacity (`inner_capacity`, planned with headroom) and go through
+  `target_points` with a `point_mask`; an inner count above the capacity is `ok=False` with the count in `stats[2]`.
+
+Measured (CPU, 2e5 Hernquist galaxy points, a Plummer cluster of 1e4 stars, r_c 0.005, R = 0.060 after the IC's
+0.99 mass clip, leaf 16, p4, θ 0.5, the galaxy's ferrers3 eps 0.005), rel-L2 (99.9th pct) of the cluster's field at
+the points against the fp64 direct sum, i.e. against the cluster's own force there:
+
+| θ_mp | order 2 | order 4 (= p) | inner points | inner MAC tests |
+|---|---|---|---|---|
+| 0.5 (= θ, default) | 8.3e-5 (3.0e-4) | 1.4e-5 (6.0e-5) | 24 | 4,151 |
+| 0.3 | 2.6e-5 (1.6e-4) | 3.9e-6 (1.8e-5) | 128 | 16,604 |
+| 0.2 | 9.1e-6 (8.4e-5) | 2.3e-6 (1.1e-5) | 468 | 62,265 |
+| all points through `target_points` | 1.2e-6 (9.9e-6) | | 2e5 | 811,258 |
+
+The defaults are kept: 1.4e-5 of the cluster's own field is far below the galaxy step's error (the cluster's field
+at a galaxy particle is ~M_c / M_g = 1e-4 of the galaxy's, so this is ~1e-9 of the total force). On the GPU (1e6 Hernquist galaxy points around a 1e5-star cluster, R = 0.061, leaf 64, p6), rel-L2 (p999):
+
+| θ_mp | order 2 | order 4 | order 6 (= p, default) | inner points | inner MAC tests |
+|---|---|---|---|---|---|
+| 0.5 (default) | 1.2e-5 (1.3e-4) | 3.2e-6 (3.2e-5) | **2.2e-6 (1.05e-5)** | 148 | 55,555 |
+| 0.3 | 3.1e-6 (4.4e-5) | 2.0e-6 (4.5e-6) | 2.0e-6 (3.0e-6) | 750 | 257,306 |
+| 0.2 | 2.1e-6 (1.1e-5) | 2.2e-6 (2.9e-6) | 2.1e-6 (2.9e-6) | 2,530 | 536,574 |
+| all 1e6 points through `target_points` | | | 2.1e-6 (3.1e-6) | 1e6 | 2,442,278 |
+
+The default is within 7.4e-7 of the full evaluation; its compiled temporaries are 186 MB (the order-6 M2P of one
+32,768-point slice; 19 MB at order 2), independent of the number of points.
+
+**The call change for nornax** (`FusedHybridForce.prepare`, `nornax/adapters/jaccpot_hybrid.py`; HH2b / the lead
+apply it, nornax was not edited here). Two parts:
+
+1. *Plan galaxy -> stars after dropping the eager topology.* At 1e8 the eager prepare's state (~25 GB on an A100;
+   4.96 GB at 2e7) left no room for the target program's order-6 source multipoles (a 4.68 GiB request, 03:45,
+   card 2, with fix 0. in place). `TargetSources(positions, masses, force_scale)` goes where a topology goes in
+   `plan_target_points` / `bootstrap_target_force_scale`: each planning round rebuilds in its own program, as a step
+   does (`plan_target_points_from_sources` is the same as a function). The plan equals the eager topology's (test).
+2. *The back-reaction plan* is `plan_back_reaction`.
+
+```python
+         f_b_g = None
+         if gal.scale_carry:
+             _, f_b_g = gal.accelerations(topo, force_scale=True)
++        del topo
++        gal.engine.clear_prepared_state_cache()
++        from jaccpot.runtime.target_points import (
++            TargetSources, bootstrap_target_force_scale, plan_target_points)
++        sources = TargetSources(jnp.asarray(xg), jnp.asarray(mg), f_b_g)
+         xc_w = jnp.asarray(xc, jnp.asarray(xg).dtype)
+-        plan_c = gal.plan_targets(topo, xc_w, group_size=group_size, headroom=headroom)
++        plan_c = plan_target_points(gal, sources, xc_w, group_size=group_size, headroom=headroom)
+         f_b_c = None
+         if gal.scale_carry:
+-            from jaccpot.runtime.target_points import bootstrap_target_force_scale
+-
+-            f_b_c, _ = bootstrap_target_force_scale(gal, topo, xc_w, plan=plan_c)
+-        del topo
++            f_b_c, _ = bootstrap_target_force_scale(gal, sources, xc_w, plan=plan_c)
+         ...
+-            plan_g = clu.plan_targets(
++            from jaccpot.runtime.target_back_reaction import plan_back_reaction
++
++            plan_g = plan_back_reaction(
++                clu,
+                 ctopo,
+                 jnp.asarray(xg),
+                 group_size=group_size,
+                 headroom=headroom,
+                 softening=float(gal.engine.softening),
+             )
+```
+
+`slow_accelerations` and `energy` are unchanged: `self.cluster.target_field(ctopo, xg, self.galaxy_plan,
+softening=...)` dispatches the `BackReactionPlan`, and the result is a `TargetField` with `needs` `int32 [2]`.
+`galaxy_plan`'s type changes from `TargetPlan` to `BackReactionPlan` (both frozen, hashable). The GPU gates and nornax's
+`tests/integration/test_jaccpot_hybrid.py` (4/4, CPU) ran through exactly this `prepare`
+(`hh2a/scripts/adapter_patch.py` replaces `FusedHybridForce.prepare`; nornax unchanged).
+
+**Gates.**
+- *Accuracy vs fp64 direct, equal settings to session 1* (4000 Gaussian sources, 700 points, leaf 16, p4, ferrers3
+  eps 0.01, CPU route), frontier walk: geometric θ 0.6 **2.999e-4** (inside 1.6e-5, clump 8.6e-4, far 4.8e-6,
+  coincident 2.9e-5), `dehnen_error` 1e-4 **4.010e-5** (2.5e-5 / 9.4e-5 / 4.8e-6 / 2.0e-5): session 1's 3.0e-4 /
+  4.0e-5, slice for slice.
+- *At scale* (the HH IC: Hernquist galaxy, Plummer cluster of r_c 0.005, M_c 1e-4 at R = 1; galaxy eps 0.005):
+  rel-L2 (99.9th percentile) of the field at the points against an fp64 direct sum (a 1e3-2e3 point subsample of
+the targets; for the back-reaction direction 2e3 random galaxy points plus the 1e3 nearest the cluster), the frontier
+walk; `needs` = far / near pairs:
+
+  | where | direction | sources x points | criterion | far | rel-L2 (p999) | needs | MAC tests | queue peak |
+  |---|---|---|---|---|---|---|---|---|
+  | CPU, leaf 16 p4 | galaxy -> stars | 1e5 x 1e3 | geometric 0.6 | m2p | 8.59e-4 (1.31e-3) | 12,904 / 246 | 26,268 | 2,112 |
+  | | | | | local | 8.64e-4 (1.38e-3) | same | same | same |
+  | | | | `dehnen_error` 1e-4 | m2p | 4.13e-4 (8.45e-4) | 10,678 / 503 | 22,330 | 1,772 |
+  | | | | | local | 4.58e-4 (9.66e-4) | 10,671 / 528 | 22,366 | 1,812 |
+  | | | 1e5 x 1e4 | geometric 0.6 | m2p | 8.09e-4 (1.36e-3) | 125,025 / 2,253 | 254,243 | 20,548 |
+  | | | | `dehnen_error` 1e-4 | m2p | 3.93e-4 (8.23e-4) | 102,920 / 4,490 | 214,507 | 17,010 |
+  | | cluster -> galaxy points | 1e3 x 1e5 | geometric 0.5 | m2p | 8.75e-7 (8.76e-6) | 3,588 / 47,438 | 99,313 | 14,860 |
+  | | | | `dehnen_error` 1e-4 | m2p | 1.72e-6 (8.42e-6) | 5,631 / 4,467 | 17,097 | 1,640 |
+  | GPU, leaf 64 p6 | galaxy -> stars | 1e6 x 1e4 | geometric 0.6 | m2p | 9.21e-5 (1.62e-4) | 159,526 / 2,798 | 324,335 | 20,036 |
+  | | | | | local | 9.36e-5 (1.84e-4) | same | same | same |
+  | | | | `dehnen_error` 1e-4 | m2p | 1.61e-4 (3.15e-4) | 81,373 / 2,530 | 167,493 | 10,116 |
+  | | | | | local | 1.36e-4 (3.39e-4) | 82,458 / 2,595 | 169,793 | 11,160 |
+  | | cluster -> galaxy points | 1e4 x 1e6 | geometric 0.5 | m2p | 1.81e-6 (1.57e-6) | 36,839 / 126,712 | 296,340 | 10,490 |
+  | | | | | local | 3.29e-4 (1.51e-2) | same | same | same |
+  | | | | `dehnen_error` 1e-4 | m2p | 1.78e-6 (2.60e-6) | 35,255 / 11,977 | 63,298 | 1,982 |
+  | | | | | local | 5.56e-5 (2.83e-3) | 380,615 / 203,141 | 1,136,804 | 18,734 |
+
+  The dense walk gave the same needs and the same rel-L2 to 3 digits in every row where it ran (1e5 x 1e3 and 1e6 x
+  1e4, both directions). The galaxy -> stars errors are at the criterion's tolerance for these settings; the
+  back-reaction direction's are far below it. 
+- *Moving points recompile nothing:* one trace for three point sets in every row above and in the tests (both
+  walks, both far forms, the back-reaction).
+- *GPU at 1e8 + 1e5* (gate 4): the lead's probe script with the two-part `prepare` (`hh2a/scripts/probe_1e8_hh2a.py`; Hernquist galaxy 1e8 under
+  `dehnen_error` 1e-4, leaf 64, p6, ferrers3 eps 0.005; Plummer cluster 1e5, geometric θ 0.5; one A100, contended:
+  walls are not timings). Five attempts, each fixing what the previous one found:
+
+  | attempt | where it stopped | fix |
+  |---|---|---|
+  | lead, session 1's code | galaxy -> stars plan, 7.56 GiB | — |
+  | 1 (frontier walk) | same place, 7.71 GiB | fix 0. (no mass-moment passes, no multipole copy) |
+  | 2 | same place, 4.68 GiB (the p6 source multipoles next to the ~25 GB eager topology) | `TargetSources` planning |
+  | 3 | the back-reaction plan did not converge in 8 rounds (queue doubled from 8192 toward 1.25e6) | queue x8 per re-plan, 12 rounds |
+  | 4, 5 | both directions evaluated; then nornax's `initial_state` (one program: the galaxy step + both directions + the Hermite start) | below |
+
+  Attempt 5 (21:16-21:35, card 7), per stage:
+  - `prepare` (the eager galaxy prepare, both plans, the cluster prepare): device peak **27.05 GB** (the eager
+    prepare's own; 5.6 GB in use after it);
+  - galaxy -> stars (`step_with_targets` at 1e8 x 1e5): ok, needs far 929,318 / near 39,985, queue peak 65,606,
+    **1,935,481 MAC tests**; the device peak did not move;
+  - back-reaction over all 1e8 galaxy points: ok, 15,029 inner points (the walk), needs far 354,415 / near 3,662,745
+    (galaxy points inside the galaxy softening's reach of the cluster core take its stars directly: the kernel is
+    not Newtonian there), queue peak 1,247,250, 8,034,076 MAC tests; the device peak did not move;
+  - accuracy against an fp64 direct sum on the device: galaxy -> stars rel-L2 **2.80e-4** (p999 4.46e-4; 512 stars
+    against all 1e8 galaxy particles), back-reaction rel-L2 **3.15e-6** (p999 6.41e-6; 8,000 galaxy points, half of
+    them the nearest to the cluster).
+  - Compile-only memory of the programs at 1e8 + 1e5 (`hh2a/scripts/mem_1e8.py`, card 7, after the same prepare):
+
+    | program | temporaries | arguments | outputs |
+    |---|---|---|---|
+    | the galaxy provider's `step` | 14.39 GiB | 1.86 GiB | 1.12 GiB |
+    | `step_with_targets` (galaxy -> 1e5 stars) | 14.39 GiB (+5 KB) | 1.86 GiB | 1.12 GiB |
+    | the back-reaction alone (cluster rebuild + 1e8 points) | 0.20 GiB | 1.12 GiB | 1.12 GiB |
+    | nornax `slow_accelerations` (both directions, summed) | 18.00 GiB | 1.87 GiB | 1.49 GiB |
+    | nornax `initial_state` | 15.39 GiB | 2.99 GiB | 4.11 GiB |
+
+    The target evaluations fit inside the galaxy step's own peak; composing both directions in one program costs
+    +3.6 GiB of temporaries (the back-reaction's 1e8-row outputs live beside the step's).
+  - Attempt 5 then stopped in `initial_state`: a 15.39 GiB block was not available. XLA's rematerialisation log:
+    the program needs 27.12 GiB (28.07 before rematerialisation) against a limit of 25.51 GiB on that card at that
+    moment (a shared card, and a BFC pool fragmented by the eager prepare's 27 GB peak in the same process).
+    The limit is not fragmentation (the async allocator gave the same 25.51 GiB): it is JAX's default
+    `XLA_PYTHON_CLIENT_MEM_FRACTION` of 0.75 (a 30 GiB pool, minus what is resident). The production benches set
+    0.95 (`bench/slurm/*`); the lead's probe and attempts 1-6 did not.
+  - **Attempt 7 (0.95, 23:50-00:16, card 7): PASS through the nornax scheme.** `initial_state` ok, the energy ledger
+    ok, one full hybrid slow step (dt 1e-3, n_sub 16): both verdicts ok, dE/E -2.52e-9, |dP| <= 4.9e-12, the
+    cluster's internal energy moved 2.4e-5 of W_cc; **device peak 27.76 GB for the whole run** (the eager prepare
+    alone: 27.05 GB). Accuracy as attempt 5 (2.80e-4 / 3.12e-6). (Its second segment ran out because the probe kept
+    the initial state beside the new one, 12 GB resident at 1e8.)
+  - **Attempt 8 (0.95, the initial state released, 00:17-00:45, card 7): PASS, two hybrid slow steps**, rc 0: both
+    verdicts ok in both segments, dE/E -2.52e-9 / -4.69e-9, |dP| <= 9.8e-12, the cluster's internal energy -4.6e-5 of
+    W_cc after two steps; **device peak 27.75 GB for the whole run** (the eager prepare 27.05 GB; 7.6 GB resident
+    between steps). The hybrid additions at 1e8 galaxy + 1e5 cluster fit on the same A100 next to the galaxy, with
+    0.7 GB above the galaxy's own prepare peak (`hh2a/runs/probe_1e8_1e5.json`).
+- *GPU at 1e6 + 1e4 through the nornax scheme* (session 1's gate config, 100 slow steps): card 6, 100 slow steps (dt 1e-3, n_sub 16; the galaxy preset under `dehnen_error`,
+  leaf 64, p6; the cluster eps_c = r_c / 20), through the two-part `prepare` above: verdicts ok in every segment,
+  dE/E 1.94e-9 / 7.09e-9 / 8.98e-9 / -1.64e-9 per segment (session 1: 1.94e-9 / 7.09e-9 / 8.99e-9 / -1.65e-9),
+  |dP| <= 1.3e-10, the cluster's internal energy within ±0.61 % of W_cc (session 1 the same), device peak **1.01 GiB**
+  (session 1's). Plans: stars far 123,136 / near 3,840 (frontier, queue 20,480); the back-reaction's inner
+  `target_points` holds 1,024 of the 1e6 galaxy points (`hh2a/runs/gpu_functional_1e6_1e4.json`).
+- *Identity:* `w6-main-cpu` (main 122b2228) vs `hh2a-tip-cpu`: **PASS 36/36** (`hh2a-tip-cpu` at 4daea585, and `hh2a-tip2-cpu` at 991a9f1b after the `prepare_real_upward_sweep(centers=)` change)
+- *CI:* `integration-strict-targets` as CI runs it (coverage, `-n 2`, typecheck 0): 26 passed / 2 skipped in 8.7 min
+  (cap 25), peak RSS 3.45 GB; top-level `tests/unit` guards with typecheck=1 pass; `test_shards.py check` rc 0.
+
+**HoreKa** (prepared, not run): bundle job `hh` (`bench/slurm/h0/jobs/hh.sh` ->
+`bench/slurm/hh/target_points_timing.sbatch` -> `bench/target_points_timing.py`), 17 rows, ~1.5-2 h, limit 3 h, one
+node: `step_<mac>_1e8` (the base), `targets_<mac>_<far>_1e8_{1e4,1e5,1e6}`, `back_<far>_1e8_1e5`,
+`backfull_1e7_1e5`; the summary prints each target row's cost over the step and the device peak. Submit with the
+bundle (`bash bench/slurm/h0/submit_all.sh --only hh`, or the default set). CPU smoke: `SMOKE=1 ... --only hh`
+passes on the development machine (preflight entry 295 s, the job's 5 smoke rows 473 s;
+  `SMOKE=1 H0_LOCAL_ENV=<env> H0_PREFLIGHT_ONLY=hh bash bench/slurm/h0/submit_all.sh --only hh`).
+
+**Left on #302 (stays open):** gradients through the target walk; `dehnen_theta`; `mac_force_scale_floor` on the
+points; the solver facade's `target_points=` (a frozen-surface change, not cheap: not done); the mesh. Done now: the
+frontier walk (was the last bullet).
