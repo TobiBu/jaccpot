@@ -121,6 +121,9 @@ entry a4 env CUDA_VISIBLE_DEVICES="$FIRST_CARD" bash -c "$(declare -f a4_entry);
 entry hh bash -c "CUDA_VISIBLE_DEVICES=$FIRST_CARD $H0_PY bench/target_points_timing.py --n $N --m $((N / 64)) --mode targets \
   --mac err --reps 1 --out $OUT/hh/targets.json && CUDA_VISIBLE_DEVICES=$FIRST_CARD $H0_PY bench/target_points_timing.py \
   --n $N --m $((N / 64)) --mode back --reps 1 --out $OUT/hh/back.json"
+# HH3a: the K-cluster slow step through nornax's FusedClustersForce (nornax from H0_NORNAX_HH3), galaxy N, 3 x N / 256
+entry hh3 env CUDA_VISIBLE_DEVICES="$FIRST_CARD" PYTHONPATH="$H0_NORNAX_HH3:$PYTHONPATH" "$H0_PY" bench/hybrid_clusters_timing.py \
+  --n "$N" --k 3 --m "$((N / 256))" --mode slow --coupling fmm --reps 1 --out "$OUT/hh3/slow.json"
 # M3: a sharded checkpoint written by the node's processes and restored elastically by one (orbax in the venv)
 entry m3 bash -c "JAX_COORDINATOR_PORT=$((PORT + 5)) srun ${MP[*]} $H0_PY bench/m3_checkpoint_io.py write --n $N --steps 1 --reps 1 \
   --ckpt $OUT/m3/ck --out $OUT/m3/write && JAX_COORDINATOR_PORT=$((PORT + 6)) srun --ntasks=1 --gres=gpu:1 $H0_PY \

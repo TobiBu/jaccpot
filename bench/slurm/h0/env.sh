@@ -57,6 +57,7 @@ export H0_PY
 export H0_YGGDRAX=${H0_YGGDRAX:-$H0_ROOT/src/yggdrax}
 export H0_NORNAX=${H0_NORNAX:-$H0_ROOT/src/nornax}
 export H0_MIMIRAX=${H0_MIMIRAX:-$H0_ROOT/src/mimirax}
+export H0_NORNAX_HH3=${H0_NORNAX_HH3:-$H0_ROOT/src/nornax-hh3}
 export BENCH_DIR=${H0_BENCH_DIR:-$H0_ROOT/bench_dir/benchmark_multigpu}
 export DISC_IC=${H0_DISC_IC:-$H0_ROOT/data/disk_bulge_25m.npz}
 export H0_DATA=${H0_DATA:-$H0_ROOT/data}
