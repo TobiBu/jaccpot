@@ -193,7 +193,19 @@ class SourceGroups(NamedTuple):
 
 
 class _GroupTables(NamedTuple):
-    """Per group: centre ``[K, 3]``, inner radius ``[K]``, multipole ``[K, (q+1)^2]``, mass ``[K]``."""
+    """Per-group tables of a grouped back-reaction.
+
+    Attributes
+    ----------
+    centres : Array
+        ``[K, 3]`` the groups' COMs (the expansion centres).
+    r_in : Array
+        ``[K]`` the inner radii (``0`` for a group without mass).
+    multipoles : Array
+        ``[K, (q+1)^2]`` packed real multipoles about the centres.
+    mass : Array
+        ``[K]`` the groups' masses.
+    """
 
     centres: Array
     r_in: Array
@@ -613,8 +625,10 @@ def _check_groups(plan: BackReactionPlan, groups: Optional[SourceGroups]) -> Non
     if groups is None:
         raise ValueError(f"the plan has {k} source groups: pass groups=SourceGroups")
     shape = tuple(jnp.shape(groups.masses))
-    if len(shape) != 2 or shape[0] != k or tuple(jnp.shape(groups.positions)) != (
-        shape + (3,)
+    if (
+        len(shape) != 2
+        or shape[0] != k
+        or tuple(jnp.shape(groups.positions)) != (shape + (3,))
     ):
         raise ValueError(
             f"groups must be [K={k}, M, 3] positions and [K, M] masses, got "

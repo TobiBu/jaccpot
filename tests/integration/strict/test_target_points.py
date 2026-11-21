@@ -708,7 +708,9 @@ def test_a_point_mask_leaves_the_active_points_bitwise(groups_lane):
         got = evaluate_back_reaction(
             prov, topo, pts, plan=plan, softening=EPS, groups=groups, point_mask=jm
         )
-        own_plan = plan_back_reaction(prov, topo, pts[mask], softening=EPS, groups=groups)
+        own_plan = plan_back_reaction(
+            prov, topo, pts[mask], softening=EPS, groups=groups
+        )
         own = evaluate_back_reaction(
             prov, topo, pts[mask], plan=own_plan, softening=EPS, groups=groups
         )

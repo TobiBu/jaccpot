@@ -58,9 +58,10 @@ def _ic(n: int, k: int, m: int, seed: int) -> tuple:
     r = np.exp(rng.uniform(np.log(0.3), np.log(10.0), k))
     d = rng.normal(size=(k, 3))
     d /= np.linalg.norm(d, axis=1)[:, None]
-    xc = np.stack([_plummer(m, 0.012, rng) for _ in range(k)]) + (r[:, None] * d)[
-        :, None, :
-    ]
+    xc = (
+        np.stack([_plummer(m, 0.012, rng) for _ in range(k)])
+        + (r[:, None] * d)[:, None, :]
+    )
     mc = np.full((k, m), 1e-4 / m)
     return xg, mg, xc, mc
 
