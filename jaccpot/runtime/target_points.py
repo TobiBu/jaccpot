@@ -1775,11 +1775,22 @@ class TargetSources(NamedTuple):
     force_scale : Optional[Array]
         ``[N]`` the sources' f_b for a ``dehnen_error`` rebuild (``None``
         otherwise).
+    bounds : Optional[tuple]
+        The rebuild's Morton box ``(lo, hi)`` (``None``: inferred from the
+        positions), as ``provider.rebuild(bounds=)``.
+    num_valid : Optional[Array]
+        Live rows of a capacity-padded source array, as
+        ``provider.rebuild(num_valid=)`` (``None``: all rows). With ``bounds``
+        the box of the live rows and the dead rows' masses zero, this is the
+        live-row topology of an escaper split or a capacity reserve
+        (``jaccpot.escapers.live_bounds``).
     """
 
     positions: Array
     masses: Array
     force_scale: Optional[Array]
+    bounds: Optional[tuple] = None
+    num_valid: Optional[Array] = None
 
 
 def _jitted(provider: Any, plan: TargetPlan, **static: Any) -> Any:
@@ -1807,8 +1818,16 @@ def _jitted(provider: Any, plan: TargetPlan, **static: Any) -> Any:
         point_mask: Optional[Array] = None,
     ) -> TargetField:
         if isinstance(topology, TargetSources):
+            extra = {}
+            if topology.bounds is not None:
+                extra["bounds"] = topology.bounds
+            if topology.num_valid is not None:
+                extra["num_valid"] = topology.num_valid
             topology = provider.rebuild(
-                topology.positions, topology.masses, force_scale=topology.force_scale
+                topology.positions,
+                topology.masses,
+                force_scale=topology.force_scale,
+                **extra,
             )
         return evaluate_target_points(
             provider,
