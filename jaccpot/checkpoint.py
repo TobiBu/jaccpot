@@ -697,8 +697,9 @@ def verify_shards(arrays: Mapping[str, Any], manifest: Mapping[str, Any]) -> Non
     for name, arr in arrays.items():
         records = {int(r[0]): r for r in manifest["arrays"][name]["shards"]}
         if isinstance(arr, np.ndarray):
+            # a 0-d array is one shard of one "row" (build_manifest's convention)
             pieces = [
-                (start, arr[start : start + rows])
+                (start, arr[start : start + rows] if arr.ndim else arr)
                 for start, rows, _ in records.values()
             ]
         else:

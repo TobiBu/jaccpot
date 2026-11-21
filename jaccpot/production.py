@@ -87,7 +87,12 @@ from yggdrax import TreeDepthError
 
 from jaccpot.escapers import EscaperPolicy
 from jaccpot.runtime.fmm_state import check_drift_order
-from jaccpot.scheme import check_mesh_scheme, check_scheme, scheme_record
+from jaccpot.scheme import (
+    check_mesh_scheme,
+    check_scheme,
+    is_carried_scheme,
+    scheme_record,
+)
 
 __all__ = [
     "DIAGNOSTICS",
@@ -344,6 +349,12 @@ class SegmentEdge:
     plan : dict
         The plan the segment ran with: leaf capacity, validated walk caps, level
         registry, depth bound, force key.
+    carried : Any
+        A carried scheme's carry at this edge (``ProductionRunner(scheme=<a
+        jaccpot.scheme.CarriedScheme>)``, e.g. the clusters; HH3b), valid during
+        the callback; ``None`` otherwise. ``state``/``masses`` are then the
+        galaxy's rows in the caller's order and ``self_acceleration`` their slow
+        acceleration.
     """
 
     step: int
@@ -356,6 +367,7 @@ class SegmentEdge:
     self_acceleration: Any
     diagnostics: Optional[dict]
     plan: dict
+    carried: Any = None
 
     def state_host(self) -> np.ndarray:
         """The state as a host array (a copy).
@@ -516,6 +528,10 @@ class RunResult:
         unknown), ``transfers`` (particles that changed side). ``state`` and
         ``masses`` are in the CALLER's order; ``handle``'s arrays in the internal
         one (a continuation re-orders the state).
+    carried : Any
+        A carried scheme's final carry (``ProductionRunner(scheme=<a
+        jaccpot.scheme.CarriedScheme>)``; ``handle`` is then ``None`` and a
+        continuation consumes this), else ``None``.
     """
 
     state: Any
@@ -536,6 +552,7 @@ class RunResult:
     state_owned: bool = True
     mode: str = "single"
     escapers: Optional[dict] = None
+    carried: Any = None
 
 
 def segment_lengths(num_steps: int, steps: int) -> tuple:
@@ -2014,6 +2031,16 @@ class ProductionRunner:
         self.step_callback_stride = int(step_callback_stride)
         #: the integration scheme (``None``: the built-in KDK)
         self.scheme = check_scheme(scheme)
+        if is_carried_scheme(self.scheme) and (
+            external_acceleration_fn is not None
+            or external_potential_fn is not None
+            or step_callback is not None
+        ):
+            raise ValueError(
+                f"{type(self.scheme).__name__} carries its own block and programs "
+                "(the clusters): no external field and no in-scan step_callback on "
+                "that path yet; use callbacks at the segment edges"
+            )
         if escapers is not None and not isinstance(escapers, EscaperPolicy):
             raise TypeError(
                 "escapers must be a jaccpot.escapers.EscaperPolicy, got "
@@ -2127,6 +2154,21 @@ class ProductionRunner:
             When the eager prepare's tree is deeper than yggdrax's
             ``MAX_TREE_LEVELS``; the message adds the IC guard's report.
         """
+        if self._mesh_backend is None and is_carried_scheme(self.scheme):
+            # a carried scheme (the clusters, HH3b): its carry, the runner's loop
+            from jaccpot.carried import run_carried
+
+            return run_carried(
+                self,
+                state,
+                masses,
+                dt=dt,
+                num_steps=num_steps,
+                t0=t0,
+                force_params=force_params,
+                external_params=external_params,
+                restart_from=restart_from,
+            )
         if self._mesh_backend is not None:
             return self._mesh_backend.run(
                 state,
@@ -2854,6 +2896,11 @@ class ProductionRunner:
             failed rebuild's overflow bits, ``None`` when it fitted). With
             ``live_rows`` also ``couple`` (``W_c``) and ``kinetic_escapers``.
 
+        Raises
+        ------
+        ValueError
+            Under a carried scheme (its energy is the scheme's, in the rows).
+
         Notes
         -----
         THE PLAN (#488). The program's key holds the provider's key and the level
@@ -2872,6 +2919,11 @@ class ProductionRunner:
         """
         import jax
 
+        if is_carried_scheme(self.scheme):
+            raise ValueError(
+                "a carried scheme's energy is its own (scheme.energy(carry); the "
+                "diagnostics rows carry it): potential_energy is the built-in path's"
+            )
         prov = handle.provider
         field = self.external_potential_fn
         force_key = handle.force_key
@@ -3263,6 +3315,11 @@ class ProductionRunner:
         """
         if self._mesh_backend is not None:
             return self._mesh_backend.save_restart(path)
+        if is_carried_scheme(self.scheme):
+            # a carried scheme: ``*.npz`` a file, any other path an orbax checkpoint
+            from jaccpot.carried import save_carried
+
+            return save_carried(self, path)
         import jax
 
         current = self._current
