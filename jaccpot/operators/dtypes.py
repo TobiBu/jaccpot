@@ -20,16 +20,29 @@ from yggdrax.dtypes import INDEX_DTYPE, as_index
 # then evaluated ``sqrt(0)`` / ``x / 0`` and produced all-NaN gradients as soon as
 # the far field was active, while float64 stayed clean. See
 # :func:`squared_radius_floor`.
+#
+# A normal floor is not enough either: the L2P's reverse is SECOND order in the
+# offset (its custom VJP is a Hessian-vector product, and plain autodiff is
+# reverse-over-reverse), and ``d^2 sqrt / dr2^2 = -r2^(-3/2) / 4`` at the floor.
+# float32's smallest normal (1.2e-38) gives 7.8e56 there, past float32's max, so
+# a particle exactly at its leaf's expansion centre or on the centre's z axis
+# (one-particle leaves; common at any N) turned ``inf * 0`` into NaN in the
+# position gradient. The floor has to keep ``floor^(-3/2)`` finite as well.
 _LEGACY_SQUARED_RADIUS_FLOOR = 1e-60
 
 
 def squared_radius_floor(dtype: DTypeLike) -> float:
-    """Smallest squared radius representable enough to keep ``sqrt`` differentiable.
+    """Squared-radius floor that keeps ``sqrt`` twice differentiable in ``dtype``.
 
-    Returns the historical ``1e-60`` wherever it is a normal number of ``dtype``
-    (so float64 behaviour is preserved bit-for-bit) and the dtype's smallest
-    normal otherwise (float32/float16, where ``1e-60`` would flush to zero and
-    disable the guard entirely).
+    Returns the historical ``1e-60`` wherever it and ``1e-60 ** -1.5`` are both
+    finite normal numbers of ``dtype`` (float64, whose behaviour is preserved
+    bit-for-bit), and ``sqrt(tiny)`` of the dtype otherwise -- 1.1e-19 for
+    float32, so ``r >= 3.3e-10`` and ``floor ** -1.5 = 2.8e28``, ten orders of
+    magnitude inside float32's range. ``1e-60`` flushes to zero in float32, and
+    the dtype's smallest normal still overflows the second derivative the L2P
+    reverse takes (see the comment above ``_LEGACY_SQUARED_RADIUS_FLOOR``). The
+    floor binds only at displacements below ``sqrt(floor)``, which for float32
+    coordinates of order one are exact zeros.
 
     Parameters
     ----------
@@ -45,8 +58,12 @@ def squared_radius_floor(dtype: DTypeLike) -> float:
         out of the traced graph. Cast it to the working dtype at the use site,
         as :func:`floor_squared_radius` does.
     """
-    tiny = float(np.finfo(jnp.dtype(dtype)).tiny)
-    return max(_LEGACY_SQUARED_RADIUS_FLOOR, tiny)
+    info = np.finfo(jnp.dtype(dtype))
+    tiny, huge = float(info.tiny), float(info.max)
+    legacy = _LEGACY_SQUARED_RADIUS_FLOOR
+    if legacy >= tiny and legacy**-1.5 < huge:
+        return legacy
+    return float(np.sqrt(tiny))
 
 
 def floor_squared_radius(r2: Array) -> Array:

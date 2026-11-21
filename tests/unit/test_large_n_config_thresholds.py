@@ -148,6 +148,64 @@ def test_squared_radius_floor_preserves_float64_and_is_normal_in_float32():
     f32_floor = squared_radius_floor(jnp.float32)
     assert f32_floor >= float(np.finfo(np.float32).tiny)
     assert np.float32(f32_floor) > 0.0
+    # ... and d^2 sqrt / dr2^2 ~ floor^(-3/2) at the floor must not overflow,
+    # since the L2P reverse is second order (the smallest normal fails this)
+    assert np.isfinite(np.float32(f32_floor) ** np.float32(-1.5))
+
+
+@pytest.mark.parametrize("analytic", [True, False], ids=["hvp-vjp", "autodiff"])
+@pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
+@pytest.mark.parametrize(
+    "delta,label",
+    [
+        ([0.0, 0.0, 0.0], "particle at the expansion centre (one-particle leaf)"),
+        ([0.0, 0.0, 0.3], "on the centre's z axis (rho == 0)"),
+        ([0.1, -0.2, 0.3], "generic control"),
+    ],
+)
+def test_l2p_second_order_reverse_is_finite_at_degenerate_offsets(
+    analytic, dtype, delta, label
+):
+    """The L2P's reverse in the offset is second order; it must stay finite in fp32.
+
+    ``evaluate_local_real_with_grad`` returns ``grad phi``, so a position gradient
+    through the far field differentiates it again: a Hessian-vector product in its
+    custom VJP, reverse-over-reverse without it. At the floored radius that needs
+    ``floor^(-3/2)``, which overflowed float32 with the floor at float32's smallest
+    normal: the fused lane's float32 position gradient was NaN for every particle
+    at its leaf's centre or on the centre's z axis (13 of 272 rows at N=256), while
+    the forward and float64 were clean. Mutation-checked: with the floor back at
+    ``max(1e-60, tiny)`` the two degenerate float32 cases fail in both modes.
+    """
+    from unittest import mock
+
+    from jaccpot.operators import real_p2m_l2p
+
+    order = 4
+    rng = np.random.default_rng(0)
+    coeffs = jnp.asarray(rng.normal(size=(order + 1) ** 2), dtype)
+    v = jnp.asarray(rng.normal(size=3), dtype)
+    d = jnp.asarray(delta, dtype)
+    # unjitted: the jitted wrapper reads the switch at trace time, so its cache
+    # would keep whichever mode ran first
+    evaluate = real_p2m_l2p.evaluate_local_real_with_grad.__wrapped__
+
+    def loss(dd):
+        grad, _ = evaluate(coeffs, dd, order=order)
+        return jnp.vdot(grad, v)
+
+    with mock.patch.object(real_p2m_l2p, "analytic_l2p_vjp_enabled", lambda: analytic):
+        hvp = jax.grad(loss)(d)
+    assert jnp.all(jnp.isfinite(hvp)), f"non-finite L2P second-order reverse at {label}"
+    if label == "generic control":
+        # away from the floor the float32 result is the float64 one to rounding
+        ref = jax.grad(
+            lambda dd: jnp.vdot(
+                evaluate(coeffs.astype(jnp.float64), dd, order=order)[0],
+                v.astype(jnp.float64),
+            )
+        )(d.astype(jnp.float64))
+        np.testing.assert_allclose(np.asarray(hvp), np.asarray(ref), rtol=1e-4)
 
 
 def test_fp32_farfield_gradient_is_finite():
