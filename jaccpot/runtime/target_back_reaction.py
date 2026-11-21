@@ -138,6 +138,40 @@ class BackReactionPlan:
         """Inner points the plan holds."""
         return int(self.inner.num_points)
 
+    def grown(
+        self, needs: Any, headroom: float = 1.5, stats: Optional[Any] = None
+    ) -> "BackReactionPlan":
+        """The plan with its inner walk grown to ``needs`` (and the inner count in ``stats``).
+
+        Parameters
+        ----------
+        needs : Any
+            The inner walk's ``(far, near)`` (:attr:`TargetField.needs`).
+        headroom : float
+            Multiplier on the needs.
+        stats : Optional[Any]
+            The evaluation's :attr:`TargetField.stats` (queue peak, MAC tests,
+            inner points): the queue as in :meth:`TargetPlan.grown`, and an inner
+            count above the capacity grows it (``headroom`` times, a multiple of
+            the group size, at most every point).
+
+        Returns
+        -------
+        BackReactionPlan
+            The grown plan.
+        """
+        inner = self.inner.grown(needs, headroom, stats)
+        if stats is not None:
+            count = int(np.asarray(stats).reshape(-1)[2])
+            if count > self.inner_capacity:
+                g = int(inner.group_size)
+                cap = min(
+                    _ceil_to(count * float(headroom), g),
+                    _ceil_to(int(self.num_points), g),
+                )
+                inner = dataclasses.replace(inner, num_points=max(cap, count))
+        return dataclasses.replace(self, inner=inner)
+
 
 class SourceGroups(NamedTuple):
     """K source groups (clusters) for a grouped back-reaction.
