@@ -1991,9 +1991,16 @@ inflated x4, the galaxy preset on its CPU route, leaf 16, p4, geometric MAC, cro
 | 2 restart == uninterrupted, `.npz`, FRESH processes | from segment 1 (79 transfers + reserve re-plan 1 -> 79), 2 (17 transfers + re-plan 79 -> 158), 3 (ordinary): **bitwise**, every state leaf and every diagnostics row, `restored["bitwise"]` True |
 | 2 the same from **orbax** checkpoint directories | **bitwise**, all three |
 | 3 escapers + stripping (4 fliers at 6x escape speed, `EscaperPolicy(5.0)`: 33 escapers at the start, 3 more later) | 96 stripped, escapers 33 -> 36; ledgered drift with both ledgers <= **1.05e-6** over 6 edges (raw <= 7.9e-6); controls on the same IC: escapers alone <= 5.1e-7 (raw 1.3e-5), stripping alone <= 2.0e-7; every caller row and every star in exactly one place; restart from `.npz` at segments 1-3 **bitwise** |
-| 4 default path | identity **36/36**; existing shards: see the CI line below |
+| 4 default path | identity **36/36**; a cluster-free `.npz` written by main 5fc168a0 continues here to 0 differing elements (reported mismatch: `versions` only); the shards below |
+| 5 GPU, functional (one shared A100 per process, contended, no timings) | galaxy 1e6 Hernquist (`galaxy_solver`: `dehnen_error`, leaf 64, p6) + 10 x 1e4 Plummer clusters (HH2b's gate-5 system), cross + coupling fmm, reserve 4096, 4 segments x 5 steps, dt 2e-3, an orbax checkpoint per edge: 1042 stars stripped (991 at edge 1, one star-tree re-plan at that refresh), energy drift <= 1.5e-8 (ledgered the same), momentum <= 2.2e-9, device peak 1.84e9 B. A run SIGKILLed after its segment-2 checkpoint and continued in a fresh process on another card: **0 of 25 state arrays differ** from the uninterrupted run, `restored["bitwise"]` True -- with `--xla_gpu_deterministic_ops=true` next to the fusion autotuner off. Without it two uninterrupted runs already differ after one segment (11 of 25 arrays, 8e-7): the clusters' GPU path (target walks, direct sums) is not deterministic run to run, so a GPU continuation is bitwise only under deterministic ops |
 
-GPU (gate 5) and CI: `mn-scratch/hh3b/REPORT.md` (filled when they finished).
+**CI** (CI arguments, this host): `integration-strict-carried` (new; io extra) 7 passed at typecheck 0 and 1 (8 min, peak
+RSS 2.6 GB); `integration-strict-scheme` 12; `characterization` 21; `unit` (typecheck 1) 1478 passed / 202 skipped;
+`distributed-segment-scheme` 3 (2 forced devices); `distributed-checkpoint` 15 (4 forced devices); `py-floor` 63;
+`test_shards.py check` rc 0. GitHub: #524 47/47 green.
+
+**GPU restarts need deterministic ops for the clusters** (launch environment): the built-in runner's bitwise GPU
+continuation needs only the fusion autotuner off; with clusters also `--xla_gpu_deterministic_ops=true`.
 
 ### Open
 - The mesh (nornax section 12 item 2), Aarseth internal steps (item 3), the Odisseo science layer (item 4), HoreKa
