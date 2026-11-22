@@ -46,7 +46,9 @@ kk() { echo "${SMOKE_K:-$1}"; }
 mm() { echo "${SMOKE_M:-$1}"; }
 
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES%%,*}
-export XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
+# preallocated (one BFC region): HH3a's local 1e8 runs (2026-11-22) failed the slow program's single 19.5 GiB temp
+# allocation in a NON-preallocated pool fragmented by the 31.8 GB prepare peak
+export XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_experimental_enable_fusion_autotuner=false"
 
 echo "node $(hostname) card ${CUDA_VISIBLE_DEVICES}"

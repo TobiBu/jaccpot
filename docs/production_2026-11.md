@@ -1942,3 +1942,40 @@ ONE cluster). This session extends the plan to K source groups, adds a public in
 **A convention to know** (unchanged, the walk's and HH2a's too): an order-`q` M2L gives the FORCE from the
 multipoles up to `q - 1` (the potential up to `q`). `mp_order = 1` and `2` give the same force (the dipole about the
 COM is zero).
+
+### Order and radii: measured (gate 1)
+
+Against an fp64 direct sum of the K clusters' field (the points' softening `eps_g` 0.005, the engine's kernel) at a
+galaxy of 1e6 points (Hernquist, `a = 1`), a reference subsample of ~4500-6500 points split by region (inside a
+cluster's `r_in`, 1-3 `r_in`, farther). Clusters: Plummer `r_c` 0.005, `M_c` 1e-4 each, at log-uniform radii 0.3-10
+(K = 1: at R = 1, M = 1e5, HH2a's GPU configuration). Star tree: geometric theta 0.5, leaf 64, p6; GPU (contended,
+accuracy only). Rows `mn-scratch/hh3a/runs/gate1_1e6.jsonl`.
+
+| K x M | plan | theta_mp / order | rel-L2 | p99.9 | inside / near / far rel-L2 | inner points | temporaries |
+|---|---|---|---|---|---|---|---|
+| 1 x 1e5 | full `target_points` | - | 1.57e-6 | 3.0e-6 | 1.6e-6 / 1.1e-6 / 2.0e-7 | 1e6 | - |
+| 1 x 1e5 | root (HH2a) | 0.5 / 6 | 1.75e-6 | 8.3e-6 | 1.6e-6 / 2.8e-6 / 1.7e-7 | 146 | 186 MB |
+| 1 x 1e5 | grouped | 0.5 / 6 | 1.76e-6 | 8.3e-6 | 1.6e-6 / 2.8e-6 / 1.6e-7 | 146 | 186 MB |
+| 1 x 1e5 | grouped | 0.3 / 4 | 1.56e-6 | 4.0e-6 | 1.6e-6 / 1.4e-6 / 1.9e-7 | 688 | 54 MB |
+| 10 x 1e4 | full `target_points` | - | 1.19e-5 | 4.8e-3 | 9.9e-6 / 4.0e-5 / 5.9e-4 | 1e6 | - |
+| 10 x 1e4 | grouped | 0.5 / 6 | 9.77e-6 | 7.4e-5 | 9.8e-6 / 1.0e-5 / 2.6e-7 | 1,651 | 1.31 GB |
+| 10 x 1e4 | grouped | 0.5 / 4 | 1.01e-5 | 1.0e-4 | 9.8e-6 / 4.9e-5 / 5.9e-7 | 1,651 | 0.52 GB |
+| 10 x 1e4 | grouped | 0.3 / 4 | 5.91e-6 | 5.5e-5 | 5.8e-6 / 1.7e-5 / 5.9e-7 | 7,404 | 0.52 GB |
+| 150 x 1e3 | full `target_points` | - | 9.82e-6 | 1.3e-3 | 7.1e-6 / 1.7e-4 / 1.8e-4 | 1e6 | - |
+| 150 x 1e3 | grouped | 0.5 / 6 | 7.62e-6 | 2.0e-4 | 7.6e-6 / 2.7e-5 / 1.4e-7 | 27,687 | 1.31 GB |
+| 150 x 1e3 | grouped | 0.5 / 4 | 8.77e-6 | 5.1e-4 | 7.6e-6 / 1.2e-4 / 4.3e-7 | 27,687 | 0.52 GB |
+| 150 x 1e3 | grouped | 0.3 / 4 | 7.97e-6 | 7.5e-4 | 7.2e-6 / 9.8e-5 / 4.3e-7 | 100,479 | 0.52 GB |
+
+- **K = 1 at equal settings is HH2a's number** (grouped == root to 1e-8; HH2a measured 2.2e-6 at 1e6 x 1e5).
+- **K = 10 and 150 are better than the full target walk at the same criterion**, everywhere: one multipole per
+  cluster at `r >= R_k / 0.5` with p6 beats the walk's per-group acceptance far away (far: 2.6e-7 vs 5.9e-4). What
+  remains is the inner walk's own error (inside-region rel-L2 = the full walk's).
+- **The defaults stay HH2a's** (`theta_mp` = the provider's theta, `mp_order` = its order): the gate's "equal
+  settings", the best p99.9 at K = 150, and the smallest inner set. `theta_mp` 0.3 with order 4 is the option
+  that halves the outer M2P cost (the temporaries above are one `slice_size x group_chunk` batch) at K <= 10.
+- **The inner set at 1e8 is set by the clusters' tails and the galaxy density there**: `R_k` is the FARTHEST member
+  (a Plummer realisation reaches ~12 r_c). Compile-only (CPU compile of the 1e8-point program, HH3a gate-4 IC:
+  `r_c` 0.012): 150 x 1e3 at theta_mp 0.5 / p6 -> 22 % of the galaxy inner (capacity 3.3e7), 12.9 GiB of
+  temporaries; at 0.3 / q4 -> 35 % (5.2e7), 17.7 GiB; 10 x 1e4 at 0.3 / q4 -> 6.4 GiB. After the first stripping
+  edge `R_k <= 2 r_J` shrinks it. A core / tail split (tail stars as monopoles) is the next lever if it binds
+  (open issue).
