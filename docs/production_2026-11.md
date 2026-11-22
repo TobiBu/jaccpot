@@ -1901,3 +1901,44 @@ passes on the development machine (preflight entry 295 s, the job's 5 smoke rows
 **Left on #302 (stays open):** gradients through the target walk; `dehnen_theta`; `mac_force_scale_floor` on the
 points; the solver facade's `target_points=` (a frozen-surface change, not cheap: not done); the mesh. Done now: the
 frontier walk (was the last bullet).
+
+## HH3a — many clusters at production scale: the grouped back-reaction (hybrid Hermite session 3, wave 7, 2026-11-21)
+
+HH2a's back-reaction (`plan_back_reaction`) takes ONE compact source set: the root multipole about the global COM
+beyond `r_in = max(R / theta_mp, R + floor)`, the target walk inside. nornax's `FusedClustersForce` puts K clusters
+all over the galaxy into one star tree, so that root's `R` spans the galaxy and every galaxy point is "inner": the
+plain target walk over all N galaxy points, which does not fit 1e8 (session 1: ~10-11 GB of per-point transients for
+ONE cluster). This session extends the plan to K source groups, adds a public inactive-point mask, and lets
+`TargetSources` describe a live-row rebuild. All of it is opt-in or new API: the default path is program-identical
+(identity below), and a root plan (`groups=None`) is HH2a's program.
+
+### The API (`jaccpot/runtime/target_back_reaction.py`, `target_points.py`, `fused_provider.py`)
+
+- **`SourceGroups(positions [K, M, 3], masses [K, M])`**: the topology's particles laid out by group (a zero mass is
+  an empty slot). `plan_back_reaction(..., groups=SourceGroups)` returns a `BackReactionPlan` with
+  `num_groups = K`; `evaluate_back_reaction(..., groups=)` and `provider.target_field(..., groups=)` take the same
+  groups (traced). A mismatch is refused (`ValueError`), a root plan refuses groups, a plain `TargetPlan` too.
+- **Per group** `k` (`_group_tables`, one traced pass): the COM `c_k`, the exact radius `R_k` (the farthest member),
+  `r_in_k = max(R_k / theta_mp, R_k + floor, r_min)`, and the multipole about `c_k` by a direct P2M over the members
+  (`p2m_real_direct`, the lane's real basis), truncated at `mp_order`. A group without mass (a dissolved cluster)
+  gets `r_in = 0` and a zero multipole: it contributes nothing and has no inner region.
+- **Outer points** (outside EVERY `r_in_k`): the sum of the K multipoles, M2P per (point, group) with the root
+  path's operators (`m2l_rot_scale_real_batch` + L2P at zero offset), `slice_size` points per `fori_loop` step and,
+  inside, a `scan` over chunks of `group_chunk` groups (`slice_size x group_chunk` pairs per batch; default 8).
+- **Inner points** (inside ANY `r_in_k`): the whole star tree through the target walk at a static capacity (as
+  HH2a), so they get every group's field at the walk's accuracy and no group is counted twice.
+- **`point_mask`** (`plan_back_reaction`, `evaluate_back_reaction`, `provider.target_field`; `evaluate_target_points`
+  had it): inactive points get zeros and take no part in the inner walk's groups (they are compacted out before the
+  walk), so they change no active point's field, bitwise (test below). It replaces nornax's private
+  `target_points._morton_order` read for a capacity reserve's free rows.
+- **`BackReactionPlan.grown(needs, headroom, stats)`**: the inner walk grown from its needs and, from `stats[2]`,
+  an inner count above the capacity (nornax's segment retry calls `.grown` on every plan).
+- **`TargetSources(..., bounds=, num_valid=)`**: the planning rebuild of a capacity-padded source array
+  (`provider.rebuild(bounds=, num_valid=)`), so a live-row topology (an escaper split, a reserve) plans from sources
+  too, without an eager topology resident.
+- `fused_provider.py`: `target_field` forwards `point_mask=` and `groups=` (~20 lines; not HH3a's file, no program
+  change for existing calls).
+
+**A convention to know** (unchanged, the walk's and HH2a's too): an order-`q` M2L gives the FORCE from the
+multipoles up to `q - 1` (the potential up to `q`). `mp_order = 1` and `2` give the same force (the dipole about the
+COM is zero).
