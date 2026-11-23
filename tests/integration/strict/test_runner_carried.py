@@ -469,3 +469,7 @@ def test_donate_input_donates_the_first_segment_too(one_go):
     )
     _same(_final(res), want)
     assert [e for e in scheme.log if e[0] == "donated"] == [("donated", True)] * 3
+    # the caller lent its state (the start copied it): released, as the plain
+    # runner's donate_input; the masses (the carry's own leaf here) are kept
+    assert state.is_deleted()
+    assert not masses.is_deleted()

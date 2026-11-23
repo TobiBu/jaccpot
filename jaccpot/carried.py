@@ -32,6 +32,7 @@ shapes, digests).
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import os
 import time
@@ -366,6 +367,28 @@ def _cluster_fields(
     return fields
 
 
+def _consume_input(state: Any, carry: Any) -> None:
+    """``donate_input``: delete the caller's ``state`` once the scheme's start holds its own.
+
+    As the plain runner (``ProductionRunner.run`` deletes the caller's buffer once
+    its split copied it): the caller lent the state to the run, and a second full
+    galaxy state through it costs 2.4 GB at 1e8 (an edge re-plan at 1e8 + 150 x 1e3
+    clusters did not fit beside it). Kept when the carry holds that very array (a
+    pytree leaf of the carry or of one of its dataclass fields): the first segment
+    then donates it itself.
+    """
+    import jax
+
+    if not isinstance(state, jax.Array) or state.is_deleted():
+        return
+    parts = [carry]
+    if dataclasses.is_dataclass(carry) and not isinstance(carry, type):
+        parts += [getattr(carry, f.name) for f in dataclasses.fields(carry)]
+    if any(leaf is state for leaf in jax.tree_util.tree_leaves(parts)):
+        return
+    state.delete()
+
+
 def run_carried(
     runner: Any,
     state: Any,
@@ -696,6 +719,10 @@ def run_carried(
     owned_first = bool(getattr(seg, "donate_input", False)) or isinstance(
         restart_from, (str, os.PathLike)
     )
+
+    if restart_from is None and bool(getattr(seg, "donate_input", False)):
+        _consume_input(state, carry)
+    del state
 
     def run_segment(start: Any, length: int, donate: bool) -> Any:
         if donate:

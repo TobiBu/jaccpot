@@ -186,7 +186,10 @@ class CarriedScheme(Protocol):
     for a retry. The runner donates the first segment only with
     ``SegmentConfig.donate_input`` or after a restart from a file (the carry is then
     the runner's own), and every later segment. Without them every segment keeps its
-    start on the device.
+    start on the device. With ``donate_input`` the runner also deletes the caller's
+    ``state`` after ``start`` (as the plain runner does once its split copied it),
+    unless the carry holds that very array; a scheme must not keep the caller's
+    array anywhere else.
 
     Attributes
     ----------
