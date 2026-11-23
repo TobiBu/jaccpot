@@ -39,15 +39,17 @@ I1/I2 record (``docs/production_2026-11.md``, I1 and I2) its measurements.
 from __future__ import annotations
 
 from collections.abc import Hashable
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from jaxtyping import Array
 
 __all__ = [
+    "CarriedScheme",
     "ShardedSplitStepScheme",
     "SplitStepScheme",
     "check_mesh_scheme",
     "check_scheme",
+    "is_carried_scheme",
     "scheme_close_shard",
     "scheme_open_shard",
     "scheme_record",
@@ -134,6 +136,340 @@ class SplitStepScheme(Protocol):
             ``state_open``'s (the force was evaluated there).
         """
         ...
+
+
+#: the members a :class:`CarriedScheme` must have
+CARRIED_MEMBERS = (
+    "key",
+    "record",
+    "start",
+    "segment",
+    "verdict",
+    "replanned",
+    "edge",
+    "describe",
+    "moments",
+    "energy",
+    "galaxy",
+    "fingerprint_arrays",
+    "escaper_split",
+    "checkpoint",
+    "restore",
+)
+
+
+@runtime_checkable
+class CarriedScheme(Protocol):
+    """A scheme that owns its carry and its segment program (hybrid Hermite, HH3b).
+
+    :class:`SplitStepScheme` cuts one step of the RUNNER's scan, whose carry is the
+    runner's ``[N, 2, 3]`` state. A scheme with a second carried block and a second
+    force -- nornax's direct-sum clusters inside the FMM galaxy
+    (``nornax.adapters.jaccpot_runner.ClustersRunnerScheme``) -- implements this
+    protocol instead: it owns an opaque ``carry`` (its state, its force, host
+    bookkeeping) and the programs that advance it, and the runner keeps the loop
+    (``jaccpot.carried.run_carried``: segments, the retry/re-plan loop, edges,
+    diagnostics rows, callbacks, restart files and their bitwise check). Every
+    method is EAGER (called on the host between programs). Marked by
+    ``carried = True``; :func:`check_scheme` checks the members, the mesh refuses
+    it (:func:`check_mesh_scheme`).
+
+    An optional ``max_retries`` attribute (int, default 2) bounds the re-plans per
+    segment.
+
+    Attributes
+    ----------
+    carried : ClassVar[bool]
+        ``True``.
+    """
+
+    carried: ClassVar[bool]
+
+    def key(self) -> Hashable:
+        """The static configuration.
+
+        Returns
+        -------
+        Hashable
+            Equal keys mean the same programs.
+        """
+        ...
+
+    def record(self) -> dict:
+        """The configuration as JSON (restart ``meta`` and the fingerprint).
+
+        Returns
+        -------
+        dict
+            JSON-able.
+        """
+        ...
+
+    def start(
+        self,
+        solver: Any,
+        settings: Any,
+        state: Any,
+        masses: Any,
+        *,
+        dt: float,
+        t0: float,
+        escapers: Any,
+    ) -> Any:
+        """The carry of a fresh run (its force prepared).
+
+        Parameters
+        ----------
+        solver : Any
+            The runner's (galaxy) solver.
+        settings : Any
+            The runner's ``GalaxySettings``.
+        state : Any
+            ``[N, 2, 3]`` the galaxy's positions and velocities.
+        masses : Any
+            ``[N]``.
+        dt : float
+            The step.
+        t0 : float
+            The start time.
+        escapers : Any
+            The runner's ``EscaperPolicy`` or ``None``.
+
+        Returns
+        -------
+        Any
+            The carry.
+        """
+        ...
+
+    def segment(self, carry: Any, dt: float, steps: int) -> Any:
+        """``steps`` steps of ``dt`` in one program; the input carry stays valid (a retry reruns it).
+
+        Parameters
+        ----------
+        carry : Any
+            The carry.
+        dt : float
+            The step.
+        steps : int
+            Steps.
+
+        Returns
+        -------
+        Any
+            The carry at the segment's end.
+        """
+        ...
+
+    def verdict(self, carry: Any) -> list:
+        """Why the segment that ended in ``carry`` must be re-planned.
+
+        Parameters
+        ----------
+        carry : Any
+            The carry.
+
+        Returns
+        -------
+        list
+            Reasons; empty when every static capacity fitted.
+        """
+        ...
+
+    def replanned(self, start: Any, failed: Any) -> Any:
+        """``start`` with its force grown to what the ``failed`` segment needed.
+
+        Parameters
+        ----------
+        start : Any
+            The segment's start carry.
+        failed : Any
+            Its end carry (the failed verdict).
+
+        Returns
+        -------
+        Any
+            The carry to rerun the segment from.
+        """
+        ...
+
+    def edge(
+        self, carry: Any, *, index: int, escapers_due: bool, energy: bool
+    ) -> tuple:
+        """The edge's membership checks and transfers.
+
+        Parameters
+        ----------
+        carry : Any
+            The carry.
+        index : int
+            Segments done.
+        escapers_due : bool
+            Whether the escaper check runs here.
+        energy : bool
+            Whether the run tracks the energy (an escaper change measures its jump).
+
+        Returns
+        -------
+        tuple
+            ``(carry, info)``: ``info`` as :meth:`describe`, plus what happened.
+        """
+        ...
+
+    def describe(self, carry: Any) -> dict:
+        """The edge report of an edge where nothing happened (step 0).
+
+        Parameters
+        ----------
+        carry : Any
+            The carry.
+
+        Returns
+        -------
+        dict
+            ``n_live``, ``n_escapers``, ``n_galaxy_rows``, ``n_stripped``, ``bound_mass``, ``strip_ledger``, ``reserve``, ``plan``.
+        """
+        ...
+
+    def moments(self, carry: Any) -> dict:
+        """The runner's moments over every body (fp64 host values).
+
+        Parameters
+        ----------
+        carry : Any
+            The carry.
+
+        Returns
+        -------
+        dict
+            ``mass``, ``momentum``, ``angular_momentum``, ``mass_moment``, ``kinetic``, ``momentum_scale``.
+        """
+        ...
+
+    def energy(self, carry: Any) -> dict:
+        """The potential terms at the carry.
+
+        Parameters
+        ----------
+        carry : Any
+            The carry.
+
+        Returns
+        -------
+        dict
+            ``W_gg``, ``W_gc``, ``W_cc``, ``W_cc_inter`` (and ``W_c``, ``K_escapers`` with escapers), host floats.
+        """
+        ...
+
+    def galaxy(self, carry: Any) -> tuple:
+        """The galaxy in the caller's rows.
+
+        Parameters
+        ----------
+        carry : Any
+            The carry.
+
+        Returns
+        -------
+        tuple
+            ``(state [N, 2, 3], masses [N], acceleration [N, 3])``.
+        """
+        ...
+
+    def fingerprint_arrays(self, carry: Any) -> tuple:
+        """What the fingerprint records the shapes and dtypes of.
+
+        Parameters
+        ----------
+        carry : Any
+            The carry.
+
+        Returns
+        -------
+        tuple
+            ``(positions, masses)``.
+        """
+        ...
+
+    def escaper_split(self, carry: Any) -> dict:
+        """The escaper split's summary.
+
+        Parameters
+        ----------
+        carry : Any
+            The carry.
+
+        Returns
+        -------
+        dict
+            ``n_bound``, ``transfers``, ``order``.
+        """
+        ...
+
+    def checkpoint(self, carry: Any) -> tuple:
+        """What a restart holds.
+
+        Parameters
+        ----------
+        carry : Any
+            The carry.
+
+        Returns
+        -------
+        tuple
+            ``(arrays, meta)``: named arrays and JSON that :meth:`restore` takes back.
+        """
+        ...
+
+    def restore(
+        self,
+        arrays: dict,
+        meta: dict,
+        *,
+        solver: Any,
+        settings: Any,
+        dt: float,
+        escapers: Any,
+    ) -> tuple:
+        """The carry a restart continues from, in this process.
+
+        Parameters
+        ----------
+        arrays : dict
+            The restart's arrays (host).
+        meta : dict
+            Its ``meta`` (the scheme's part).
+        solver : Any
+            The runner's solver.
+        settings : Any
+            The runner's settings.
+        dt : float
+            This run's step.
+        escapers : Any
+            The runner's escaper policy.
+
+        Returns
+        -------
+        tuple
+            ``(carry, mismatches)``; empty mismatches: the continuation is bitwise.
+        """
+        ...
+
+
+def is_carried_scheme(scheme: Any) -> bool:
+    """Whether ``scheme`` declares itself a :class:`CarriedScheme` (``carried = True``).
+
+    Parameters
+    ----------
+    scheme : Any
+        Anything.
+
+    Returns
+    -------
+    bool
+        ``getattr(scheme, "carried", False) is True``.
+    """
+    return getattr(scheme, "carried", False) is True
 
 
 @runtime_checkable
@@ -243,6 +579,14 @@ def check_mesh_scheme(scheme: Any) -> Any:
         :func:`check_scheme` refuses is a ``TypeError`` first.)
     """
     scheme = check_scheme(scheme)
+    if is_carried_scheme(scheme):
+        raise ValueError(
+            f"{type(scheme).__name__} carries its own block (the direct-sum "
+            "clusters): the multi-GPU mode does not run it yet (cluster ownership "
+            "by centre of mass, the back-reaction's multipole broadcast and the "
+            "stripped stars' mesh rows are nornax docs/hybrid_hermite.md section "
+            "12 item 2). Run it on one card (mesh=None)"
+        )
     if scheme is None or bool(scheme.rowwise) or _has_shard_form(scheme):
         return scheme
     raise ValueError(
@@ -357,14 +701,16 @@ def check_scheme(scheme: Any) -> Any:
     """
     if scheme is None:
         return None
-    missing = [
-        name
-        for name in ("rowwise", "key", "open_step", "close_step")
-        if not hasattr(scheme, name)
-    ]
+    members = (
+        CARRIED_MEMBERS
+        if is_carried_scheme(scheme)
+        else ("rowwise", "key", "open_step", "close_step")
+    )
+    missing = [name for name in members if not hasattr(scheme, name)]
     if missing:
         raise TypeError(
-            f"{type(scheme).__name__} is not a jaccpot.scheme.SplitStepScheme: "
+            f"{type(scheme).__name__} is not a jaccpot.scheme."
+            f"{'CarriedScheme' if is_carried_scheme(scheme) else 'SplitStepScheme'}: "
             f"missing {', '.join(missing)} (nornax.schemes.LeapfrogKDK is one)"
         )
     try:

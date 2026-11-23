@@ -1901,3 +1901,110 @@ passes on the development machine (preflight entry 295 s, the job's 5 smoke rows
 **Left on #302 (stays open):** gradients through the target walk; `dehnen_theta`; `mac_force_scale_floor` on the
 points; the solver facade's `target_points=` (a frozen-surface change, not cheap: not done); the mesh. Done now: the
 frontier walk (was the last bullet).
+
+## HH3b — the clusters inside `ProductionRunner`, with M3 checkpoints (hybrid Hermite session 3, wave 7, 2026-11-21)
+
+nornax `docs/hybrid_hermite.md` section 12 item 1 (now its section 13). Branch `hh3/runner-clusters` in jaccpot and
+nornax (from main 5fc168a0 / 8c5b4a7). Record: `mn-scratch/hh3b/` (`STATUS.md`, `REPORT.md`, `DESIGN.md`, scripts and
+runs).
+
+### The runner seam: a CARRIED scheme
+I1's `SplitStepScheme` cuts one step of the runner's own scan at its force evaluation, so the carry stays the runner's
+`[N, 2, 3]`. The direct-sum clusters need a second carried block (the `[K, M]` clusters with their internal
+derivatives, the slow acceleration at the stars, dwell counters, star ids, `n_live`, `galaxy_star_id`, the energy
+ledger, the slow force's verdicts and f_b) and a second force (`target_points`), and their segment program is nornax's
+`cluster_rollout`. So the seam is one level up:
+
+- **`jaccpot.scheme.CarriedScheme`** (structural; marker `carried = True`; `check_scheme` checks its 15 members):
+  `start`, `segment(carry, dt, steps)`, `verdict(carry) -> reasons`, `replanned(start, failed)`,
+  `edge(carry, index=, escapers_due=, energy=) -> (carry, info)`, `describe`, `moments`, `energy`, `galaxy`,
+  `fingerprint_arrays`, `escaper_split`, `checkpoint(carry) -> (arrays, meta)`, `restore(arrays, meta, ...)`, `key`,
+  `record`. Every method is eager; the carry is opaque to jaccpot. jaccpot does not import nornax.
+- **`ProductionRunner(solver, scheme=<carried>, escapers=...)`** dispatches `run` and `save_restart` to
+  `jaccpot.carried` (`run_carried`, `save_carried`). The runner keeps THE LOOP: segment lengths (`segment_lengths`),
+  the retry loop (a failed verdict re-plans the segment's start to what it needed and reruns it, up to the scheme's
+  `max_retries`; the reasons are recorded in `edge.plan["replans"]` -- galaxy caps (walk/tree), the stars' field, the
+  back-reaction, the star tree, the coupling, and at an edge the RESERVE), the edges (membership checks and transfers
+  through `scheme.edge`; the escaper check every `EscaperPolicy.every`-th edge), the diagnostics rows, callbacks,
+  restart files, the fingerprint and the bitwise check. A `SegmentEdge`/`RunResult` gains `carried` (default `None`):
+  the carry, valid during the callback; `state`/`masses`/`self_acceleration` are the galaxy's rows in the caller's
+  order.
+- **Refused** on that path: the multi-GPU mode (`check_mesh_scheme`: cluster ownership by COM, the back-reaction's
+  multipole broadcast and the stripped stars' mesh rows are nornax section 12 item 2), an external field, the in-scan
+  `step_callback`, `force_params`/`external_params`, `potential_energy` (the scheme's energy is in the rows), the
+  gradient mode (any scheme). `SegmentConfig.domain_guard` is not run on this path.
+- **Default path unchanged**: `scheme=None` / a `SplitStepScheme` take the old code. Identity `w7-main-cpu` vs
+  `hh3b-tip-cpu`: **PASS 36/36**.
+
+### nornax's side: `ClustersRunnerScheme` (`nornax/adapters/jaccpot_runner.py`)
+- **The same programs as `run_segments`**: a segment is `jit(cluster_rollout)`; an edge runs the stripping candidates,
+  a reserve growth (`grow_state`, transfer, ONE re-plan at the post-transfer state), the transfer, the refresh and a
+  refresh re-plan in `run_segments`' order with the same jitted functions. The runner's force evaluation is
+  `FusedClustersForce`'s slow accelerations (galaxy step + targets), with the tree over the first `n_live` rows
+  (`split_rebuild`'s cut: the escapers' `StepParams.live` mechanism).
+- **One live-row mechanism for escapers and stripped stars.** Galaxy rows are `[tree rows (n_live) | free rows |
+  escapers]`. A stripped star fills row `n_live` (HH2b's `transfer`, unchanged): a tree row past the galaxy's, like a
+  returning escaper. A row past `n_live` with mass is an escaper: it moves on the tree rows' monopole and pulls every
+  tree row back (jaccpot.escapers' Hamiltonian, `EscaperCoupledForce`, used only while there are escapers); without
+  mass it is free. An escaper check re-orders the rows `tree | free | escapers` (a stable permutation; the host keeps
+  each row's caller row, f_b is permuted with its row); a reserve growth appends free rows and moves the escapers back
+  to the tail. Stars and escapers do not interact: `H = K + W_tree + W_gc + W_cc + W_cc_inter + W_c`.
+  - **The ledgers.** A transfer adds its exact pair jump (HH2b) and, with escapers present, the exact change of `W_c`
+    as the star joins the tree rows the escapers' monopole holds (found by gate 3: without it the ledgered drift was
+    -1.1e-5, the measured strip jump -4.3e-5 against a ledger of 4.5e-7). An escaper change adds its measured jump
+    (two energy evaluations, the runner's escaper convention).
+- **Diagnostics rows** (only on a carried run; the default rows are unchanged): the runner's moments and energy
+  (`potential_self = W_gg + W_gc + W_cc + W_cc_inter`, `couple = W_c`) plus `n_live`, `n_stripped`, `bound_mass[K]`,
+  `strip_transfers`, `strip_jump`, `strip_jump_measured` (the scheme's `measure_jumps=True`), `strip_ledger`,
+  `dissolved`, `reserve`, `W_gg`, `W_gc`, `W_cc`, `W_cc_inter`, `energy_ledgered = E - strip_ledger - escaper ledger`
+  and its drift; with escapers the ESC columns (`n_escapers`, `escaper_transfers`, `escaper_jump`, `escaper_ledger`,
+  `potential_couple`, `kinetic_escapers`).
+
+### Checkpoints (M3)
+- **Formats.** `save_restart(path)` (and `SegmentConfig.restart_every`): a path ending in `.npz` writes the runner's
+  `.npz` (arrays + the `meta` JSON, atomic rename); any other path writes an **orbax checkpoint directory** on one card
+  (`jaccpot.checkpoint.write_checkpoint`: the same arrays and `meta` plus the manifest's sha256 per array). Either is
+  continued with `run(restart_from=path)`; `is_checkpoint` decides. A built-in run's file is refused by a carried
+  runner and vice versa; old (pre-HH3b) checkpoints of cluster-free runs load unchanged (their path is untouched).
+- **What they hold.** Every leaf of the `ClusterHybridState` as named arrays (`encode_tree`: NamedTuples / tuples /
+  `None` / arrays, dtypes and weak types kept): galaxy rows, `n_live`, `galaxy_star_id`, the cluster block with its
+  internal derivatives, the stars' slow acceleration, dwell, star ids, the ledger, the slow force's aux (verdicts,
+  needs, f_b of galaxy and stars), time; the row order. `meta`: counters, baselines, both ledgers, the scheme's record
+  (policy, options, Hermite order, internal force) also in the fingerprint, the escaper policy, and the slow force's
+  **static plan** (the target plans, each provider's template shapes and compile-key digests, the reserve) with the
+  **trace-time state** of its engines (`jaccpot.carried.trace_state`: validated walk caps, leaf capacities, depth
+  bounds, the level registry) taken when the force was made.
+- **Bitwise restarts.** Every program of a force runs inside `pinned_trace_state(engines, record)`, so it traces
+  against exactly that state in the run that wrote the restart and in the process that continues it, and leaves
+  nothing behind. A restore re-prepares the force at the restart's positions for its STRUCTURE, installs the recorded
+  plans and template shapes (`provider_with_record`), and compares the providers' digests: a mismatch is reported
+  (`restored["mismatches"]`, a warning), never silent. Prepares and re-plans run unpinned (their writes are the new
+  record).
+
+### Gates (CPU unless noted; this host, EPYC 7452; the HH2b system: Plummer galaxy N = 512 + 3 clusters x 32 stars
+inflated x4, the galaxy preset on its CPU route, leaf 16, p4, geometric MAC, cross fmm, coupling direct, dt 1e-3,
+`StrippingPolicy(r_factor=0.3, min_members=4)`, reserve 1 so the first edges re-plan the reserve)
+
+| gate | result |
+|---|---|
+| 1 runner == `run_segments` (3 x 2 steps, 96 stars stripped at edges 1-2, reserve 1 -> 79 -> 158) | **bitwise**: 0 of every state leaf differs (same program family); ledgered energy drift <= 3.9e-6 (raw 7.0e-6, the unledgered rest is the target-points -> tree representation), momentum 5.1e-9 |
+| 2 restart == uninterrupted, `.npz`, FRESH processes | from segment 1 (79 transfers + reserve re-plan 1 -> 79), 2 (17 transfers + re-plan 79 -> 158), 3 (ordinary): **bitwise**, every state leaf and every diagnostics row, `restored["bitwise"]` True |
+| 2 the same from **orbax** checkpoint directories | **bitwise**, all three |
+| 3 escapers + stripping (4 fliers at 6x escape speed, `EscaperPolicy(5.0)`: 33 escapers at the start, 3 more later) | 96 stripped, escapers 33 -> 36; ledgered drift with both ledgers <= **1.05e-6** over 6 edges (raw <= 7.9e-6); controls on the same IC: escapers alone <= 5.1e-7 (raw 1.3e-5), stripping alone <= 2.0e-7; every caller row and every star in exactly one place; restart from `.npz` at segments 1-3 **bitwise** |
+| 4 default path | identity **36/36**; a cluster-free `.npz` written by main 5fc168a0 continues here to 0 differing elements (reported mismatch: `versions` only); the shards below |
+| 5 GPU, functional (one shared A100 per process, contended, no timings) | galaxy 1e6 Hernquist (`galaxy_solver`: `dehnen_error`, leaf 64, p6) + 10 x 1e4 Plummer clusters (HH2b's gate-5 system), cross + coupling fmm, reserve 4096, 4 segments x 5 steps, dt 2e-3, an orbax checkpoint per edge: 1042 stars stripped (991 at edge 1, one star-tree re-plan at that refresh), energy drift <= 1.5e-8 (ledgered the same), momentum <= 2.2e-9, device peak 1.84e9 B. A run SIGKILLed after its segment-2 checkpoint and continued in a fresh process on another card: **0 of 25 state arrays differ** from the uninterrupted run, `restored["bitwise"]` True -- with `--xla_gpu_deterministic_ops=true` next to the fusion autotuner off. Without it two uninterrupted runs already differ after one segment (11 of 25 arrays, 8e-7): the clusters' GPU path (target walks, direct sums) is not deterministic run to run, so a GPU continuation is bitwise only under deterministic ops |
+
+**CI** (CI arguments, this host): `integration-strict-carried` (new; io extra) 7 passed at typecheck 0 and 1 (8 min, peak
+RSS 2.6 GB); `integration-strict-scheme` 12; `characterization` 21; `unit` (typecheck 1) 1478 passed / 202 skipped;
+`distributed-segment-scheme` 3 (2 forced devices); `distributed-checkpoint` 15 (4 forced devices); `py-floor` 63;
+`test_shards.py check` rc 0. GitHub: #524 47/47 green.
+
+**GPU restarts need deterministic ops for the clusters** (launch environment): the built-in runner's bitwise GPU
+continuation needs only the fusion autotuner off; with clusters also `--xla_gpu_deterministic_ops=true`.
+
+### Open
+- The mesh (nornax section 12 item 2), Aarseth internal steps (item 3), the Odisseo science layer (item 4), HoreKa
+  timing (item 5), the open physics choices (item 6: today's defaults kept).
+- A segment's start carry stays on the device for the retry (`run_segments` does the same): at 1e8 that is a second
+  galaxy state; the built-in runner keeps a host copy instead. Not needed at the gate sizes; for HH3a's scale.
+- Re-plans compile a new program set (HH2b's finding): size the reserve generously.
