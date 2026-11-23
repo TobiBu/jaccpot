@@ -1979,3 +1979,62 @@ accuracy only). Rows `mn-scratch/hh3a/runs/gate1_1e6.jsonl`.
   temporaries; at 0.3 / q4 -> 35 % (5.2e7), 17.7 GiB; 10 x 1e4 at 0.3 / q4 -> 6.4 GiB. After the first stripping
   edge `R_k <= 2 r_J` shrinks it. A core / tail split (tail stars as monopoles) is the next lever if it binds
   (open issue).
+
+### Tests, identity, CI
+
+- `tests/integration/strict/test_target_points.py` (shard `integration-strict-targets`), new:
+  `test_grouped_back_reaction_matches_a_direct_sum` (K = 5 with empty slots and one dissolved cluster: near the
+  clusters within the geometric tolerance, elsewhere < 1e-4; the root plan leaves > 10x more inner points),
+  `test_a_point_mask_leaves_the_active_points_bitwise` (grouped and root: the masked evaluation equals the active
+  points' own, bit for bit), `test_grouped_plans_refuse_mismatched_groups_and_grow` (the refusals; an inner overflow
+  reported and grown away by `BackReactionPlan.grown`), `test_target_sources_take_the_live_rows`. CI-like run
+  (coverage, `-n 2`): 32 passed / 3 skipped, 6:56 against the 25-min cap, peak RSS 3.9 GB; with
+  `JACCPOT_RUNTIME_TYPECHECK=1` the new and the back-reaction tests pass. `test_shards.py check` rc 0.
+- **Identity `w7-main-cpu` vs `hh3a-tip-cpu`: PASS 36/36.** The target programs change only by the new optional
+  arguments (a root plan without a mask is HH2a's arithmetic; nornax's K = 1 test is bitwise against
+  `FusedHybridForce`).
+- PR CI (#525): 46/46.
+
+### GPU: the clusters at 1e8 next to the galaxy (gate 4; nornax's `FusedClustersForce`, one A100, contended)
+
+HH2b's gate-5 setup (galaxy preset `dehnen_error` 1e-4, leaf 64, p6, `eps_g` 0.005 ferrers3; Plummer clusters
+`r_c` 0.012, `M_c` 1e-4; `coupling="fmm"`; Hermite 4, `n_sub` 16), `XLA_PYTHON_CLIENT_MEM_FRACTION=0.95` and
+**`XLA_PYTHON_CLIENT_ALLOCATOR=cuda_async`**. Script `mn-scratch/hh3a/scripts/gate4.py`, rows `runs/g4_*.json`.
+
+| run | stripped | verdicts | dE/E with ledger | \|dP\| | back-reaction vs fp64 (rel-L2 / p99.9) | device peak |
+|---|---|---|---|---|---|---|
+| 1e6 + 10 x 1e4, 4 edges x 25 steps (HH2b's IC) | 988 / 70 / 52 / 27 (== HH2b, edge for edge) | ok | <= 4.4e-8 | <= 5.7e-9 | 3.9e-6 / 1.2e-4 | 1.85 GB (HH2b 2.05) |
+| 1e8 + 10 x 1e4, 2 edges x 2 steps, reserve 4096 | 1329 / 32 | ok | -7.6e-9 / 2.3e-8 | <= 1.8e-10 | 1.9e-6 / 2.7e-4 (inner 5.7e6 of 1e8) | prepare 31.5 GB, steps / edges 36.4 GB |
+| 1e8 + 150 x 1e3, 2 edges x 2 steps, reserve 8192 (radii 0.3-10) | 1180 / 48 | ok | -4.5e-9 / 9.4e-9 | <= 4.0e-10 | 1.9e-5 / 1.3e-3 (inner 2.07e7 of 1e8) | prepare 31.5 GB, steps / edges **39.15 GB** |
+
+- **The allocator matters at 1e8.** After the reserve prepare's 31.5-31.8 GB peak, the slow program's single
+  17.7-19.5 GiB temp allocation failed in JAX's BFC pool, preallocated or not (fragmentation: 4.5 GB resident of
+  38), and passed with `cuda_async` (`TF_GPU_ALLOCATOR` is TensorFlow's variable; JAX ignores it). Job `hh3` sets
+  it. Two script bugs on the way: a jitted closure over the 1e8 arrays (~3 GB of executable constants: the CUBIN
+  failed to load), and a module-level reference to the initial state (HH2a's lesson).
+- The resident memory during the stripping segments (13.9 GB) is the galaxy's state twice: `run_segments` keeps a
+  segment's start beside its end for the needs-driven retry. The galaxy's own lane at 1e8 peaked at 27.75 GB
+  (HH2a, one cluster, no reserve).
+- **150 x 1e3 at 1e8 fits with ~1.6 GB to spare** (the 0.95 pool is 40.8 GB): 21 % of the galaxy is inner (the
+  clusters' tails, the galaxy's density at r 0.3-1), the inner walk's lists (far 3.6e8, near 1.2e7 capacity) and the
+  segment's two states. Levers if a production run needs room: a core / tail split of each cluster (the tail as
+  monopoles, a smaller `R_k`); `run_segments` without the second state (re-run from a checkpoint instead); a smaller
+  inner `headroom`. The back-reaction's error at 150 x 1e3 is the inner walk's at the geometric theta 0.5 (gate 1).
+
+### HoreKa (prepared, not run)
+
+Job `hh3` (`bash bench/slurm/h0/submit_all.sh --only hh3`; 1 node, 4:00, ~2.5 node-hours; default set): rows of
+`bench/slurm/hh/hybrid_clusters_timing.sbatch` -- `galaxy_1e8` (the base), `slow_1e8_K10_1e4_{fmm,none}`,
+`slow_1e8_K150_1e3_{fmm,none}`, `back_1e8_K{10_1e4,150_1e3}`, `coupling_1e6_K150_{1e3,1e4}`; per row ms (min /
+median of 3), compile temporaries and the device peak. nornax comes from `src/nornax-hh3` at
+`pins.env H0_NORNAX_HH3_COMMIT` (a worktree beside the bundle's nornax; bump it to the nornax PR's merge). The
+preflight has an `hh3` entry. CPU smoke `SMOKE=1 --only hh3`: preflight entry 281 s, job 417 s, failed none.
+
+### Open
+
+1. The memory headroom at 1e8 + 150 x 1e3 (above); the HoreKa rows decide whether the outer M2P (`N x K` pairs at
+   p6) or the inner walk dominates the slow step, and whether `theta_mp` 0.3 / order 4 is the better default.
+2. `coupling="fmm"` costs `O(K M^2)` (every own pair is a near pair at `eps_g >> r_c`, subtracted exactly); a
+   grouped coupling (the other clusters' multipoles) if HoreKa shows it binds.
+3. The nornax pin moves to this PR's merge commit (nornax PR).
+
