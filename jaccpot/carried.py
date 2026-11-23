@@ -686,12 +686,32 @@ def run_carried(
     if int(num_steps) - step > 0:
         runner._warn_remainder(lengths)
     max_retries = int(getattr(scheme, "max_retries", 2))
+    # Donation (CarriedScheme.keep_start/restore_start): the segment consumes its start and
+    # the retry restores it from a host copy, so one galaxy state is on the device.
+    # The first segment's carry may hold the caller's arrays (a fresh start):
+    # donated only with donate_input or after a restart from a file.
+    donates = callable(getattr(scheme, "keep_start", None)) and callable(
+        getattr(scheme, "restore_start", None)
+    )
+    owned_first = bool(getattr(seg, "donate_input", False)) or isinstance(
+        restart_from, (str, os.PathLike)
+    )
+
+    def run_segment(start: Any, length: int, donate: bool) -> Any:
+        if donate:
+            return scheme.segment(start, dt_value, length, donate=True)
+        return scheme.segment(start, dt_value, length)
+
     for index, length in enumerate(lengths):
         if stopped:
             break
         wall0 = time.perf_counter()
+        donate = donates and (index > 0 or owned_first)
         start = carry
-        carry = scheme.segment(start, dt_value, int(length))
+        kept = scheme.keep_start(start) if donate else None
+        carry = run_segment(start, int(length), donate)
+        if donate:
+            del start  # consumed by the segment
         retries = 0
         reasons_all: list = []
         while True:
@@ -705,11 +725,15 @@ def run_carried(
                     f"after {retries} re-plans ({reasons}); last restart: "
                     f"{runner._last_restart}"
                 )
-            carry = scheme.segment(
-                scheme.replanned(start, carry), dt_value, int(length)
-            )
+            if donate:
+                start = scheme.restore_start(kept)
+            carry = run_segment(scheme.replanned(start, carry), int(length), donate)
+            if donate:
+                del start
             retries += 1
-        del start
+        if not donate:
+            del start
+        del kept
         step += int(length)
         segment_done += 1
         escapers_due = policy is not None and segment_done % int(policy.every) == 0
