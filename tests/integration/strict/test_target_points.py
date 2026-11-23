@@ -584,3 +584,219 @@ def test_planning_from_sources_rebuilds_in_program(lane):
         np.testing.assert_allclose(
             np.asarray(fb), np.asarray(lane["fb"]), rtol=1e-6, atol=0
         )
+
+
+@pytest.fixture(scope="module")
+def groups_lane():
+    """K = 4 compact clusters spread over the points (the galaxy), as one star tree;
+    each cluster has two empty (massless) slots, and one cluster is empty."""
+    from jaccpot import FastMultipoleMethod, FusedForceProvider
+    from jaccpot.runtime.target_back_reaction import SourceGroups
+
+    base = FastMultipoleMethod(preset="galaxy").advanced
+    advanced = dataclasses.replace(
+        base,
+        tree=dataclasses.replace(base.tree, leaf_target=LEAF, cell_min_level=0),
+        runtime=dataclasses.replace(
+            base.runtime, fixed_order=ORDER, cpu_fused_lane=True
+        ),
+        mac_type="dehnen",
+    )
+    solver = FastMultipoleMethod(
+        preset="galaxy",
+        theta=0.5,
+        G=1.0,
+        softening=1e-4,
+        precision="fp32",
+        advanced=advanced,
+    )
+    k, m = 5, 96
+    rng = np.random.default_rng(12)
+    com = rng.uniform(-2.0, 2.0, size=(k, 1, 3))
+    xs = com + 0.01 * rng.normal(size=(k, m, 3))
+    ms = np.full((k, m), 1e-3 / m)
+    ms[:, -2:] = 0.0
+    ms[-1] = 0.0
+    prov, topo = FusedForceProvider.prepare(
+        solver,
+        jnp.asarray(xs.reshape(-1, 3), jnp.float32),
+        jnp.asarray(ms.reshape(-1), jnp.float32),
+        leaf_size=LEAF,
+        max_order=ORDER,
+    )
+    pts = np.concatenate(
+        [
+            (com[:4] + 0.03 * rng.normal(size=(4, 16, 3))).reshape(-1, 3),
+            rng.uniform(-3.0, 3.0, size=(1984, 3)),
+        ]
+    )
+    return dict(
+        prov=prov,
+        topo=topo,
+        xs=xs,
+        ms=ms,
+        groups=SourceGroups(jnp.asarray(xs), jnp.asarray(ms)),
+        pts=jnp.asarray(pts, jnp.float32),
+    )
+
+
+def test_grouped_back_reaction_matches_a_direct_sum(groups_lane):
+    """Each cluster's own multipole beyond its own ``r_in`` (theta_mp 0.3), the
+    star tree's walk for the points inside any: at the criterion's tolerance
+    against the float64 direct sum, near the clusters, between them and far
+    away, and better than one root multipole could be (whose ``r_in`` covers
+    every point); the dissolved (massless) cluster contributes nothing."""
+    from jaccpot.runtime.target_back_reaction import (
+        evaluate_back_reaction,
+        plan_back_reaction,
+    )
+    from jaccpot.softening import pair_factors, softening_params_np
+
+    g = groups_lane
+    prov, topo, pts, grp = g["prov"], g["topo"], g["pts"], g["groups"]
+    plan = plan_back_reaction(prov, topo, pts, softening=EPS, groups=grp, theta_mp=0.3)
+    assert plan.num_groups == 5 and 0 < plan.inner_capacity < pts.shape[0]
+    field = jax.jit(
+        lambda t, p, gr: prov.target_field(
+            t, p, plan, softening=EPS, potential=True, groups=gr
+        )
+    )(topo, pts, grp)
+    assert bool(field.ok)
+    assert 64 <= int(np.asarray(field.stats)[2]) <= plan.inner_capacity
+    eng = prov.engine
+    params = softening_params_np(eng.softening_kernel, EPS)
+    p64 = np.asarray(pts, np.float64)
+    x64, m64 = g["xs"].reshape(-1, 3), g["ms"].reshape(-1)
+    dx = p64[:, None, :] - x64[None, :, :]
+    gg, psi, _ = pair_factors(
+        np.sum(dx * dx, -1), params, eng.softening_kernel, potential=True, xp=np
+    )
+    want = -np.sum((m64[None, :] * gg)[..., None] * dx, axis=1)
+    want_pot = -np.sum(m64[None, :] * psi, axis=1)
+    acc = np.asarray(field.acc, np.float64)
+    assert _rel_l2(acc[:64], want[:64]) < _BOUND["dehnen"]
+    assert _rel_l2(acc[64:], want[64:]) < 1e-4
+    assert np.max(np.abs(np.asarray(field.potential) - want_pot)) < (
+        _BOUND["dehnen"] * np.max(np.abs(want_pot))
+    )
+    root = plan_back_reaction(prov, topo, pts, softening=EPS)
+    whole = evaluate_back_reaction(prov, topo, pts, plan=root, softening=EPS)
+    assert root.num_groups == 0
+    # one root multipole about the global COM leaves (almost) every point inner
+    assert int(np.asarray(whole.stats)[2]) > 10 * int(np.asarray(field.stats)[2])
+
+
+def test_a_point_mask_leaves_the_active_points_bitwise(groups_lane):
+    """Inactive points (a reserve's free rows) get zeros and change no active
+    point's field: the masked evaluation equals the active points' own, bit for
+    bit, for the grouped and the root split; a mask that hides an inner point
+    shrinks the inner set."""
+    from jaccpot.runtime.target_back_reaction import (
+        evaluate_back_reaction,
+        plan_back_reaction,
+    )
+
+    g = groups_lane
+    prov, topo, pts, grp = g["prov"], g["topo"], g["pts"], g["groups"]
+    mask = np.ones(pts.shape[0], bool)
+    mask[::5] = False
+    jm = jnp.asarray(mask)
+    for groups in (grp, None):
+        plan = plan_back_reaction(
+            prov, topo, pts, softening=EPS, groups=groups, point_mask=jm
+        )
+        got = evaluate_back_reaction(
+            prov, topo, pts, plan=plan, softening=EPS, groups=groups, point_mask=jm
+        )
+        own_plan = plan_back_reaction(
+            prov, topo, pts[mask], softening=EPS, groups=groups
+        )
+        own = evaluate_back_reaction(
+            prov, topo, pts[mask], plan=own_plan, softening=EPS, groups=groups
+        )
+        acc = np.asarray(got.acc)
+        assert np.all(acc[~mask] == 0.0)
+        np.testing.assert_array_equal(acc[mask], np.asarray(own.acc))
+        assert int(np.asarray(got.stats)[2]) == int(np.asarray(own.stats)[2])
+
+
+def test_grouped_plans_refuse_mismatched_groups_and_grow(groups_lane):
+    from jaccpot.runtime.target_back_reaction import (
+        SourceGroups,
+        evaluate_back_reaction,
+        plan_back_reaction,
+    )
+
+    g = groups_lane
+    prov, topo, pts, grp = g["prov"], g["topo"], g["pts"], g["groups"]
+    plan = plan_back_reaction(prov, topo, pts, softening=EPS, groups=grp, min_inner=32)
+    with pytest.raises(ValueError, match="SourceGroups"):
+        evaluate_back_reaction(prov, topo, pts, plan=plan, softening=EPS)
+    with pytest.raises(ValueError, match="K=5"):
+        evaluate_back_reaction(
+            prov,
+            topo,
+            pts,
+            plan=plan,
+            softening=EPS,
+            groups=SourceGroups(grp.positions[:2], grp.masses[:2]),
+        )
+    root = plan_back_reaction(prov, topo, pts, softening=EPS, min_inner=32)
+    with pytest.raises(ValueError, match="root"):
+        evaluate_back_reaction(prov, topo, pts, plan=root, softening=EPS, groups=grp)
+    with pytest.raises(ValueError, match="grouped"):
+        prov.target_field(topo, pts, root.inner, groups=grp)
+    # every point crowds a cluster: the inner count overflows, the grown plan fits
+    crowded = jnp.asarray(g["xs"][:4, :1].reshape(-1, 3), jnp.float32)
+    crowded = jnp.repeat(crowded, pts.shape[0] // 4, axis=0)
+    crowded = crowded + 0.02 * jnp.asarray(
+        np.random.default_rng(3).normal(size=crowded.shape), jnp.float32
+    )
+    small = dataclasses.replace(
+        plan, inner=dataclasses.replace(plan.inner, num_points=32)
+    )
+    over = evaluate_back_reaction(
+        prov, topo, crowded, plan=small, softening=EPS, groups=grp
+    )
+    assert not bool(over.ok) and int(np.asarray(over.stats)[2]) > 32
+    plan2 = small
+    for _ in range(4):
+        plan2 = plan2.grown(over.needs, 1.5, over.stats)
+        over = evaluate_back_reaction(
+            prov, topo, crowded, plan=plan2, softening=EPS, groups=grp
+        )
+        if bool(over.ok):
+            break
+    assert bool(over.ok) and plan2.inner_capacity >= int(np.asarray(over.stats)[2])
+
+
+def test_target_sources_take_the_live_rows(lane):
+    """``TargetSources(bounds=, num_valid=)``: a capacity-padded source array whose
+    tail rows are dead plans as the live rows' own rebuild does (an escaper
+    split's or a reserve's topology)."""
+    from jaccpot.escapers import live_bounds
+    from jaccpot.runtime.target_points import TargetSources, plan_target_points
+
+    prov = lane["prov"]
+    if prov.scale_carry:
+        pytest.skip("the geometric lane suffices for the rebuild's arguments")
+    n_live = N - 24
+    x, m = lane["xf"], lane["mf"]
+    live = jnp.arange(N) < n_live
+    src = TargetSources(
+        x,
+        jnp.where(live, m, 0.0),
+        None,
+        bounds=live_bounds(x, n_live, cubic=False),
+        num_valid=jnp.asarray(n_live, jnp.int32),
+    )
+    topo = jax.jit(
+        lambda xx, mm: prov.rebuild(
+            xx,
+            jnp.where(live, mm, 0.0),
+            bounds=live_bounds(xx, n_live, cubic=False),
+            num_valid=jnp.asarray(n_live, jnp.int32),
+        )
+    )(x, m)
+    pts = lane["pts"]
+    assert plan_target_points(prov, src, pts) == plan_target_points(prov, topo, pts)

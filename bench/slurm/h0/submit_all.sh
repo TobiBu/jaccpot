@@ -68,6 +68,7 @@ JOBS=(
   "a1|1|1|06:00:00|yes|A1: the dehnen_error stall from the 1e8 restarts (net/floor/geo07) + err rows"
   "a3|1|1|04:00:00|yes|A3: summed vs legacy drift at 1e8 and 2.6e5"
   "hh|1|1|03:00:00|yes|HH2a: target_points vs the galaxy step at 1e8 x 1e4-1e6, the 1e8 back-reaction"
+  "hh3|1|1|04:00:00|yes|HH3a: the K-cluster slow step (K 10 x 1e4, 150 x 1e3) vs the galaxy step at 1e8"
   "m1_node1|1|$G|02:00:00|yes|M1: momentum local vs cross, 1 GPU and 4 x 1 GPU"
   "m1_node2|2|$G|01:30:00|yes|M1: momentum local vs cross, 8 x 1 GPU over two nodes"
   "m2g_node1|1|$G|03:30:00|yes|M2G: 4 processes x 1 GPU vs 1 x 4, bitwise + timing"

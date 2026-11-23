@@ -1902,6 +1902,142 @@ passes on the development machine (preflight entry 295 s, the job's 5 smoke rows
 points; the solver facade's `target_points=` (a frozen-surface change, not cheap: not done); the mesh. Done now: the
 frontier walk (was the last bullet).
 
+## HH3a — many clusters at production scale: the grouped back-reaction (hybrid Hermite session 3, wave 7, 2026-11-21)
+
+HH2a's back-reaction (`plan_back_reaction`) takes ONE compact source set: the root multipole about the global COM
+beyond `r_in = max(R / theta_mp, R + floor)`, the target walk inside. nornax's `FusedClustersForce` puts K clusters
+all over the galaxy into one star tree, so that root's `R` spans the galaxy and every galaxy point is "inner": the
+plain target walk over all N galaxy points, which does not fit 1e8 (session 1: ~10-11 GB of per-point transients for
+ONE cluster). This session extends the plan to K source groups, adds a public inactive-point mask, and lets
+`TargetSources` describe a live-row rebuild. All of it is opt-in or new API: the default path is program-identical
+(identity below), and a root plan (`groups=None`) is HH2a's program.
+
+### The API (`jaccpot/runtime/target_back_reaction.py`, `target_points.py`, `fused_provider.py`)
+
+- **`SourceGroups(positions [K, M, 3], masses [K, M])`**: the topology's particles laid out by group (a zero mass is
+  an empty slot). `plan_back_reaction(..., groups=SourceGroups)` returns a `BackReactionPlan` with
+  `num_groups = K`; `evaluate_back_reaction(..., groups=)` and `provider.target_field(..., groups=)` take the same
+  groups (traced). A mismatch is refused (`ValueError`), a root plan refuses groups, a plain `TargetPlan` too.
+- **Per group** `k` (`_group_tables`, one traced pass): the COM `c_k`, the exact radius `R_k` (the farthest member),
+  `r_in_k = max(R_k / theta_mp, R_k + floor, r_min)`, and the multipole about `c_k` by a direct P2M over the members
+  (`p2m_real_direct`, the lane's real basis), truncated at `mp_order`. A group without mass (a dissolved cluster)
+  gets `r_in = 0` and a zero multipole: it contributes nothing and has no inner region.
+- **Outer points** (outside EVERY `r_in_k`): the sum of the K multipoles, M2P per (point, group) with the root
+  path's operators (`m2l_rot_scale_real_batch` + L2P at zero offset), `slice_size` points per `fori_loop` step and,
+  inside, a `scan` over chunks of `group_chunk` groups (`slice_size x group_chunk` pairs per batch; default 8).
+- **Inner points** (inside ANY `r_in_k`): the whole star tree through the target walk at a static capacity (as
+  HH2a), so they get every group's field at the walk's accuracy and no group is counted twice.
+- **`point_mask`** (`plan_back_reaction`, `evaluate_back_reaction`, `provider.target_field`; `evaluate_target_points`
+  had it): inactive points get zeros and take no part in the inner walk's groups (they are compacted out before the
+  walk), so they change no active point's field, bitwise (test below). It replaces nornax's private
+  `target_points._morton_order` read for a capacity reserve's free rows.
+- **`BackReactionPlan.grown(needs, headroom, stats)`**: the inner walk grown from its needs and, from `stats[2]`,
+  an inner count above the capacity (nornax's segment retry calls `.grown` on every plan).
+- **`TargetSources(..., bounds=, num_valid=)`**: the planning rebuild of a capacity-padded source array
+  (`provider.rebuild(bounds=, num_valid=)`), so a live-row topology (an escaper split, a reserve) plans from sources
+  too, without an eager topology resident.
+- `fused_provider.py`: `target_field` forwards `point_mask=` and `groups=` (~20 lines; not HH3a's file, no program
+  change for existing calls).
+
+**A convention to know** (unchanged, the walk's and HH2a's too): an order-`q` M2L gives the FORCE from the
+multipoles up to `q - 1` (the potential up to `q`). `mp_order = 1` and `2` give the same force (the dipole about the
+COM is zero).
+
+### Order and radii: measured (gate 1)
+
+Against an fp64 direct sum of the K clusters' field (the points' softening `eps_g` 0.005, the engine's kernel) at a
+galaxy of 1e6 points (Hernquist, `a = 1`), a reference subsample of ~4500-6500 points split by region (inside a
+cluster's `r_in`, 1-3 `r_in`, farther). Clusters: Plummer `r_c` 0.005, `M_c` 1e-4 each, at log-uniform radii 0.3-10
+(K = 1: at R = 1, M = 1e5, HH2a's GPU configuration). Star tree: geometric theta 0.5, leaf 64, p6; GPU (contended,
+accuracy only). Rows `mn-scratch/hh3a/runs/gate1_1e6.jsonl`.
+
+| K x M | plan | theta_mp / order | rel-L2 | p99.9 | inside / near / far rel-L2 | inner points | temporaries |
+|---|---|---|---|---|---|---|---|
+| 1 x 1e5 | full `target_points` | - | 1.57e-6 | 3.0e-6 | 1.6e-6 / 1.1e-6 / 2.0e-7 | 1e6 | - |
+| 1 x 1e5 | root (HH2a) | 0.5 / 6 | 1.75e-6 | 8.3e-6 | 1.6e-6 / 2.8e-6 / 1.7e-7 | 146 | 186 MB |
+| 1 x 1e5 | grouped | 0.5 / 6 | 1.76e-6 | 8.3e-6 | 1.6e-6 / 2.8e-6 / 1.6e-7 | 146 | 186 MB |
+| 1 x 1e5 | grouped | 0.3 / 4 | 1.56e-6 | 4.0e-6 | 1.6e-6 / 1.4e-6 / 1.9e-7 | 688 | 54 MB |
+| 10 x 1e4 | full `target_points` | - | 1.19e-5 | 4.8e-3 | 9.9e-6 / 4.0e-5 / 5.9e-4 | 1e6 | - |
+| 10 x 1e4 | grouped | 0.5 / 6 | 9.77e-6 | 7.4e-5 | 9.8e-6 / 1.0e-5 / 2.6e-7 | 1,651 | 1.31 GB |
+| 10 x 1e4 | grouped | 0.5 / 4 | 1.01e-5 | 1.0e-4 | 9.8e-6 / 4.9e-5 / 5.9e-7 | 1,651 | 0.52 GB |
+| 10 x 1e4 | grouped | 0.3 / 4 | 5.91e-6 | 5.5e-5 | 5.8e-6 / 1.7e-5 / 5.9e-7 | 7,404 | 0.52 GB |
+| 150 x 1e3 | full `target_points` | - | 9.82e-6 | 1.3e-3 | 7.1e-6 / 1.7e-4 / 1.8e-4 | 1e6 | - |
+| 150 x 1e3 | grouped | 0.5 / 6 | 7.62e-6 | 2.0e-4 | 7.6e-6 / 2.7e-5 / 1.4e-7 | 27,687 | 1.31 GB |
+| 150 x 1e3 | grouped | 0.5 / 4 | 8.77e-6 | 5.1e-4 | 7.6e-6 / 1.2e-4 / 4.3e-7 | 27,687 | 0.52 GB |
+| 150 x 1e3 | grouped | 0.3 / 4 | 7.97e-6 | 7.5e-4 | 7.2e-6 / 9.8e-5 / 4.3e-7 | 100,479 | 0.52 GB |
+
+- **K = 1 at equal settings is HH2a's number** (grouped == root to 1e-8; HH2a measured 2.2e-6 at 1e6 x 1e5).
+- **K = 10 and 150 are better than the full target walk at the same criterion**, everywhere: one multipole per
+  cluster at `r >= R_k / 0.5` with p6 beats the walk's per-group acceptance far away (far: 2.6e-7 vs 5.9e-4). What
+  remains is the inner walk's own error (inside-region rel-L2 = the full walk's).
+- **The defaults stay HH2a's** (`theta_mp` = the provider's theta, `mp_order` = its order): the gate's "equal
+  settings", the best p99.9 at K = 150, and the smallest inner set. `theta_mp` 0.3 with order 4 is the option
+  that halves the outer M2P cost (the temporaries above are one `slice_size x group_chunk` batch) at K <= 10.
+- **The inner set at 1e8 is set by the clusters' tails and the galaxy density there**: `R_k` is the FARTHEST member
+  (a Plummer realisation reaches ~12 r_c). Compile-only (CPU compile of the 1e8-point program, HH3a gate-4 IC:
+  `r_c` 0.012): 150 x 1e3 at theta_mp 0.5 / p6 -> 22 % of the galaxy inner (capacity 3.3e7), 12.9 GiB of
+  temporaries; at 0.3 / q4 -> 35 % (5.2e7), 17.7 GiB; 10 x 1e4 at 0.3 / q4 -> 6.4 GiB. After the first stripping
+  edge `R_k <= 2 r_J` shrinks it. A core / tail split (tail stars as monopoles) is the next lever if it binds
+  (open issue).
+
+### Tests, identity, CI
+
+- `tests/integration/strict/test_target_points.py` (shard `integration-strict-targets`), new:
+  `test_grouped_back_reaction_matches_a_direct_sum` (K = 5 with empty slots and one dissolved cluster: near the
+  clusters within the geometric tolerance, elsewhere < 1e-4; the root plan leaves > 10x more inner points),
+  `test_a_point_mask_leaves_the_active_points_bitwise` (grouped and root: the masked evaluation equals the active
+  points' own, bit for bit), `test_grouped_plans_refuse_mismatched_groups_and_grow` (the refusals; an inner overflow
+  reported and grown away by `BackReactionPlan.grown`), `test_target_sources_take_the_live_rows`. CI-like run
+  (coverage, `-n 2`): 32 passed / 3 skipped, 6:56 against the 25-min cap, peak RSS 3.9 GB; with
+  `JACCPOT_RUNTIME_TYPECHECK=1` the new and the back-reaction tests pass. `test_shards.py check` rc 0.
+- **Identity `w7-main-cpu` vs `hh3a-tip-cpu`: PASS 36/36.** The target programs change only by the new optional
+  arguments (a root plan without a mask is HH2a's arithmetic; nornax's K = 1 test is bitwise against
+  `FusedHybridForce`).
+- PR CI (#525): 46/46.
+
+### GPU: the clusters at 1e8 next to the galaxy (gate 4; nornax's `FusedClustersForce`, one A100, contended)
+
+HH2b's gate-5 setup (galaxy preset `dehnen_error` 1e-4, leaf 64, p6, `eps_g` 0.005 ferrers3; Plummer clusters
+`r_c` 0.012, `M_c` 1e-4; `coupling="fmm"`; Hermite 4, `n_sub` 16), `XLA_PYTHON_CLIENT_MEM_FRACTION=0.95` and
+**`XLA_PYTHON_CLIENT_ALLOCATOR=cuda_async`**. Script `mn-scratch/hh3a/scripts/gate4.py`, rows `runs/g4_*.json`.
+
+| run | stripped | verdicts | dE/E with ledger | \|dP\| | back-reaction vs fp64 (rel-L2 / p99.9) | device peak |
+|---|---|---|---|---|---|---|
+| 1e6 + 10 x 1e4, 4 edges x 25 steps (HH2b's IC) | 988 / 70 / 52 / 27 (== HH2b, edge for edge) | ok | <= 4.4e-8 | <= 5.7e-9 | 3.9e-6 / 1.2e-4 | 1.85 GB (HH2b 2.05) |
+| 1e8 + 10 x 1e4, 2 edges x 2 steps, reserve 4096 | 1329 / 32 | ok | -7.6e-9 / 2.3e-8 | <= 1.8e-10 | 1.9e-6 / 2.7e-4 (inner 5.7e6 of 1e8) | prepare 31.5 GB, steps / edges 36.4 GB |
+| 1e8 + 150 x 1e3, 2 edges x 2 steps, reserve 8192 (radii 0.3-10) | 1180 / 48 | ok | -4.5e-9 / 9.4e-9 | <= 4.0e-10 | 1.9e-5 / 1.3e-3 (inner 2.07e7 of 1e8) | prepare 31.5 GB, steps / edges **39.15 GB** |
+
+- **The allocator matters at 1e8.** After the reserve prepare's 31.5-31.8 GB peak, the slow program's single
+  17.7-19.5 GiB temp allocation failed in JAX's BFC pool, preallocated or not (fragmentation: 4.5 GB resident of
+  38), and passed with `cuda_async` (`TF_GPU_ALLOCATOR` is TensorFlow's variable; JAX ignores it). Job `hh3` sets
+  it. Two script bugs on the way: a jitted closure over the 1e8 arrays (~3 GB of executable constants: the CUBIN
+  failed to load), and a module-level reference to the initial state (HH2a's lesson).
+- The resident memory during the stripping segments (13.9 GB) is the galaxy's state twice: `run_segments` keeps a
+  segment's start beside its end for the needs-driven retry. The galaxy's own lane at 1e8 peaked at 27.75 GB
+  (HH2a, one cluster, no reserve).
+- **150 x 1e3 at 1e8 fits with ~1.6 GB to spare** (the 0.95 pool is 40.8 GB): 21 % of the galaxy is inner (the
+  clusters' tails, the galaxy's density at r 0.3-1), the inner walk's lists (far 3.6e8, near 1.2e7 capacity) and the
+  segment's two states. Levers if a production run needs room: a core / tail split of each cluster (the tail as
+  monopoles, a smaller `R_k`); `run_segments` without the second state (re-run from a checkpoint instead); a smaller
+  inner `headroom`. The back-reaction's error at 150 x 1e3 is the inner walk's at the geometric theta 0.5 (gate 1).
+
+### HoreKa (prepared, not run)
+
+Job `hh3` (`bash bench/slurm/h0/submit_all.sh --only hh3`; 1 node, 4:00, ~2.5 node-hours; default set): rows of
+`bench/slurm/hh/hybrid_clusters_timing.sbatch` -- `galaxy_1e8` (the base), `slow_1e8_K10_1e4_{fmm,none}`,
+`slow_1e8_K150_1e3_{fmm,none}`, `back_1e8_K{10_1e4,150_1e3}`, `coupling_1e6_K150_{1e3,1e4}`; per row ms (min /
+median of 3), compile temporaries and the device peak. nornax comes from `src/nornax-hh3` at
+`pins.env H0_NORNAX_HH3_COMMIT` (a worktree beside the bundle's nornax; bump it to the nornax PR's merge). The
+preflight has an `hh3` entry. CPU smoke `SMOKE=1 --only hh3`: preflight entry 281 s, job 417 s, failed none.
+
+### Open
+
+1. The memory headroom at 1e8 + 150 x 1e3 (above); the HoreKa rows decide whether the outer M2P (`N x K` pairs at
+   p6) or the inner walk dominates the slow step, and whether `theta_mp` 0.3 / order 4 is the better default.
+2. `coupling="fmm"` costs `O(K M^2)` (every own pair is a near pair at `eps_g >> r_c`, subtracted exactly); a
+   grouped coupling (the other clusters' multipoles) if HoreKa shows it binds.
+3. The nornax pin moves to this PR's merge commit (nornax PR).
+
 ## HH3b — the clusters inside `ProductionRunner`, with M3 checkpoints (hybrid Hermite session 3, wave 7, 2026-11-21)
 
 nornax `docs/hybrid_hermite.md` section 12 item 1 (now its section 13). Branch `hh3/runner-clusters` in jaccpot and

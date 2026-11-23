@@ -97,6 +97,17 @@ checkout "$H0_MIMIRAX_URL" "$H0_MIMIRAX_COMMIT" "$H0_ROOT/src/mimirax"
 (checkout "$H0_ODISSEO_URL" "$H0_ODISSEO_COMMIT" "$H0_ROOT/src/Odisseo") \
   || log "WARNING: Odisseo not cloned at $H0_ODISSEO_COMMIT: job a4 then needs A4_ODISSEO (bench/slurm/a4/site.env)"
 
+# job "hh3": nornax at H0_NORNAX_HH3_COMMIT (HH3a's FusedClustersForce), a worktree beside src/nornax
+HH3=$H0_ROOT/src/nornax-hh3
+if [ ! -e "$HH3/.git" ]; then
+  if ! git -C "$H0_ROOT/src/nornax" cat-file -e "$H0_NORNAX_HH3_COMMIT^{commit}" 2> /dev/null; then
+    git -C "$H0_ROOT/src/nornax" fetch --quiet origin "$H0_NORNAX_HH3_COMMIT" || git -C "$H0_ROOT/src/nornax" fetch --quiet origin
+  fi
+  git -C "$H0_ROOT/src/nornax" worktree add --quiet --detach "$HH3" "$H0_NORNAX_HH3_COMMIT"
+fi
+git -C "$HH3" checkout --quiet --force --detach "$H0_NORNAX_HH3_COMMIT"
+log "nornax-hh3 at $(git -C "$HH3" log -1 --format='%h %cs %s')"
+
 PRE=$H0_ROOT/src/yggdrax-pre104
 if [ ! -e "$PRE/.git" ]; then
   git -C "$H0_ROOT/src/yggdrax" worktree add --quiet --detach "$PRE" "$H0_YGGDRAX_COMMIT"

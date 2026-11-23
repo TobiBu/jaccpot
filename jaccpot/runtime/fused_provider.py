@@ -86,7 +86,7 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only
     # deferred, as ``fmm_evaluate`` defers it: the gradient lane's modules stay out
     # of the forward lane's import graph
     from ._large_n_grad import LargeNGradPlan, LargeNGradStatics
-    from .target_back_reaction import BackReactionPlan
+    from .target_back_reaction import BackReactionPlan, SourceGroups
     from .target_points import TargetField, TargetPlan
 
 __all__ = [
@@ -1330,6 +1330,8 @@ class FusedForceProvider:
         potential: bool = False,
         return_force_scale: bool = False,
         softening: Optional[float] = None,
+        point_mask: Optional[Array] = None,
+        groups: Optional["SourceGroups"] = None,
     ) -> "TargetField":
         """The field of ``topology``'s sources at ``points`` (massless, not sources).
 
@@ -1357,20 +1359,37 @@ class FusedForceProvider:
         softening : Optional[float]
             The points' pair-kernel softening (``None``: the engine's); see
             :func:`~jaccpot.runtime.target_points.evaluate_target_points`.
+        point_mask : Optional[Array]
+            ``[M]`` bool, the active points (``None``: all): inactive points
+            get zeros and change no active point's field.
+        groups : Optional[SourceGroups]
+            A grouped :class:`BackReactionPlan`'s source groups
+            (:class:`~jaccpot.runtime.target_back_reaction.SourceGroups`).
 
         Returns
         -------
         TargetField
             ``acc``, ``potential``, ``force_scale``, ``needs``, ``ok``.
+
+        Raises
+        ------
+        ValueError
+            If ``groups`` comes with a plain :class:`TargetPlan`.
         """
         from .target_back_reaction import BackReactionPlan, evaluate_back_reaction
         from .target_points import evaluate_target_points
 
-        evaluate = (
-            evaluate_back_reaction
-            if isinstance(plan, BackReactionPlan)
-            else evaluate_target_points
-        )
+        extra: dict = {}
+        if point_mask is not None:
+            extra["point_mask"] = point_mask
+        if isinstance(plan, BackReactionPlan):
+            evaluate = evaluate_back_reaction
+            if groups is not None:
+                extra["groups"] = groups
+        else:
+            if groups is not None:
+                raise ValueError("groups= needs a grouped BackReactionPlan")
+            evaluate = evaluate_target_points
         return evaluate(
             self,
             topology,
@@ -1380,6 +1399,7 @@ class FusedForceProvider:
             potential=bool(potential),
             return_force_scale=bool(return_force_scale),
             softening=softening,
+            **extra,
         )
 
     @on_lane_platform
