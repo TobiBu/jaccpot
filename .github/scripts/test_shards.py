@@ -138,6 +138,9 @@ _STRICT_ESC = "tests/integration/strict/test_escapers.py"
 # (built-in and scheme) at the production-runner operating point, kept out of
 # `integration-strict`, which is near its cap (12.4 min at `-n 2`, loaded host).
 _STRICT_SCHEME = "tests/integration/strict/test_runner_scheme.py"
+# the runner's carried-scheme path (HH3b): a scheme that owns its carry (nornax's
+# clusters); a shard of its own, with the io extra (its orbax restart)
+_STRICT_CARRIED = "tests/integration/strict/test_runner_carried.py"
 # The fused lane's CPU route (wave 3, FUP, 2026-11-06): the runner on
 # `RuntimePolicyConfig(cpu_fused_lane=True)` against the monkeypatched backend, both
 # MACs, N = 256 -- 6.0 min serial under typecheck on a loaded host. Beside the
@@ -249,6 +252,7 @@ SHARDS: dict[str, list[str]] = {
                 *_STRICT_A2_FILES,
                 _STRICT_ESC,
                 _STRICT_SCHEME,
+                _STRICT_CARRIED,
                 _STRICT_CPU_ROUTE,
                 _STRICT_TARGETS,
                 *_STRICT_GRAD_FILES,
@@ -264,6 +268,7 @@ SHARDS: dict[str, list[str]] = {
     "integration-strict-a2": list(_STRICT_A2_FILES),
     "integration-strict-esc": [_STRICT_ESC],
     "integration-strict-scheme": [_STRICT_SCHEME, _STRICT_CPU_ROUTE],
+    "integration-strict-carried": [_STRICT_CARRIED],
     "integration-strict-targets": [_STRICT_TARGETS],
     "integration-strict-grad": list(_STRICT_GRAD_FILES),
     "integration-strict-grad-rollout": [
