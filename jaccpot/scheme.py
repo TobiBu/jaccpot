@@ -586,7 +586,18 @@ def _has_shard_form(scheme: Any) -> bool:
 
 
 def _has_carried_mesh_form(scheme: Any) -> bool:
-    """Whether a carried scheme runs on the mesh (``bind_mesh(mesh) -> scheme``, HH4c)."""
+    """Whether a carried scheme runs on the mesh (``bind_mesh(mesh) -> scheme``, HH4c).
+
+    Parameters
+    ----------
+    scheme : Any
+        A carried scheme.
+
+    Returns
+    -------
+    bool
+        Whether it has a callable ``bind_mesh``.
+    """
     return callable(getattr(scheme, "bind_mesh", None))
 
 

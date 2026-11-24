@@ -66,7 +66,10 @@ def test_the_targets_hook_sums_to_the_field_and_leaves_the_force_alone(mac):
     rng = np.random.default_rng(3)
     pts = jnp.asarray(rng.uniform(-0.9, 0.9, (NPTS, 3)))
     plan = TargetPlan(
-        num_points=NPTS, far_capacity=1 << 16, near_capacity=1 << 14, queue_capacity=1 << 15
+        num_points=NPTS,
+        far_capacity=1 << 16,
+        near_capacity=1 << 14,
+        queue_capacity=1 << 15,
     )
 
     def targets(provider, topology):

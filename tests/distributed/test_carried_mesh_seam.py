@@ -115,7 +115,9 @@ class _DriftOnMesh:
         return {"W_gg": 0.0, "W_gc": 0.0, "W_cc": 0.0, "W_cc_inter": 0.0}
 
     def galaxy(self, carry):
-        s = jnp.stack([jnp.asarray(np.asarray(carry.x)), jnp.asarray(np.asarray(carry.v))], 1)
+        s = jnp.stack(
+            [jnp.asarray(np.asarray(carry.x)), jnp.asarray(np.asarray(carry.v))], 1
+        )
         return s, jnp.asarray(np.asarray(carry.m)), jnp.zeros_like(s[:, 0])
 
     def fingerprint_arrays(self, carry):
@@ -132,7 +134,8 @@ class _DriftOnMesh:
 
     def restore(self, arrays, meta, *, solver, settings, dt, escapers):
         put = lambda a: (  # noqa: E731
-            a if isinstance(a, jax.Array) and a.sharding == self._sh()
+            a
+            if isinstance(a, jax.Array) and a.sharding == self._sh()
             else jax.device_put(np.asarray(a), self._sh())
         )
         return _Carry(put(arrays["x"]), put(arrays["v"]), put(arrays["m"])), []
@@ -153,8 +156,11 @@ def _solver():
 
 def _segment(**kw):
     return SegmentConfig(
-        steps=STEPS, diagnostics_every=1, diagnostics_every_energy=1,
-        domain_guard="off", **kw,
+        steps=STEPS,
+        diagnostics_every=1,
+        diagnostics_every_energy=1,
+        domain_guard="off",
+        **kw,
     )
 
 
@@ -174,7 +180,9 @@ def test_the_runner_binds_the_scheme_and_runs_its_loop(tmp_path):
     state, masses = _system()
     runner = ProductionRunner(
         _solver(),
-        segment=_segment(restart_every=1, restart_path=str(tmp_path / "r{segment}.npz")),
+        segment=_segment(
+            restart_every=1, restart_path=str(tmp_path / "r{segment}.npz")
+        ),
         mesh=_mesh(),
         scheme=_DriftOnMesh(),
     )
@@ -233,7 +241,11 @@ def _repartition(part, x, m, n_live, payload, mesh):
 
     prog = jax.jit(
         jax.shard_map(
-            body, mesh=mesh, in_specs=(spec,) * 4, out_specs=(spec,) * 6, check_vma=False
+            body,
+            mesh=mesh,
+            in_specs=(spec,) * 4,
+            out_specs=(spec,) * 6,
+            check_vma=False,
         )
     )
     return prog(x, m, n_live, payload)
@@ -257,7 +269,12 @@ def test_the_morton_partition_routes_rows_to_their_owners(cubic):
     sh = NamedSharding(mesh, P(AXIS))
     put = lambda a: jax.device_put(a, sh)  # noqa: E731
     x2, m2, n2, id2, mine, ok = _repartition(
-        MortonPartition(cubic=cubic), put(flat_x), put(flat_m), put(counts), put(ids), mesh
+        MortonPartition(cubic=cubic),
+        put(flat_x),
+        put(flat_m),
+        put(counts),
+        put(ids),
+        mesh,
     )
     assert bool(np.all(np.asarray(ok))) and bool(np.all(np.asarray(mine)))
     n2 = np.asarray(n2)
