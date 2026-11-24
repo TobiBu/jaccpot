@@ -2223,9 +2223,18 @@ API); this section the jaccpot side. Report: `mn-scratch/hh4c/REPORT.md`.
 
 ### Gates
 
-See nornax section 16 and `mn-scratch/hh4c/REPORT.md` for the numbers (filled at the end of the session):
-the one-device mesh against the single-card clusters runner (bitwise), 2 and 4 forced CPU devices and 2 GPUs against
-one card, membership, the ledgered energy, momentum, a cluster crossing a domain boundary, same-count restarts.
+CPU, forced host devices (this host, loaded); the full table is nornax `docs/hybrid_hermite.md` section 16.
+
+1. **One-device mesh == the single-card clusters runner, bitwise** (the HH2b system, fused lane, galaxy preset CPU
+   route): 23 / 23 state leaves and every diagnostics row, 96 stars stripped, reserve re-plans 1 -> 79 -> 158.
+2. **2 and 4 devices vs one card**: the direct reference force 1.1e-16 (positions), membership identical; a cluster
+   crossing a fixed domain boundary moves as one block and the run is bitwise the run on a partition it never
+   crosses. The fused mesh lane on 2 devices (`FusedMeshForce` + `targets=` + `MortonPartition`): at the same
+   positions the stars' slow acceleration vs fp64 direct 2.2e-3 (one card 2.7e-3), the galaxy's 2.9e-3 (2.7e-3);
+   membership identical at the first stripping edge; ledgered drift and momentum in the card's class.
+3. **Restarts**: orbax per edge, fresh-process resumes at stripping edges, same device count: 0 / 19 arrays differ
+   (2 and 4 devices, direct; 1 device, fused).
+4. **Identity** `provider_hlo_identity compare w8-main-cpu hh4c-tip-cpu`: PASS 36/36.
 
 ### Tests, identity, CI
 
