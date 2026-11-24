@@ -2233,8 +2233,10 @@ CPU, forced host devices (this host, loaded); the full table is nornax `docs/hyb
    positions the stars' slow acceleration vs fp64 direct 2.2e-3 (one card 2.7e-3), the galaxy's 2.9e-3 (2.7e-3);
    membership identical at the first stripping edge; ledgered drift and momentum in the card's class. 4 devices:
    the same force class; the ledgered energy by fp64 direct sums of the same states drifts 3.0e-7 (card 3.6e-7),
-   while the runner's FMM energy diagnostic shows a -1.8e-5 offset from the first stripping edge on (open: the mesh
-   potential at freshly stripped stars' rows).
+   while the runner's FMM energy diagnostic shows a -1.8e-5 offset from the first stripping edge on: term by term it
+   is all `W_gg`, the mesh potential of the galaxy rows (`mesh_potential_shard`; FMM - direct -3.0e-6 at the start,
+   -5.8e-6 after the edge, one card -1.6e-6, geometric theta 0.8), within its validated W accuracy; the clusters'
+   terms (`W_gc` through `targets=`, `W_cc_inter`) are within 5e-7.
 3. **Restarts**: orbax per edge, fresh-process resumes at stripping edges, same device count: 0 / 19 arrays differ
    (2 and 4 devices, direct), 0 / 23 (2 devices, fused mesh lane), bitwise at 1 device (fused).
 4. **Identity** `provider_hlo_identity compare w8-main-cpu hh4c-tip-cpu`: PASS 36/36.
