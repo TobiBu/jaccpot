@@ -35,6 +35,7 @@ from jaccpot.distributed.template_force import FusedMeshForce  # noqa: E402
 from jaccpot.runtime.target_points import TargetPlan  # noqa: E402
 from tests.distributed import test_mesh_potential as tmp  # noqa: E402
 from tests.distributed.test_mesh_cross_momentum import _solver  # noqa: E402
+from tests.distributed.test_mesh_potential import mac  # noqa: E402,F401
 
 pytestmark = [
     pytest.mark.skipif(
@@ -47,13 +48,14 @@ pytestmark = [
 NPTS = 64
 
 
-def test_the_targets_hook_sums_to_the_field_and_leaves_the_force_alone():
+@pytest.mark.parametrize("mac", ["dehnen"], indirect=True)
+def test_the_targets_hook_sums_to_the_field_and_leaves_the_force_alone(mac):
     mesh = tmp._mesh(tmp.NDEV)
     pos, vel, mass = tmp._cube(tmp.N, seed=0)
     pos, vel, mass = (np.asarray(a, np.float64) for a in (pos, vel, mass))
     shard, _ = decompose(mesh, pos, vel, mass, cap=tmp.CAP, num_samples=64)
     force = FusedMeshForce(
-        _solver("dehnen"),
+        _solver(mac),
         mesh,
         leaf_size=tmp.LEAF,
         max_order=tmp.ORDER,

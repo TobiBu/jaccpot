@@ -1,7 +1,7 @@
 """The galaxy's Morton domains for the direct-sum clusters on the mesh (HH4c).
 
 Hybrid Hermite session 4 (``docs/production_2026-11.md`` ``## HH4c``; nornax
-``docs/hybrid_hermite.md`` section 15). nornax's mesh clusters
+``docs/hybrid_hermite.md`` section 16). nornax's mesh clusters
 (``nornax.hybrid_mesh``) need two things of the galaxy's domain decomposition, inside
 ``shard_map``: move the galaxy rows to their owners (with every per-row array that
 travels with a row) and say which device owns a point -- a cluster belongs to the

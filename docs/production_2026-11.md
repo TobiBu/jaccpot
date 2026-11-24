@@ -2193,3 +2193,45 @@ caller's state still held (2.8 GB).
   1e8 + 150 x 1e3 clusters. It fits now, but with little headroom. Releasing the old plan first is the lever if a
   bigger run needs it.
 - Re-plans compile a new program set (HH2b's finding): size the reserve generously.
+
+## HH4c — the clusters on the mesh: a carried scheme's mesh form (hybrid Hermite session 4, wave 8, 2026-11-24)
+
+nornax `docs/hybrid_hermite.md` section 16 has the scheme side (ownership, the slow force on the mesh, stripping, the
+API); this section the jaccpot side. Report: `mn-scratch/hh4c/REPORT.md`.
+
+### What was built (jaccpot)
+
+- **A carried scheme's mesh form** (`jaccpot/scheme.py`, `jaccpot/production.py`, `jaccpot/carried.py`). A
+  `CarriedScheme` (HH3b) with `bind_mesh(mesh) -> scheme` runs in the multi-GPU mode:
+  `ProductionRunner(mesh=m, scheme=s)` binds it (`self.scheme = s.bind_mesh(m)`) and runs `jaccpot.carried`'s loop
+  through it -- the same segments, retries, edges, diagnostics rows, callbacks and restart files as on one card; no
+  `MeshBackend`. `check_mesh_scheme` lets such a scheme through and still refuses a carried scheme without
+  `bind_mesh`. A bound scheme's optional `restore_specs(meta)` gives every restart array its sharding
+  (`checkpoint.restore_arrays`: each process reads its own shards); `RunResult.mode` is `"mesh"`. Escapers with a
+  carried scheme on the mesh are refused. `scheme=None` and `SplitStepScheme` s take the old code paths: default
+  programs unchanged by construction (identity below).
+- **`jaccpot.distributed.clusters_mesh.MortonPartition`**: the galaxy's ownership for nornax's mesh clusters, inside
+  `shard_map` -- `repartition(x, m, n_live, payload)` routes the rows with `sfc_repartition` in the force's box
+  (`global_mesh_bounds` with the force's box shape; every payload array travels bitwise with its row; a decline moves
+  nothing), and `owners(points, cuts)` is `sfc_repartition`'s rule (`searchsorted(cuts, morton(point))`, the cuts each
+  device's lowest live code as `migration.splitters_shard`) for a cluster's centre of mass.
+- **`FusedMeshForce.shard / potential_shard(targets=)`** (`template_force.mesh_force_shard`,
+  `mesh_potential_shard`): a callable `targets(provider, topology)` evaluated on the device's topology after the
+  force; its result is appended. nornax evaluates there the field of the device's sources at every cluster's stars
+  (`provider.target_field`), one rebuild for both, and sums the partial fields over the mesh. `targets=None` (every
+  existing caller) leaves the programs as they were.
+
+### Gates
+
+See nornax section 16 and `mn-scratch/hh4c/REPORT.md` for the numbers (filled at the end of the session):
+the one-device mesh against the single-card clusters runner (bitwise), 2 and 4 forced CPU devices and 2 GPUs against
+one card, membership, the ledgered energy, momentum, a cluster crossing a domain boundary, same-count restarts.
+
+### Tests, identity, CI
+
+- `tests/distributed/test_carried_mesh_seam.py` (`distributed-tier`, 2 forced devices; its orbax case in
+  `distributed-checkpoint`): the seam on a test-local carried scheme (dispatch, mode, `.npz` and orbax restarts onto
+  the mesh's sharding, refusals) and `MortonPartition` (rows routed with their payload, every live row owned by the
+  device holding it, both box shapes).
+- `tests/distributed/test_mesh_force_targets.py` (`distributed_segment`): the hook leaves the force bitwise, the
+  partial fields summed over two devices are the field of all sources at the points.
