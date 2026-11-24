@@ -2231,9 +2231,12 @@ CPU, forced host devices (this host, loaded); the full table is nornax `docs/hyb
    crossing a fixed domain boundary moves as one block and the run is bitwise the run on a partition it never
    crosses. The fused mesh lane on 2 devices (`FusedMeshForce` + `targets=` + `MortonPartition`): at the same
    positions the stars' slow acceleration vs fp64 direct 2.2e-3 (one card 2.7e-3), the galaxy's 2.9e-3 (2.7e-3);
-   membership identical at the first stripping edge; ledgered drift and momentum in the card's class.
+   membership identical at the first stripping edge; ledgered drift and momentum in the card's class. 4 devices:
+   the same force class; the ledgered energy by fp64 direct sums of the same states drifts 3.0e-7 (card 3.6e-7),
+   while the runner's FMM energy diagnostic shows a -1.8e-5 offset from the first stripping edge on (open: the mesh
+   potential at freshly stripped stars' rows).
 3. **Restarts**: orbax per edge, fresh-process resumes at stripping edges, same device count: 0 / 19 arrays differ
-   (2 and 4 devices, direct; 1 device, fused).
+   (2 and 4 devices, direct), 0 / 23 (2 devices, fused mesh lane), bitwise at 1 device (fused).
 4. **Identity** `provider_hlo_identity compare w8-main-cpu hh4c-tip-cpu`: PASS 36/36.
 
 ### Tests, identity, CI
