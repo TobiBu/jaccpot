@@ -2138,9 +2138,58 @@ RSS 2.6 GB); `integration-strict-scheme` 12; `characterization` 21; `unit` (type
 **GPU restarts need deterministic ops for the clusters** (launch environment): the built-in runner's bitwise GPU
 continuation needs only the fusion autotuner off; with clusters also `--xla_gpu_deterministic_ops=true`.
 
+### The retry's host copy: donated segments (2026-11-24)
+A failed verdict reruns the segment from its start, so `run_carried` kept every segment's start carry on the device: a
+second galaxy state for a retry that is rare. In the production runs, 16 retries came in about 40,000 segments, and
+the 1e8 Sgr run had 1 in 4,428. Now:
+
+- **`CarriedScheme.keep_start(carry)` / `restore_start(kept)`** (optional members): `keep_start` takes a host copy of
+  the start before the segment; on a GPU this is `strict_carry.host_copy`, an asynchronous copy into pinned memory, as
+  `strict_run_v2`'s retry copy. The segment then runs DONATED (`segment(..., donate=True)`) and writes its end into the
+  start's buffers. Only a retry calls `restore_start`, which puts the copy back on the device bitwise. Without the
+  pair, a scheme keeps today's behaviour.
+- **Which segments donate**: every segment after the first. The first donates only with
+  `SegmentConfig.donate_input` or after a restart from a file, when the carry is the runner's own.
+- **`donate_input` releases the caller's state** once the scheme's start has copied it, as the plain runner does after
+  its split. The exception is a carry that holds that very array. Without this, the clusters path kept the caller's
+  `[N, 2, 3]` on the device for the whole run: 2.4 GB at 1e8, which made the first 1e8 GPU attempt run out of memory
+  in an edge re-plan.
+- **nornax's `ClustersRunnerScheme`** implements both: `_Programs.segment_donated` is `jit(cluster_rollout,
+  donate_argnums=0)`, and `keep_start` copies every state leaf with its sharding and weak type.
+
+**Gates.**
+- Identity `w7-main-cpu` vs `hostcopy-tip-cpu`: **PASS 36/36**.
+- `tests/integration/strict/test_runner_carried.py` (8 passed, 1 skipped):
+  - a donated segment's retry reruns from its host copy and equals the uninterrupted run bitwise;
+  - with `donate_input`, the first segment donates too and the caller's state is released.
+- nornax's runner tests (20 passed).
+- CPU smoke through `ProductionRunner` (20,000 + 3 x 200, one forced retry): equal to the undonated run bitwise.
+  Keeping the start took 0.02-0.2 s and restoring it 0.005 s.
+
+**GPU, 1e8 + 150 x 1e3** (HH3a's gate-4 system: seed 21, reserve 8192, 2 steps per edge; one A100, `cuda_async`, mem
+fraction 0.95, deterministic ops). The run donates throughout, with one retry FORCED at the second segment. The
+baseline is HH3a's `run_segments` row, which kept the start on the device. Record: `mn-scratch/integ/hostcopy/`.
+
+| | HH3a (start kept on device) | donated + host copy |
+|---|---|---|
+| device in use at an edge | 13.97 GB | **10.34 GB** |
+| segment peak | 39.15 GB | **≤ 36.5 GB**¹ |
+| run peak (includes edge 1's full 1e8 re-plan) | — (no edge re-plan) | 38.26 GB |
+
+- Edge 1's refresh verdict failed (the star tree), and the edge re-planned the full 1e8 galaxy force. HH3a's run
+  never had to, and that re-plan is what ran out of memory with the caller's state still held.
+- The forced retry reran segment 2 from the host copy. 1,180 + 48 stars were stripped (HH3a: the same 1,180 + 48).
+  Ledgered dE/E was -2.9e-9 / 9.3e-9 and |dP| ≤ 1.4e-9 (HH3a: dE/E ≤ 9.4e-9, |dP| ≤ 4.0e-10).
+- Functional only: these are contended cards, so no timings. The run was killed from outside during its last
+  segment, so there is no final digest.
+
+¹ From the first attempt: the allocator's `MaxInUse` through the first donated segment, 34.02 GiB, measured with the
+caller's state still held (2.8 GB).
+
 ### Open
 - The mesh (nornax section 12 item 2), Aarseth internal steps (item 3), the Odisseo science layer (item 4), HoreKa
   timing (item 5), the open physics choices (item 6: today's defaults kept).
-- A segment's start carry stays on the device for the retry (`run_segments` does the same): at 1e8 that is a second
-  galaxy state; the built-in runner keeps a host copy instead. Not needed at the gate sizes; for HH3a's scale.
+- An edge re-plan at 1e8 prepares the new galaxy plan while the old one is still on the device: 38.26 GB peak with
+  1e8 + 150 x 1e3 clusters. It fits now, but with little headroom. Releasing the old plan first is the lever if a
+  bigger run needs it.
 - Re-plans compile a new program set (HH2b's finding): size the reserve generously.
