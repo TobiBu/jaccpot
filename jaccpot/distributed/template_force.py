@@ -865,6 +865,7 @@ def mesh_force_shard(
     cross_near_sink: Optional[dict] = None,
     axis_name: str = AXIS_NAME,
     force_scale: Optional[Array] = None,
+    targets: Optional[Callable[[Any, Any], Any]] = None,
 ) -> tuple[Array, ...]:
     """One device's self-gravity on the template route (inside ``shard_map``).
 
@@ -900,6 +901,12 @@ def mesh_force_shard(
     force_scale : Optional[Array]
         ``(cap,)`` the previous force's ``f_b`` in input row order (or the
         prepare's seed); required under the criterion, ``None`` without it.
+    targets : Optional[Callable[[Any, Any], Any]]
+        ``targets(provider, topology) -> Any``, evaluated on this device's
+        topology after the force (HH4c: the field of this device's sources at
+        points that are not sources, ``provider.target_field``); its result is
+        appended to the returned tuple. ``None`` (the default): the force alone,
+        the program unchanged.
 
     Returns
     -------
@@ -910,7 +917,7 @@ def mesh_force_shard(
         ``fused_topology.NEEDS_FIELDS`` (whose ``tree_overflow`` also counts a
         level-plan overflow) followed by ``cross.CROSS_NEEDS_FIELDS``
         (:func:`_hook_cross_needs`); with ``force_scale``, then the new ``(cap,)``
-        ``f_b`` (zero on padding rows).
+        ``f_b`` (zero on padding rows); with ``targets``, then its result.
     """
     provider = setup.provider
     topology = _shard_rebuild(
@@ -943,9 +950,10 @@ def mesh_force_shard(
         live_rows = jnp.arange(int(positions.shape[0])) < live
         f_b = jnp.where(live_rows, f_b, jnp.zeros((), f_b.dtype))
     bits, needs = _shard_verdict(topology, cross_hook, cross_near_sink)
-    if f_b is not None:
-        return acceleration, bits, needs, f_b
-    return acceleration, bits, needs
+    out = (acceleration, bits, needs) + (() if f_b is None else (f_b,))
+    if targets is not None:
+        out = out + (targets(provider, topology),)
+    return out
 
 
 def _shard_rebuild(
@@ -1072,7 +1080,8 @@ def mesh_potential_shard(
     cross_near_sink: Optional[dict] = None,
     axis_name: str = AXIS_NAME,
     force_scale: Optional[Array] = None,
-) -> tuple[Array, Array, Array]:
+    targets: Optional[Callable[[Any, Any], Any]] = None,
+) -> tuple[Array, ...]:
     """One device's self-gravity POTENTIAL on the template route (inside ``shard_map``).
 
     The single card's energy program (``ProductionRunner.potential_energy``: a
@@ -1118,14 +1127,18 @@ def mesh_potential_shard(
     force_scale : Optional[Array]
         ``(cap,)`` eq (16b)'s ``f_b`` in input row order (the force's carried one);
         required under the criterion, ``None`` without it.
+    targets : Optional[Callable[[Any, Any], Any]]
+        As :func:`mesh_force_shard`'s (e.g. the potential of this device's
+        sources at points that are not sources); appended to the result.
 
     Returns
     -------
-    tuple[Array, Array, Array]
+    tuple[Array, ...]
         ``(phi, bits, needs)``: ``(cap,)`` in input row order and the positions'
         dtype, zero on padding rows; the ``uint32`` overflow bits and the ``int32``
         needs of the rebuild, as :func:`mesh_force_shard` returns them (the
-        potential is meaningless unless ``overflow_ok(bits)``).
+        potential is meaningless unless ``overflow_ok(bits)``); with ``targets``,
+        then its result.
     """
     provider = setup.provider
     topology = _shard_rebuild(
@@ -1147,6 +1160,8 @@ def mesh_potential_shard(
     live_rows = jnp.arange(int(positions.shape[0])) < live
     phi = jnp.where(live_rows, phi, jnp.zeros((), phi.dtype))
     bits, needs = _shard_verdict(topology, cross_hook, cross_near_sink)
+    if targets is not None:
+        return phi, bits, needs, targets(provider, topology)
     return phi, bits, needs
 
 
@@ -1792,6 +1807,7 @@ class FusedMeshForce:
         live: Array,
         ids: Array,
         force_scale: Optional[Array] = None,
+        targets: Optional[Callable[[Any, Any], Any]] = None,
     ) -> tuple[Array, ...]:
         """One device's self-gravity (:func:`mesh_force_shard`; inside ``shard_map``).
 
@@ -1807,11 +1823,15 @@ class FusedMeshForce:
             ``(cap,)`` global ids; unused (the rows come back in input order).
         force_scale : Optional[Array]
             ``(cap,)`` the previous force's ``f_b`` (:attr:`scale_carry` only).
+        targets : Optional[Callable[[Any, Any], Any]]
+            ``targets(provider, topology)`` on this device's topology
+            (:func:`mesh_force_shard`; HH4c's field at the clusters' stars).
 
         Returns
         -------
         tuple[Array, ...]
-            ``(acceleration, bits, needs)``, then ``f_b`` with ``force_scale``.
+            ``(acceleration, bits, needs)``, then ``f_b`` with ``force_scale``,
+            then the ``targets`` result.
         """
         del ids
         return mesh_force_shard(
@@ -1823,6 +1843,7 @@ class FusedMeshForce:
             cross_near_sink=self.near_sink,
             axis_name=self.axis_name,
             force_scale=force_scale,
+            **({} if targets is None else {"targets": targets}),
         )
 
     def potential_shard(
@@ -1832,7 +1853,8 @@ class FusedMeshForce:
         live: Array,
         ids: Array,
         force_scale: Optional[Array] = None,
-    ) -> tuple[Array, Array]:
+        targets: Optional[Callable[[Any, Any], Any]] = None,
+    ) -> tuple[Array, ...]:
         """One device's self-gravity potential (:func:`mesh_potential_shard`; inside ``shard_map``).
 
         Called like :meth:`shard`: inside the caller's ``shard_map``, under
@@ -1853,16 +1875,19 @@ class FusedMeshForce:
         force_scale : Optional[Array]
             ``(cap,)`` the force's carried ``f_b`` (:attr:`scale_carry` only): the
             rebuild's thresholds, so the lists are the force's.
+        targets : Optional[Callable[[Any, Any], Any]]
+            As :meth:`shard`'s, on the potential's topology (appended).
 
         Returns
         -------
-        tuple[Array, Array]
+        tuple[Array, ...]
             ``(phi, bits)``: ``(cap,)`` in the positions' dtype, zero on padding
             rows, and the ``uint32`` overflow bits of its rebuild (the potential is
-            meaningless unless ``overflow_ok`` of their mesh-wide OR holds).
+            meaningless unless ``overflow_ok`` of their mesh-wide OR holds); then
+            the ``targets`` result when given.
         """
         del ids
-        phi, bits, _ = mesh_potential_shard(
+        out = mesh_potential_shard(
             self._setup_or_raise(),
             positions,
             masses,
@@ -1871,8 +1896,11 @@ class FusedMeshForce:
             cross_near_sink=self.near_sink,
             axis_name=self.axis_name,
             force_scale=force_scale,
+            **({} if targets is None else {"targets": targets}),
         )
-        return phi, bits
+        if targets is not None:
+            return out[0], out[1], out[3]
+        return out[0], out[1]
 
     def with_grad_plan(
         self, positions: Array, masses: Array, counts: Array
