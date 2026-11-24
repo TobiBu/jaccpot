@@ -397,3 +397,79 @@ def test_the_edge_sees_the_carry():
     assert res.stopped and len(seen) == 1 and seen[0][0] is not None
     assert seen[0][1] == (512, 2, 3) and res.edges[0].diagnostics is None
     json.dumps(res.edges[0].plan)
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class _Donating(_Leapfrog):
+    """``_Leapfrog`` with ``keep_start``/``restore_start``: the runner donates."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        object.__setattr__(self, "_dprogs", {})
+        object.__setattr__(self, "log", [])
+
+    def segment(self, c, dt, steps, donate=False):
+        if not donate:
+            return super().segment(c, dt, steps)
+        base = self._segment_program(c.provider, float(dt), int(steps))
+        key = (id(c.provider), float(dt), int(steps))
+        if key not in self._dprogs:
+            self._dprogs[key] = jax.jit(base.__wrapped__, donate_argnums=(0, 1, 2))
+        start = (c.x, c.v, c.acc)
+        with self._pinned(c):
+            x, v, acc, aux = self._dprogs[key](c.x, c.v, c.acc, c.aux, c.m)
+        self.log.append(("donated", all(a.is_deleted() for a in start)))
+        return dataclasses.replace(
+            c, x=x, v=v, acc=acc, aux=aux, time=c.time + steps * dt
+        )
+
+    def keep_start(self, c):
+        self.log.append(("keep",))
+        # a copy of a device-side copy: device_get of ``a`` itself leaves a
+        # zero-copy NumPy view on it, and JAX then refuses the donation (CPU)
+        return c, tuple(
+            (np.asarray(jax.device_get(jnp.copy(a))), a.sharding)
+            for a in (c.x, c.v, c.acc)
+        )
+
+    def restore_start(self, kept):
+        c, arrays = kept
+        self.log.append(("restore",))
+        x, v, acc = (jax.device_put(a, s) for a, s in arrays)
+        return dataclasses.replace(c, x=x, v=v, acc=acc)
+
+
+def test_a_donated_segment_is_rerun_from_its_host_copy(one_go):
+    """keep_start/restore_start: later segments donate, a retry restores the start bitwise."""
+    want, _ = one_go
+    state, masses = _system()
+    scheme = _Donating(fail_once_at=1)
+    res = _runner(scheme).run(state, masses, dt=DT, num_steps=STEPS * SEGMENTS)
+    assert [e.retries for e in res.edges] == [0, 0, 1, 0]
+    _same(_final(res), want)
+    # segment 1 keeps the caller's state (no donate_input); 2 and its rerun and 3
+    # donate, each from a fresh host copy or its restore
+    assert scheme.log == [
+        ("keep",),
+        ("donated", True),
+        ("restore",),
+        ("donated", True),
+        ("keep",),
+        ("donated", True),
+    ]
+    assert not state.is_deleted() and not masses.is_deleted()  # the caller's
+
+
+def test_donate_input_donates_the_first_segment_too(one_go):
+    want, _ = one_go
+    state, masses = _system()
+    scheme = _Donating()
+    res = _runner(scheme, donate_input=True).run(
+        state, masses, dt=DT, num_steps=STEPS * SEGMENTS
+    )
+    _same(_final(res), want)
+    assert [e for e in scheme.log if e[0] == "donated"] == [("donated", True)] * 3
+    # the caller lent its state (the start copied it): released, as the plain
+    # runner's donate_input; the masses (the carry's own leaf here) are kept
+    assert state.is_deleted()
+    assert not masses.is_deleted()

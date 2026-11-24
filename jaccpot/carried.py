@@ -32,6 +32,7 @@ shapes, digests).
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import os
 import time
@@ -366,6 +367,35 @@ def _cluster_fields(
     return fields
 
 
+def _consume_input(state: Any, carry: Any) -> None:
+    """``donate_input``: delete the caller's ``state`` once the scheme's start holds its own.
+
+    As the plain runner (``ProductionRunner.run`` deletes the caller's buffer once
+    its split copied it): the caller lent the state to the run, and a second full
+    galaxy state through it costs 2.4 GB at 1e8 (an edge re-plan at 1e8 + 150 x 1e3
+    clusters did not fit beside it). Kept when the carry holds that very array (a
+    pytree leaf of the carry or of one of its dataclass fields): the first segment
+    then donates it itself.
+
+    Parameters
+    ----------
+    state : Any
+        The caller's ``[N, 2, 3]`` galaxy state.
+    carry : Any
+        The scheme's start carry (``scheme.start``).
+    """
+    import jax
+
+    if not isinstance(state, jax.Array) or state.is_deleted():
+        return
+    parts = [carry]
+    if dataclasses.is_dataclass(carry) and not isinstance(carry, type):
+        parts += [getattr(carry, f.name) for f in dataclasses.fields(carry)]
+    if any(leaf is state for leaf in jax.tree_util.tree_leaves(parts)):
+        return
+    state.delete()
+
+
 def run_carried(
     runner: Any,
     state: Any,
@@ -686,12 +716,36 @@ def run_carried(
     if int(num_steps) - step > 0:
         runner._warn_remainder(lengths)
     max_retries = int(getattr(scheme, "max_retries", 2))
+    # Donation (CarriedScheme.keep_start/restore_start): the segment consumes its start and
+    # the retry restores it from a host copy, so one galaxy state is on the device.
+    # The first segment's carry may hold the caller's arrays (a fresh start):
+    # donated only with donate_input or after a restart from a file.
+    donates = callable(getattr(scheme, "keep_start", None)) and callable(
+        getattr(scheme, "restore_start", None)
+    )
+    owned_first = bool(getattr(seg, "donate_input", False)) or isinstance(
+        restart_from, (str, os.PathLike)
+    )
+
+    if restart_from is None and bool(getattr(seg, "donate_input", False)):
+        _consume_input(state, carry)
+    del state
+
+    def run_segment(start: Any, length: int, donate: bool) -> Any:
+        if donate:
+            return scheme.segment(start, dt_value, length, donate=True)
+        return scheme.segment(start, dt_value, length)
+
     for index, length in enumerate(lengths):
         if stopped:
             break
         wall0 = time.perf_counter()
+        donate = donates and (index > 0 or owned_first)
         start = carry
-        carry = scheme.segment(start, dt_value, int(length))
+        kept = scheme.keep_start(start) if donate else None
+        carry = run_segment(start, int(length), donate)
+        if donate:
+            del start  # consumed by the segment
         retries = 0
         reasons_all: list = []
         while True:
@@ -705,11 +759,15 @@ def run_carried(
                     f"after {retries} re-plans ({reasons}); last restart: "
                     f"{runner._last_restart}"
                 )
-            carry = scheme.segment(
-                scheme.replanned(start, carry), dt_value, int(length)
-            )
+            if donate:
+                start = scheme.restore_start(kept)
+            carry = run_segment(scheme.replanned(start, carry), int(length), donate)
+            if donate:
+                del start
             retries += 1
-        del start
+        if not donate:
+            del start
+        del kept
         step += int(length)
         segment_done += 1
         escapers_due = policy is not None and segment_done % int(policy.every) == 0

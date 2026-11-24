@@ -177,6 +177,20 @@ class CarriedScheme(Protocol):
     An optional ``max_retries`` attribute (int, default 2) bounds the re-plans per
     segment.
 
+    Optional ``keep_start(carry)`` and ``restore_start(kept)`` let the runner DONATE
+    a segment's start carry (``segment(..., donate=True)``: the program writes its
+    end into the start's buffers, so one galaxy state is on the device, not two).
+    ``keep_start`` takes a host copy of the start before the segment (asynchronous
+    into pinned memory on a GPU, as ``strict_run_v2``'s retry copy);
+    ``restore_start`` puts it back on the device, bitwise, only when the verdict asks
+    for a retry. The runner donates the first segment only with
+    ``SegmentConfig.donate_input`` or after a restart from a file (the carry is then
+    the runner's own), and every later segment. Without them every segment keeps its
+    start on the device. With ``donate_input`` the runner also deletes the caller's
+    ``state`` after ``start`` (as the plain runner does once its split copied it),
+    unless the carry holds that very array; a scheme must not keep the caller's
+    array anywhere else.
+
     Attributes
     ----------
     carried : ClassVar[bool]
@@ -242,8 +256,11 @@ class CarriedScheme(Protocol):
         """
         ...
 
-    def segment(self, carry: Any, dt: float, steps: int) -> Any:
+    def segment(self, carry: Any, dt: float, steps: int, **kwargs: Any) -> Any:
         """``steps`` steps of ``dt`` in one program; the input carry stays valid (a retry reruns it).
+
+        With ``donate=True`` (passed only to a scheme with ``keep_start``/``restore_start``) the
+        program consumes the input carry instead.
 
         Parameters
         ----------
@@ -253,6 +270,8 @@ class CarriedScheme(Protocol):
             The step.
         steps : int
             Steps.
+        **kwargs : Any
+            ``donate`` (bool).
 
         Returns
         -------
