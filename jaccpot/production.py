@@ -2077,6 +2077,20 @@ class ProductionRunner:
             # I2: the scheme runs on each device's rows; one whose step reads
             # other rows must have a mesh form
             check_mesh_scheme(scheme)
+            if is_carried_scheme(self.scheme):
+                # HH4c: a carried scheme's mesh form -- the same loop
+                # (jaccpot.carried), the scheme bound to the mesh; no MeshBackend
+                if escapers is not None:
+                    raise ValueError(
+                        f"{type(self.scheme).__name__} on the mesh runs without the "
+                        "escaper path (the clusters' mesh rows hold stripped stars, "
+                        "not escapers, yet): pass escapers=None, or run on one card"
+                    )
+                self.mesh = (
+                    mesh if isinstance(mesh, MeshRunConfig) else MeshRunConfig(mesh)
+                )
+                self.scheme = self.scheme.bind_mesh(self.mesh.mesh)
+                return
             if scheme is not None and escapers is not None:
                 raise ValueError(
                     "the multi-GPU mode runs a scheme without the escaper path: the "
@@ -2154,8 +2168,9 @@ class ProductionRunner:
             When the eager prepare's tree is deeper than yggdrax's
             ``MAX_TREE_LEVELS``; the message adds the IC guard's report.
         """
-        if self._mesh_backend is None and is_carried_scheme(self.scheme):
-            # a carried scheme (the clusters, HH3b): its carry, the runner's loop
+        if is_carried_scheme(self.scheme):
+            # a carried scheme (the clusters, HH3b; on the mesh through its mesh
+            # form, HH4c): its carry, the runner's loop
             from jaccpot.carried import run_carried
 
             return run_carried(
@@ -3313,13 +3328,13 @@ class ProductionRunner:
         RuntimeError
             Before the first segment (step 0 is the run's own input).
         """
-        if self._mesh_backend is not None:
-            return self._mesh_backend.save_restart(path)
         if is_carried_scheme(self.scheme):
             # a carried scheme: ``*.npz`` a file, any other path an orbax checkpoint
             from jaccpot.carried import save_carried
 
             return save_carried(self, path)
+        if self._mesh_backend is not None:
+            return self._mesh_backend.save_restart(path)
         import jax
 
         current = self._current
