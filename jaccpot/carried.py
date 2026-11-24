@@ -376,6 +376,13 @@ def _consume_input(state: Any, carry: Any) -> None:
     clusters did not fit beside it). Kept when the carry holds that very array (a
     pytree leaf of the carry or of one of its dataclass fields): the first segment
     then donates it itself.
+
+    Parameters
+    ----------
+    state : Any
+        The caller's ``[N, 2, 3]`` galaxy state.
+    carry : Any
+        The scheme's start carry (``scheme.start``).
     """
     import jax
 
