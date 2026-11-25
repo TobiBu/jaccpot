@@ -104,9 +104,7 @@ def _radius_bin(radius: Array) -> Array:
     return jnp.clip(b, 0, LET_BINS - 1)
 
 
-def _bin_table(
-    rows: Array, member: Array, bins: Array, *, error_order: int
-) -> Array:
+def _bin_table(rows: Array, member: Array, bins: Array, *, error_order: int) -> Array:
     """``(LET_BINS, 9)`` per radius bin of the member rows: box, radius, G M, threshold."""
     dtype = rows.dtype
     inf = jnp.asarray(jnp.inf, dtype)
@@ -303,7 +301,9 @@ def let_open(
 
     every = desc[0:nb].reshape(LET_BINS, _BIN_COLS)
     leaves = desc[nb : 2 * nb].reshape(LET_BINS, _BIN_COLS)
-    smaller = jnp.arange(LET_BINS)[None, :] <= _radius_bin(rows[:, _COL_RADIUS])[:, None]
+    smaller = (
+        jnp.arange(LET_BINS)[None, :] <= _radius_bin(rows[:, _COL_RADIUS])[:, None]
+    )
     rb_small = jnp.minimum(ra, every[None, :, 6])
     fail = jnp.any(smaller & may_fail(every, rb_small), axis=1)
     fail = fail | jnp.any(may_fail(leaves, leaves[None, :, 6]), axis=1)
@@ -567,9 +567,7 @@ def let_exchange(
     )
 
 
-def let_bytes(
-    blocks: LetBlocks, *, row_width: int, itemsize: int
-) -> dict[str, Any]:
+def let_bytes(blocks: LetBlocks, *, row_width: int, itemsize: int) -> dict[str, Any]:
     """Bytes this device put on the wire for the LET rows (the used rows).
 
     Parameters

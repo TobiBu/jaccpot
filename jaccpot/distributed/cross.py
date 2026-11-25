@@ -1361,7 +1361,9 @@ def _let_global_index(i: Array, let: Any, me: Array, S: int) -> Array:
     i = jnp.asarray(i).astype(idx)
     ok = (i >= 0) & (i < let.orig.shape[0])
     safe = jnp.where(ok, i, 0)
-    dev = jnp.where(safe < int(let.send_capacity), jnp.asarray(me).astype(idx), let.peer[safe])
+    dev = jnp.where(
+        safe < int(let.send_capacity), jnp.asarray(me).astype(idx), let.peer[safe]
+    )
     return jnp.where(ok, dev * int(S) + let.orig[safe], -1)
 
 
@@ -1826,9 +1828,7 @@ def _symmetric_exchange(
         if let is None:
             r_count = jnp.where(
                 r_ok,
-                jnp.round(gathered[r_peer, jnp.maximum(imp_n.rows, 0), 7]).astype(
-                    idx
-                ),
+                jnp.round(gathered[r_peer, jnp.maximum(imp_n.rows, 0), 7]).astype(idx),
                 0,
             )
         else:

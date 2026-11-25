@@ -30,8 +30,9 @@ pytestmark = pytest.mark.skipif(
 
 def _state(seed=0):
     """Exact Morton ranges: ``n`` clustered particles sorted by code, cut evenly."""
-    from jaccpot.distributed.fused import global_mesh_bounds  # noqa: F401
     from yggdrax.morton import morton_encode_impl
+
+    from jaccpot.distributed.fused import global_mesh_bounds  # noqa: F401
 
     rng = np.random.default_rng(seed)
     n = 1600
@@ -72,7 +73,9 @@ def _cuts(fn, positions, counts, work=None, **kw):
         )
         n = jnp.minimum(c[0], x.shape[0])
         live = jnp.arange(x.shape[0]) < n
-        dest = jnp.searchsorted(cuts, _codes(x, n, cubic=True, axis_name=AXIS), side="right")
+        dest = jnp.searchsorted(
+            cuts, _codes(x, n, cubic=True, axis_name=AXIS), side="right"
+        )
         dest = jnp.where(live, dest, NDEV)
         rows = jax.ops.segment_sum(live.astype(jnp.int32), dest, NDEV + 1)[:NDEV]
         wsum = jax.ops.segment_sum(jnp.where(live, w, 0.0), dest, NDEV + 1)[:NDEV]
@@ -81,8 +84,13 @@ def _cuts(fn, positions, counts, work=None, **kw):
     use = () if fn is balanced_splitters_shard else (work,)
     args = (positions, counts, work) + use
     program = jax.jit(
-        jax.shard_map(body, mesh=mesh, in_specs=(spec,) * len(args),
-                      out_specs=(P(), P(), P()), check_vma=False)
+        jax.shard_map(
+            body,
+            mesh=mesh,
+            in_specs=(spec,) * len(args),
+            out_specs=(P(), P(), P()),
+            check_vma=False,
+        )
     )
     return tuple(np.asarray(a) for a in program(*args))
 
@@ -105,5 +113,7 @@ def test_max_rows_bounds_every_device():
     limit = 460
     _, free, _ = _cuts(work_balanced_splitters_shard, positions, counts, work)
     assert free.max() > limit, free  # the bound binds
-    _, rows, _ = _cuts(work_balanced_splitters_shard, positions, counts, work, max_rows=limit)
+    _, rows, _ = _cuts(
+        work_balanced_splitters_shard, positions, counts, work, max_rows=limit
+    )
     assert rows.max() <= limit, rows

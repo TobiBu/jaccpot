@@ -120,7 +120,9 @@ def test_the_let_exchange_is_the_all_gather_exchange(mac):
     n = PER_DEVICE * ndev
     pos, vel, mass = tmp._cube(n, seed=0)
     pos, vel, mass = (np.asarray(a, np.float64) for a in (pos, vel, mass))
-    shard, _ = decompose(mesh, pos, vel, mass, cap=int(1.3 * PER_DEVICE), num_samples=64)
+    shard, _ = decompose(
+        mesh, pos, vel, mass, cap=int(1.3 * PER_DEVICE), num_samples=64
+    )
     caps = CrossCapacities(max_cells=tmp.LEAF_CAP, leaf_width=tmp.LEAF)
     caps = caps._with(
         let_send_cap=(ndev - 1) * caps.max_summary_nodes,
@@ -166,5 +168,7 @@ def test_the_let_exchange_is_the_all_gather_exchange(mac):
     live = rec_g["summary_nodes"].astype(np.int64)
     gathered = np.array([live.sum() - live[d] for d in range(ndev)])
     recv = rec_l["let_recv_rows"].astype(np.int64)
-    print(f"{mac} x{ndev}: LET rows received {recv.tolist()}, all_gather {gathered.tolist()}")
+    print(
+        f"{mac} x{ndev}: LET rows received {recv.tolist()}, all_gather {gathered.tolist()}"
+    )
     assert np.all(recv <= gathered) and np.all(recv >= ndev - 1)

@@ -35,8 +35,14 @@ def _rows(rng, n, centre, *, order, spread=1.0):
     rad = 10.0 ** rng.uniform(-3.0, 0.3, n)
     leaf = rng.uniform(size=n) < 0.5
     left = np.where(leaf, -1.0, 1.0)
-    cols = [cen, rad[:, None], left[:, None], left[:, None], np.ones((n, 1)),
-            np.full((n, 1), 8.0)]
+    cols = [
+        cen,
+        rad[:, None],
+        left[:, None],
+        left[:, None],
+        np.ones((n, 1)),
+        np.full((n, 1), 8.0),
+    ]
     if order:
         gm = 10.0 ** rng.uniform(-6.0, -1.0, n)
         thr = 10.0 ** rng.uniform(-4.0, 0.0, n)
@@ -51,8 +57,14 @@ def _refused_and_split_a(a, b, *, order, floor):
     d2 = np.sum((ca - cb) ** 2, axis=-1)
     ra, rb = a[:, 3][:, None], b[:, 3][None, :]
     if order:
-        ta = [jnp.asarray(np.broadcast_to(a[:, 8 + k][:, None], d2.shape)) for k in range(order + 2)]
-        tb = [jnp.asarray(np.broadcast_to(b[:, 8 + k][None, :], d2.shape)) for k in range(order + 2)]
+        ta = [
+            jnp.asarray(np.broadcast_to(a[:, 8 + k][:, None], d2.shape))
+            for k in range(order + 2)
+        ]
+        tb = [
+            jnp.asarray(np.broadcast_to(b[:, 8 + k][None, :], d2.shape))
+            for k in range(order + 2)
+        ]
         ok = np.asarray(
             dehnen_pair_accept(
                 row_a=ta,
@@ -98,7 +110,9 @@ def test_every_node_the_walk_could_split_is_opened(order, floor, offset):
     missed = need & ~opened
     assert not np.any(missed), f"{int(missed.sum())} nodes the walk splits stay closed"
     if offset == 0.0:
-        assert np.all(opened[a[:, 4] >= 0]), "an overlapping peer opens every internal node"
+        assert np.all(
+            opened[a[:, 4] >= 0]
+        ), "an overlapping peer opens every internal node"
 
 
 def test_the_bound_is_not_vacuous():
@@ -123,8 +137,8 @@ def test_an_empty_peer_opens_nothing():
     rng = np.random.default_rng(3)
     a = _rows(rng, 50, np.zeros(3), order=ORDER)
     b = _rows(rng, 50, np.zeros(3), order=ORDER)
-    desc = let_descriptor(jnp.asarray(b), jnp.zeros(b.shape[0], bool), error_order=ORDER)
-    opened = np.asarray(
-        let_open(jnp.asarray(a), desc, theta=THETA, error_order=ORDER)
+    desc = let_descriptor(
+        jnp.asarray(b), jnp.zeros(b.shape[0], bool), error_order=ORDER
     )
+    opened = np.asarray(let_open(jnp.asarray(a), desc, theta=THETA, error_order=ORDER))
     assert not np.any(opened)
