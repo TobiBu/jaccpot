@@ -2237,6 +2237,9 @@ CPU, forced host devices (this host, loaded); the full table is nornax `docs/hyb
    is all `W_gg`, the mesh potential of the galaxy rows (`mesh_potential_shard`; FMM - direct -3.0e-6 at the start,
    -5.8e-6 after the edge, one card -1.6e-6, geometric theta 0.8), within its validated W accuracy; the clusters'
    terms (`W_gc` through `targets=`, `W_cc_inter`) are within 5e-7.
+   **GPU** (2 shared A100s vs one card, functional; galaxy 1e6 `dehnen_error` + 10 x 1e4 clusters, 3 x 5 steps):
+   membership identical at the end (1037 stripped, the same ids), the slow accelerations 3.2e-4 (stars) and 2.1e-4
+   (galaxy) of the card's, ledgered drift <= 3.5e-8, momentum <= 3.5e-9, device peak 1.77 / 1.72 GB.
 3. **Restarts**: orbax per edge, fresh-process resumes at stripping edges, same device count: 0 / 19 arrays differ
    (2 and 4 devices, direct), 0 / 23 (2 devices, fused mesh lane), bitwise at 1 device (fused).
 4. **Identity** `provider_hlo_identity compare w8-main-cpu hh4c-tip-cpu`: PASS 36/36.
