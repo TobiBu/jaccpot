@@ -446,27 +446,57 @@ def let_exchange(
     internal = valid & (left >= 0)
     parent = _parents(left, right, internal)
     count = jnp.round(rows[:, _COL_COUNT]).astype(idx)
-    # opened[d, x]: peer d's walk splits my node x (a cut node it requested)
-    opened = jnp.zeros((nd, S), bool)
+    # tag[d, x] = r + 1: peer d's walk splits my node x, a cut node of round r it
+    # requested (0: not requested)
+    tag = jnp.zeros((nd, S), jnp.int8)
     lost = jnp.asarray(False)
     rounds_needed = []
     requested = jnp.zeros((nd,), idx)
     req_walk = None
+    big0 = internal & (count > levels[0])
+    # each node's cut ancestor at every round's size: the node of that round's
+    # top (the root and the children of nodes above the size) over it, itself in
+    # the top; one pointer doubling per size, the same for every peer
+    doubling = max(1, int(math.ceil(math.log2(max(S, 2)))))
+    cut_anc = []
+    for m in levels:
+        big_m = internal & (count > m)
+        in_top = valid & ((parent < 0) | big_m[jnp.maximum(parent, 0)])
+        jump = jnp.where(in_top | (parent < 0), at, parent)
+        for _ in range(doubling):
+            jump = jump[jump]
+        cut_anc.append(jump)
+
+    def expanded_after(d: Array, done: int, tag: Array) -> Array:
+        """Nodes whose children peer ``d`` gets after ``done`` request rounds: above
+        the first size, requested, or inside a subtree requested in round ``j``
+        and above round ``j + 1``'s size (the whole subtree after the last round,
+        or when it already holds no more than that size). Closed upward."""
+        t = tag[d]
+        out = big0 | (t > 0)
+        for j in range(done):
+            inside = t[cut_anc[j]] == j + 1
+            if j + 1 < len(levels):
+                # down to the next size; whole when the requested subtree is
+                # already within it. Every cut node of a round is then a node of
+                # that round's top, so cut_anc finds the requester of every node
+                # inside a requested subtree
+                small = count[cut_anc[j]] <= levels[j + 1]
+                inside = inside & ((count > levels[j + 1]) | small)
+            out = out | (inside & internal)
+        return out
 
     for r, m in enumerate(levels):
         with jax.named_scope(f"cross_let_round{r}"):
-            big = internal & (count > m)
 
-            def expanded(d: Array, big: Array = big, opened: Array = opened) -> Array:
-                return big | opened[d]
+            def expanded(d: Array, r: int = r, tag: Array = tag) -> Array:
+                return expanded_after(d, r, tag)
 
             def no_subtree(d: Array) -> Array:
                 return jnp.zeros((S,), bool)
 
-            def cut_col(
-                d: Array, sent: Array, big: Array = big, opened: Array = opened
-            ) -> Array:
-                return (sent & internal & ~(big | opened[d]))[:, None]
+            def cut_col(d: Array, sent: Array, r: int = r, tag: Array = tag) -> Array:
+                return (sent & internal & ~expanded_after(d, r, tag))[:, None]
 
             buf, needed, sizes = _round_blocks(
                 rows,
@@ -566,28 +596,21 @@ def let_exchange(
             s_peer, s_live, _ = _block_slots(sizes, T)
             asked = s_live & (back[:, 0] > 0.5) & (buf[:, k + 1] > 0.5)
             node = jnp.round(buf[:, k]).astype(idx)
-            opened = opened.at[
-                jnp.where(asked, s_peer, nd), jnp.where(asked, node, 0)
-            ].set(True, mode="drop")
+            tag = tag.at[jnp.where(asked, s_peer, nd), jnp.where(asked, node, 0)].set(
+                jnp.int8(r + 1), mode="drop"
+            )
             requested = requested + jax.ops.segment_sum(
                 asked.astype(idx), jnp.where(asked, s_peer, nd), nd + 1
             )[:nd].astype(idx)
 
     # ---- the final blocks: the last round's, the last requests' subtrees whole --
     with jax.named_scope("cross_let_pack"):
-        last = levels[-1]
-        big = internal & (count > last)
-        top = valid & ((parent < 0) | big[jnp.maximum(parent, 0)])
-        # each node's top ancestor at the last granularity: pointer doubling
-        jump = jnp.where(top | (parent < 0), at, parent)
-        for _ in range(max(1, int(math.ceil(math.log2(max(S, 2)))))):
-            jump = jump[jump]
 
         def expanded_final(d: Array) -> Array:
-            return big | opened[d]
+            return expanded_after(d, len(levels), tag)
 
         def whole(d: Array) -> Array:
-            return opened[d][jump] & ~top
+            return jnp.zeros((S,), bool)
 
         def no_tail(d: Array, sent: Array) -> Array:
             return jnp.zeros((S, 0), dtype)
