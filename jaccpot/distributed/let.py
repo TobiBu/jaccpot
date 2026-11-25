@@ -65,9 +65,14 @@ _COL_ACTIVE = 6
 _COL_COUNT = 7
 _COL_TABLE = 8  # cross._SUMMARY_TABLE_COL: G M, threshold, s_1..s_p
 
-#: radius bins of the eq (16a) descriptor: ``floor(log2 r) + _BIN_OFFSET``, clipped
-LET_BINS = 64
-_BIN_OFFSET = 40
+#: radius bins of the descriptor: ``floor(log2 r) + _BIN_OFFSET``, clipped to
+#: ``[0, LET_BINS)`` (single octaves from 2**-16 to 2**8; the extremes collect the
+#: rest, which stays conservative: every bin carries its own largest radius and box)
+LET_BINS = 24
+_BIN_OFFSET = 16
+#: per bin and kind: centre box lo (3), hi (3), largest radius, largest G M, least
+#: threshold
+_BIN_COLS = 9
 #: relative slack of every bound (the walk's own distance and radius sums round)
 _MARGIN = 1e-3
 #: eq (15)'s improvement factor ``8 max(rho) / (rho_A + rho_B)`` is at most 8
@@ -86,12 +91,11 @@ def let_descriptor_width(error_order: int) -> int:
     Returns
     -------
     int
-        ``7`` (box, largest leaf radius), plus under eq (16a) the leaves' largest
-        ``G M`` and least threshold, ``p`` largest powers and two ``LET_BINS``
-        tables.
+        ``2 x LET_BINS x 9`` (per radius bin, for all nodes and for the leaves: the
+        centre box, the largest radius, ``G M`` and the least threshold) plus the
+        ``p`` largest normalised powers.
     """
-    p = int(error_order)
-    return 7 if p == 0 else 7 + 2 + p + 2 * LET_BINS
+    return 2 * LET_BINS * _BIN_COLS + int(error_order)
 
 
 def _radius_bin(radius: Array) -> Array:
@@ -100,8 +104,39 @@ def _radius_bin(radius: Array) -> Array:
     return jnp.clip(b, 0, LET_BINS - 1)
 
 
+def _bin_table(
+    rows: Array, member: Array, bins: Array, *, error_order: int
+) -> Array:
+    """``(LET_BINS, 9)`` per radius bin of the member rows: box, radius, G M, threshold."""
+    dtype = rows.dtype
+    inf = jnp.asarray(jnp.inf, dtype)
+    b = jnp.where(member, bins, LET_BINS)
+    cen = rows[:, 0:3]
+    lo = jnp.full((LET_BINS, 3), inf, dtype).at[b].min(cen, mode="drop")
+    hi = jnp.full((LET_BINS, 3), -inf, dtype).at[b].max(cen, mode="drop")
+    rmax = jnp.zeros((LET_BINS,), dtype).at[b].max(rows[:, _COL_RADIUS], mode="drop")
+    if int(error_order) > 0:
+        gm = jnp.zeros((LET_BINS,), dtype).at[b].max(rows[:, _COL_TABLE], mode="drop")
+        thr = (
+            jnp.full((LET_BINS,), inf, dtype)
+            .at[b]
+            .min(rows[:, _COL_TABLE + 1], mode="drop")
+        )
+    else:
+        gm = jnp.zeros((LET_BINS,), dtype)
+        thr = jnp.full((LET_BINS,), inf, dtype)
+    return jnp.concatenate([lo, hi, rmax[:, None], gm[:, None], thr[:, None]], axis=1)
+
+
 def let_descriptor(rows: Array, valid: Array, *, error_order: int = 0) -> Array:
     """What a device publishes about its summary tree for its peers' open tests.
+
+    Its live nodes binned by radius (one octave per bin), twice -- all of them and
+    the leaves alone -- and per bin the box of their centres, their largest radius
+    and, under eq (16a), their largest ``G M`` and least threshold; then the largest
+    normalised powers ``s_1..s_p`` of any live node. A peer bounds the distance to
+    every node of a bin by the distance to the bin's box, so a few large leaves far
+    out in a halo no longer pair their radius with the distance to the core.
 
     Parameters
     ----------
@@ -115,45 +150,30 @@ def let_descriptor(rows: Array, valid: Array, *, error_order: int = 0) -> Array:
     Returns
     -------
     Array
-        ``(let_descriptor_width(p),)``: the box ``lo``, ``hi`` of the live node
-        centres (``+inf`` / ``-inf`` without a live node), the largest live leaf
-        radius; under eq (16a) the live leaves' largest ``G M`` and least
-        threshold, the largest ``s_1..s_p`` and, per radius bin (cumulative from
-        the smallest radii), the largest ``G M`` and the least threshold.
+        ``(let_descriptor_width(p),)``; an empty bin has the box ``+inf`` /
+        ``-inf``.
     """
     dtype = rows.dtype
-    inf = jnp.asarray(jnp.inf, dtype)
     live = valid & (rows[:, _COL_ACTIVE] > 0.5)
     leaf = rows[:, _COL_LEFT] < 0
-    cen = rows[:, 0:3]
-    rad = rows[:, _COL_RADIUS]
-    lo = jnp.min(jnp.where(live[:, None], cen, inf), axis=0)
-    hi = jnp.max(jnp.where(live[:, None], cen, -inf), axis=0)
-    rleaf = jnp.max(jnp.where(live & leaf, rad, 0.0))
-    cols = [lo, hi, rleaf[None]]
+    bins = _radius_bin(rows[:, _COL_RADIUS])
     p = int(error_order)
+    tables = [
+        _bin_table(rows, live, bins, error_order=p),
+        _bin_table(rows, live & leaf, bins, error_order=p),
+    ]
+    cols = [t.reshape(-1) for t in tables]
     if p > 0:
-        gm = rows[:, _COL_TABLE]
-        thr = rows[:, _COL_TABLE + 1]
         powers = rows[:, _COL_TABLE + 2 : _COL_TABLE + 2 + p]
-        gm_leaf = jnp.max(jnp.where(live & leaf, gm, 0.0))
-        thr_leaf = jnp.min(jnp.where(live & leaf, thr, inf))
-        smax = jnp.max(jnp.where(live[:, None], powers, 0.0), axis=0)
-        b = jnp.where(live, _radius_bin(rad), LET_BINS)
-        gm_bins = jnp.zeros((LET_BINS,), dtype).at[b].max(gm, mode="drop")
-        thr_bins = jnp.full((LET_BINS,), inf, dtype).at[b].min(thr, mode="drop")
-        cols += [
-            gm_leaf[None],
-            thr_leaf[None],
-            smax,
-            jax.lax.cummax(gm_bins, axis=0),
-            jax.lax.cummin(thr_bins, axis=0),
-        ]
+        cols.append(jnp.max(jnp.where(live[:, None], powers, 0.0), axis=0))
     return jnp.concatenate(cols).astype(dtype)
 
 
 def _eq16a_may_fail(
-    rows: Array,
+    ra: Array,
+    gm_a: Array,
+    thr_a: Array,
+    s_a: list,
     dmin: Array,
     rb: Array,
     gm_b: Array,
@@ -163,9 +183,9 @@ def _eq16a_may_fail(
     order: int,
     theta_max: float,
 ) -> Array:
-    """Whether eq (16a) may refuse (node, B) for some B with radius at most ``rb``,
+    """Whether eq (16a) may refuse (A, B) for some B with radius at most ``rb``,
     ``G M`` at most ``gm_b``, threshold at least ``thr_b`` and powers at most
-    ``smax``, at a centre distance of at least ``dmin``.
+    ``smax``, at a centre distance of at least ``dmin`` (all broadcast).
 
     Every term of eq (15)/(16a) (:func:`yggdrax._dehnen_accept.dehnen_pair_accept`)
     grows with ``rho_B``, ``G M`` and the powers (all non-negative) and falls with
@@ -173,12 +193,7 @@ def _eq16a_may_fail(
     factor is at most 8. So the bound below is a supremum over such B.
     """
     p = int(order)
-    dtype = rows.dtype
-    ra = rows[:, _COL_RADIUS]
-    gm_a = rows[:, _COL_TABLE]
-    thr_a = rows[:, _COL_TABLE + 1]
-    s_a = [rows[:, _COL_TABLE + 2 + n] for n in range(p)]
-    r = jnp.maximum(dmin, jnp.asarray(_TINY, dtype))
+    r = jnp.maximum(dmin, jnp.asarray(_TINY, dmin.dtype))
     up = 1.0 + _MARGIN
     a = ra * up / r
     b = rb * up / r
@@ -215,14 +230,15 @@ def let_open(
     yggdrax's mutual walk refines a refused pair by splitting the internal side,
     the larger radius when both are internal (``extent_target >= extent_source``
     splits the target). So node A of this device is split against B of the peer
-    only if the MAC refuses (A, B) and B is a leaf, or ``rho_B <= rho_A``. Every B
-    centre lies in the peer's centre box, so ``r >= dmin`` (A's centre to that
-    box), and the MAC's refusal is tested at its supremum over the two cases:
+    only if the MAC refuses (A, B) and B is a leaf, or ``rho_B <= rho_A``. The
+    peer's nodes come in radius bins, each with the box of its centres, so for every
+    bin ``r >= dmin`` (A's centre to the bin's box), and the MAC's refusal is tested
+    at its supremum over the bin:
 
-    * B a leaf: ``rho_B`` up to the peer's largest leaf radius (and, under eq
-      (16a), the leaves' largest ``G M`` and least threshold);
-    * ``rho_B <= rho_A``: under eq (16a) the largest ``G M`` and least threshold of
-      the peer's nodes in A's radius bin and below.
+    * B a leaf: the leaves' bins, ``rho_B`` up to each bin's largest leaf radius
+      (under eq (16a) with the bin's largest ``G M`` and least threshold);
+    * ``rho_B <= rho_A``: all nodes' bins up to A's own, ``rho_B`` up to
+      ``min(rho_A, the bin's largest radius)``.
 
     Parameters
     ----------
@@ -243,47 +259,57 @@ def let_open(
     Returns
     -------
     Array
-        ``(S,)`` bool: open (send the children). Internal live nodes only; nothing
-        against a peer without a live node.
+        ``(S,)`` bool: open (send the children). Internal live nodes only.
     """
     p = int(error_order)
     dtype = rows.dtype
     cen = rows[:, 0:3]
-    ra = rows[:, _COL_RADIUS]
-    lo, hi, rleaf = desc[0:3], desc[3:6], desc[6]
-    gap = jnp.maximum(jnp.maximum(lo[None, :] - cen, cen - hi[None, :]), 0.0)
-    dmin = jnp.sqrt(jnp.sum(gap * gap, axis=1)) * (1.0 - _MARGIN)
-    rb_max = jnp.maximum(ra, rleaf)
+    ra = rows[:, _COL_RADIUS][:, None]
+    nb = LET_BINS * _BIN_COLS
     up = 1.0 + _MARGIN
-    if p == 0:
-        fail = (ra + rb_max) * up >= float(theta) * dmin
-    else:
-        gm_leaf, thr_leaf = desc[7], desc[8]
-        smax = desc[9 : 9 + p]
-        gm_bins = desc[9 + p : 9 + p + LET_BINS]
-        thr_bins = desc[9 + p + LET_BINS : 9 + p + 2 * LET_BINS]
-        kw = dict(order=p, theta_max=float(theta_max))
-        bin_a = _radius_bin(ra)
-        fail_small = _eq16a_may_fail(
-            rows, dmin, ra, gm_bins[bin_a], thr_bins[bin_a], smax, **kw
+    floor = float(separation_floor)
+    if p > 0:
+        gm_a = rows[:, _COL_TABLE][:, None]
+        thr_a = rows[:, _COL_TABLE + 1][:, None]
+        s_a = [rows[:, _COL_TABLE + 2 + n][:, None] for n in range(p)]
+        smax = [desc[2 * nb + n] for n in range(p)]
+
+    def may_fail(table: Array, rb: Array) -> Array:
+        lo, hi = table[:, 0:3], table[:, 3:6]
+        gap = jnp.maximum(
+            jnp.maximum(lo[None, :, :] - cen[:, None, :], cen[:, None, :] - hi[None]),
+            0.0,
         )
-        fail_leaf = _eq16a_may_fail(
-            rows,
-            dmin,
-            jnp.broadcast_to(rleaf, ra.shape),
-            jnp.broadcast_to(gm_leaf, ra.shape),
-            jnp.broadcast_to(thr_leaf, ra.shape),
-            smax,
-            **kw,
-        )
-        fail = fail_small | fail_leaf
-    if float(separation_floor) > 0.0:
-        floor = jnp.asarray(float(separation_floor), dtype)
-        fail = fail | ((ra + rb_max + floor) * up >= dmin)
+        dmin = jnp.sqrt(jnp.sum(gap * gap, axis=-1)) * (1.0 - _MARGIN)
+        if p == 0:
+            fail = (ra + rb) * up >= float(theta) * dmin
+        else:
+            fail = _eq16a_may_fail(
+                ra,
+                gm_a,
+                thr_a,
+                s_a,
+                dmin,
+                rb,
+                table[None, :, 7],
+                table[None, :, 8],
+                smax,
+                order=p,
+                theta_max=float(theta_max),
+            )
+        if floor > 0.0:
+            fail = fail | ((ra + rb + jnp.asarray(floor, dtype)) * up >= dmin)
+        return fail
+
+    every = desc[0:nb].reshape(LET_BINS, _BIN_COLS)
+    leaves = desc[nb : 2 * nb].reshape(LET_BINS, _BIN_COLS)
+    smaller = jnp.arange(LET_BINS)[None, :] <= _radius_bin(rows[:, _COL_RADIUS])[:, None]
+    rb_small = jnp.minimum(ra, every[None, :, 6])
+    fail = jnp.any(smaller & may_fail(every, rb_small), axis=1)
+    fail = fail | jnp.any(may_fail(leaves, leaves[None, :, 6]), axis=1)
     internal = rows[:, _COL_LEFT] >= 0
     live = rows[:, _COL_ACTIVE] > 0.5
-    peer_live = lo[0] <= hi[0]
-    return fail & internal & live & peer_live
+    return fail & internal & live
 
 
 class LetBlocks(NamedTuple):
