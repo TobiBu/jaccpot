@@ -71,8 +71,9 @@ _COL_TABLE = 8  # cross._SUMMARY_TABLE_COL: G M, threshold, s_1..s_p
 LET_BINS = 24
 _BIN_OFFSET = 16
 #: per bin and kind: centre box lo (3), hi (3), largest radius, largest G M, least
-#: threshold
-_BIN_COLS = 9
+#: threshold, and the least and largest distance of the centres from the device's
+#: reference point (its root's centre): the annulus they lie in
+_BIN_COLS = 11
 #: relative slack of every bound (the walk's own distance and radius sums round)
 _MARGIN = 1e-3
 #: eq (15)'s improvement factor ``8 max(rho) / (rho_A + rho_B)`` is at most 8
@@ -91,11 +92,12 @@ def let_descriptor_width(error_order: int) -> int:
     Returns
     -------
     int
-        ``2 x LET_BINS x 9`` (per radius bin, for all nodes and for the leaves: the
-        centre box, the largest radius, ``G M`` and the least threshold) plus the
-        ``p`` largest normalised powers.
+        ``3`` (the reference point) ``+ 2 x LET_BINS x 11`` (per radius bin, for all
+        nodes and for the leaves: the centre box, the largest radius, ``G M``, the
+        least threshold and the annulus of the centres about the reference point)
+        ``+ p`` (the largest normalised powers).
     """
-    return 2 * LET_BINS * _BIN_COLS + int(error_order)
+    return 3 + 2 * LET_BINS * _BIN_COLS + int(error_order)
 
 
 def _radius_bin(radius: Array) -> Array:
@@ -104,12 +106,18 @@ def _radius_bin(radius: Array) -> Array:
     return jnp.clip(b, 0, LET_BINS - 1)
 
 
-def _bin_table(rows: Array, member: Array, bins: Array, *, error_order: int) -> Array:
-    """``(LET_BINS, 9)`` per radius bin of the member rows: box, radius, G M, threshold."""
+def _bin_table(
+    rows: Array, member: Array, bins: Array, ref: Array, *, error_order: int
+) -> Array:
+    """``(LET_BINS, 11)`` per radius bin of the member rows: box, radius, G M,
+    threshold, annulus about ``ref``."""
     dtype = rows.dtype
     inf = jnp.asarray(jnp.inf, dtype)
     b = jnp.where(member, bins, LET_BINS)
     cen = rows[:, 0:3]
+    rho = jnp.sqrt(jnp.sum((cen - ref[None, :]) ** 2, axis=1))
+    rho_lo = jnp.full((LET_BINS,), inf, dtype).at[b].min(rho, mode="drop")
+    rho_hi = jnp.full((LET_BINS,), -inf, dtype).at[b].max(rho, mode="drop")
     lo = jnp.full((LET_BINS, 3), inf, dtype).at[b].min(cen, mode="drop")
     hi = jnp.full((LET_BINS, 3), -inf, dtype).at[b].max(cen, mode="drop")
     rmax = jnp.zeros((LET_BINS,), dtype).at[b].max(rows[:, _COL_RADIUS], mode="drop")
@@ -123,7 +131,18 @@ def _bin_table(rows: Array, member: Array, bins: Array, *, error_order: int) -> 
     else:
         gm = jnp.zeros((LET_BINS,), dtype)
         thr = jnp.full((LET_BINS,), inf, dtype)
-    return jnp.concatenate([lo, hi, rmax[:, None], gm[:, None], thr[:, None]], axis=1)
+    return jnp.concatenate(
+        [
+            lo,
+            hi,
+            rmax[:, None],
+            gm[:, None],
+            thr[:, None],
+            rho_lo[:, None],
+            rho_hi[:, None],
+        ],
+        axis=1,
+    )
 
 
 def let_descriptor(rows: Array, valid: Array, *, error_order: int = 0) -> Array:
@@ -134,7 +153,10 @@ def let_descriptor(rows: Array, valid: Array, *, error_order: int = 0) -> Array:
     and, under eq (16a), their largest ``G M`` and least threshold; then the largest
     normalised powers ``s_1..s_p`` of any live node. A peer bounds the distance to
     every node of a bin by the distance to the bin's box, so a few large leaves far
-    out in a halo no longer pair their radius with the distance to the core.
+    out in a halo no longer pair their radius with the distance to the core. A bin's
+    centres also lie in an annulus about the device's root centre (the reference
+    point), which bounds the distance where the box cannot: the box of a shell of a
+    centrally concentrated system contains its centre.
 
     Parameters
     ----------
@@ -156,11 +178,13 @@ def let_descriptor(rows: Array, valid: Array, *, error_order: int = 0) -> Array:
     leaf = rows[:, _COL_LEFT] < 0
     bins = _radius_bin(rows[:, _COL_RADIUS])
     p = int(error_order)
+    # the reference point: the root's centre (row 0), or the origin without one
+    ref = jnp.where(live[0], rows[0, 0:3], 0.0)
     tables = [
-        _bin_table(rows, live, bins, error_order=p),
-        _bin_table(rows, live & leaf, bins, error_order=p),
+        _bin_table(rows, live, bins, ref, error_order=p),
+        _bin_table(rows, live & leaf, bins, ref, error_order=p),
     ]
-    cols = [t.reshape(-1) for t in tables]
+    cols = [ref] + [t.reshape(-1) for t in tables]
     if p > 0:
         powers = rows[:, _COL_TABLE + 2 : _COL_TABLE + 2 + p]
         cols.append(jnp.max(jnp.where(live[:, None], powers, 0.0), axis=0))
@@ -264,13 +288,15 @@ def let_open(
     cen = rows[:, 0:3]
     ra = rows[:, _COL_RADIUS][:, None]
     nb = LET_BINS * _BIN_COLS
+    ref = desc[0:3]
+    rho_a = jnp.sqrt(jnp.sum((cen - ref[None, :]) ** 2, axis=1))[:, None]
     up = 1.0 + _MARGIN
     floor = float(separation_floor)
     if p > 0:
         gm_a = rows[:, _COL_TABLE][:, None]
         thr_a = rows[:, _COL_TABLE + 1][:, None]
         s_a = [rows[:, _COL_TABLE + 2 + n][:, None] for n in range(p)]
-        smax = [desc[2 * nb + n] for n in range(p)]
+        smax = [desc[3 + 2 * nb + n] for n in range(p)]
 
     def may_fail(table: Array, rb: Array) -> Array:
         lo, hi = table[:, 0:3], table[:, 3:6]
@@ -278,7 +304,13 @@ def let_open(
             jnp.maximum(lo[None, :, :] - cen[:, None, :], cen[:, None, :] - hi[None]),
             0.0,
         )
-        dmin = jnp.sqrt(jnp.sum(gap * gap, axis=-1)) * (1.0 - _MARGIN)
+        box = jnp.sqrt(jnp.sum(gap * gap, axis=-1))
+        # the annulus rho_lo <= |c_B - ref| <= rho_hi: |c_A - c_B| is at least the
+        # gap of |c_A - ref| to it (triangle inequality)
+        ring = jnp.maximum(
+            jnp.maximum(table[None, :, 9] - rho_a, rho_a - table[None, :, 10]), 0.0
+        )
+        dmin = jnp.maximum(box, ring) * (1.0 - _MARGIN)
         if p == 0:
             fail = (ra + rb) * up >= float(theta) * dmin
         else:
@@ -299,8 +331,8 @@ def let_open(
             fail = fail | ((ra + rb + jnp.asarray(floor, dtype)) * up >= dmin)
         return fail
 
-    every = desc[0:nb].reshape(LET_BINS, _BIN_COLS)
-    leaves = desc[nb : 2 * nb].reshape(LET_BINS, _BIN_COLS)
+    every = desc[3 : 3 + nb].reshape(LET_BINS, _BIN_COLS)
+    leaves = desc[3 + nb : 3 + 2 * nb].reshape(LET_BINS, _BIN_COLS)
     smaller = (
         jnp.arange(LET_BINS)[None, :] <= _radius_bin(rows[:, _COL_RADIUS])[:, None]
     )
