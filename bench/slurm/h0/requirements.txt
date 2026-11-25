@@ -1,6 +1,7 @@
 # HoreKa bundle: the exact Python packages of the local comparison venv (/export/scratch/tbuck/jax0112-venv,
-# pip freeze 2026-11-03; re-checked 2026-11-10 by H1: unchanged, and every sibling main's pyproject is
-# satisfied), runtime packages only; equinox/diffrax/lineax/optimistix (nornax's) from the local overlay the
+# pip freeze 2026-11-03; re-checked 2026-11-10 by H1 and 2026-11-25 by H2: unchanged, and every sibling main's
+# pyproject is satisfied: jaccpot jax >=0.11.2,<0.12 and orbax-checkpoint >=0.12.9,<0.13; nornax/mimirax/yggdrax
+# jax >= 0.8), runtime packages only; equinox/diffrax/lineax/optimistix (nornax's) from the local overlay the
 # runs import them from. setup_env.sh installs them with --no-deps, then runs pip check.
 absl-py==2.5.0
 beartype==0.22.9
