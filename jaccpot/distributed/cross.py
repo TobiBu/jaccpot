@@ -1379,8 +1379,10 @@ def _let_walk(
     """:func:`_symmetric_walk` over the LET blocks instead of the gathered trees.
 
     One seed per peer, (this device's block for it, its block for this device), the
-    lower device's block first: the orientation :func:`_symmetric_walk` uses, on
-    the same two blocks the peer walks (it sent the one and received the other).
+    lower device's block first, and the table in device order
+    (:func:`jaccpot.distributed.let.device_order_walk`: the walk breaks radius ties
+    by index order): the orientation :func:`_symmetric_walk` has, on the same two
+    blocks the peer walks (it sent the one and received the other).
 
     Parameters
     ----------
@@ -1394,7 +1396,21 @@ def _let_walk(
     Any
         The walk result: pairs in the LET's index space.
     """
-    return _seeded_walk(
+    from jaccpot.distributed.let import device_order_walk
+
+    def walk(*args: Any) -> Any:
+        return _seeded_walk(
+            *args,
+            theta=theta,
+            cap=cap,
+            mac_type=mac_type,
+            walk_fn=walk_fn,
+            error_order=error_order,
+        )
+
+    T = int(let.send_capacity)
+    return device_order_walk(
+        walk,
         let.left,
         let.right,
         let.centers,
@@ -1403,11 +1419,9 @@ def _let_walk(
         let.table,
         let.seed_a,
         let.seed_b,
-        theta=theta,
-        cap=cap,
-        mac_type=mac_type,
-        walk_fn=walk_fn,
-        error_order=error_order,
+        n_mine=T,
+        n_recv=int(let.left.shape[0]) - T,
+        split=let.walk_split,
     )
 
 

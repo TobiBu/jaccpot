@@ -55,6 +55,7 @@ from jaccpot._searchsorted import searchsorted_method
 
 __all__ = [
     "LetBlocks",
+    "device_order_walk",
     "let_bytes",
     "let_exchange",
 ]
@@ -113,6 +114,8 @@ class LetBlocks(NamedTuple):
         may miss rows the walk opens.
     send_capacity : int
         ``T``. Static.
+    walk_split : Array
+        Received rows from devices below this one (:func:`device_order_walk`).
     """
 
     left: Array
@@ -135,6 +138,7 @@ class LetBlocks(NamedTuple):
     request_walk: Any
     overflow: Array
     send_capacity: int
+    walk_split: Array
 
 
 def _block_slots(sizes: Array, capacity: int) -> tuple[Array, Array, Array]:
@@ -283,6 +287,96 @@ def _round_blocks(
             jnp.asarray(0, idx),
             jnp.zeros((int(ndev),), idx),
         ),
+    )
+
+
+def device_order_walk(
+    walk: Callable[..., Any],
+    left: Array,
+    right: Array,
+    centers: Array,
+    radii: Array,
+    active: Array,
+    table: Any,
+    seed_a: Array,
+    seed_b: Array,
+    *,
+    n_mine: int,
+    n_recv: int,
+    split: Array,
+) -> Any:
+    """Run ``walk`` with this device's rows between the peers' in device order.
+
+    The tables here are laid out ``[mine (n_mine) | received (n_recv) | tail]``,
+    the received rows in device order. The walk breaks a radius tie by INDEX order
+    (yggdrax's walks queue every child pair as ``(lo, hi)``), and the all_gather
+    path's index order is the device order, so both ends of a cross pair must see
+    the lower device's rows at the lower indices: here the received rows of devices
+    below this one (the first ``split``), then this device's, then the rest. The
+    tail (probes, a dead row) keeps its indices. The pairs come back in the
+    original layout.
+
+    Parameters
+    ----------
+    walk : Callable[..., Any]
+        ``walk(left, right, centers, radii, active, table, seed_a, seed_b)``.
+    left, right, centers, radii, active, table, seed_a, seed_b
+        The table in the original layout (links and seeds as original indices).
+    n_mine, n_recv : int
+        The two segments' lengths. Static.
+    split : Array
+        Received rows from devices below this one.
+
+    Returns
+    -------
+    Any
+        The walk result with its pair ends in the original layout.
+    """
+    idx = jnp.int32
+    head = int(n_mine) + int(n_recv)
+    total = int(jnp.asarray(left).shape[0])
+    split = jnp.asarray(split).astype(idx)
+    q_mine = jnp.arange(int(n_mine), dtype=idx)
+    q_recv = jnp.arange(int(n_recv), dtype=idx)
+    new_of_old = jnp.concatenate(
+        [
+            split + q_mine,
+            jnp.where(q_recv < split, q_recv, q_recv + int(n_mine)),
+            jnp.arange(head, total, dtype=idx),
+        ]
+    )
+    old_of_new = (
+        jnp.zeros((total,), idx).at[new_of_old].set(jnp.arange(total, dtype=idx))
+    )
+
+    def to_new(i: Array) -> Array:
+        i = jnp.asarray(i).astype(idx)
+        return jnp.where(i >= 0, new_of_old[jnp.clip(i, 0, total - 1)], i)
+
+    def permute(x: Any) -> Any:
+        return None if x is None else jnp.asarray(x)[old_of_new]
+
+    res = walk(
+        to_new(permute(left)),
+        to_new(permute(right)),
+        permute(centers),
+        permute(radii),
+        permute(active),
+        permute(table),
+        to_new(seed_a),
+        to_new(seed_b),
+    )
+
+    def to_old(j: Array) -> Array:
+        j = jnp.asarray(j)
+        ok = (j >= 0) & (j < total)
+        return jnp.where(ok, old_of_new[jnp.clip(j, 0, total - 1)], j).astype(j.dtype)
+
+    return res._replace(
+        far_a=to_old(res.far_a),
+        far_b=to_old(res.far_b),
+        near_a=to_old(res.near_a),
+        near_b=to_old(res.near_b),
     )
 
 
@@ -436,7 +530,8 @@ def let_exchange(
             root_mine = jnp.zeros((nd,), idx)
             seed_a = jnp.where(alive, jnp.where(lower_mine, root_mine, root_peer), -1)
             seed_b = jnp.where(alive, jnp.where(lower_mine, root_peer, root_mine), -1)
-            req_walk = walk(
+            req_walk = device_order_walk(
+                walk,
                 q_left,
                 q_right,
                 q_rows[:, 0:3],
@@ -445,6 +540,9 @@ def let_exchange(
                 q_rows[:, _COL_TABLE : _COL_TABLE + width] if p > 0 else None,
                 seed_a.astype(idx),
                 seed_b.astype(idx),
+                n_mine=S,
+                n_recv=R,
+                split=r_start[me],
             )
             hit = jnp.zeros((R + 1,), idx)
             for a, b, n in (
@@ -561,6 +659,7 @@ def let_exchange(
         request_walk=req_walk,
         overflow=overflow,
         send_capacity=T,
+        walk_split=r_start[me],
     )
 
 
