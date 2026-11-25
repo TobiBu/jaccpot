@@ -115,6 +115,8 @@ CROSS_NEEDS_FIELDS = (
     "walk_lower_bound",
     "pairs_lower_bound",
     "mismatch",
+    "let_send_cap",
+    "let_recv_cap",
 )
 #: the capacity entries of :data:`CROSS_NEEDS_FIELDS`, and the lower-bound bit (if
 #: any) that qualifies each
@@ -129,6 +131,8 @@ _NEEDS_LOWER_BOUND_BIT = {
     "send_particle_cap": "pairs_lower_bound",
     "recv_particle_cap": "pairs_lower_bound",
     "leaf_width": "pairs_lower_bound",
+    "let_send_cap": None,
+    "let_recv_cap": None,
 }
 
 
@@ -1334,6 +1338,193 @@ def _peer_pair_hashes(
     )
 
 
+def _let_global_index(i: Array, let: Any, me: Array, S: int) -> Array:
+    """LET walk indices in the gathered ``[ndev x S]`` space (diagnostics).
+
+    Parameters
+    ----------
+    i : Array
+        LET indices (``-1`` dead).
+    let : Any
+        :class:`jaccpot.distributed.let.LetBlocks`.
+    me : Array
+        This device's index.
+    S : int
+        Summary block width.
+
+    Returns
+    -------
+    Array
+        ``device x S + summary index`` (``-1`` where ``i`` is dead).
+    """
+    idx = jnp.int32
+    i = jnp.asarray(i).astype(idx)
+    ok = (i >= 0) & (i < let.orig.shape[0])
+    safe = jnp.where(ok, i, 0)
+    dev = jnp.where(safe < int(let.send_capacity), jnp.asarray(me).astype(idx), let.peer[safe])
+    return jnp.where(ok, dev * int(S) + let.orig[safe], -1)
+
+
+def _let_walk(
+    let: Any,
+    theta: float,
+    cap: "CrossCapacities",
+    *,
+    mac_type: str,
+    walk_fn: Optional[Callable[..., Any]],
+    error_order: int = 0,
+) -> Any:
+    """:func:`_symmetric_walk` over the LET blocks instead of the gathered trees.
+
+    One seed per peer, (this device's block for it, its block for this device), the
+    lower device's block first: the orientation :func:`_symmetric_walk` uses, on
+    the same two blocks the peer walks (it sent the one and received the other).
+
+    Parameters
+    ----------
+    let : Any
+        :class:`jaccpot.distributed.let.LetBlocks`.
+    theta, cap, mac_type, walk_fn, error_order
+        As :func:`_symmetric_walk`.
+
+    Returns
+    -------
+    Any
+        The walk result: pairs in the LET's index space.
+    """
+    from yggdrax.interactions import dual_tree_walk_mutual
+
+    criterion: dict = {}
+    if int(error_order) > 0:
+        if walk_fn is None:
+            raise ValueError("the criterion's cross walk needs cross_walk_fn's walk")
+        criterion["error_table"] = let.table
+    idx = jnp.int32
+    return (walk_fn or dual_tree_walk_mutual)(
+        let.left,
+        let.right,
+        let.centers,
+        let.radii,
+        float(theta),
+        jnp.asarray(0, idx),
+        max_pair_queue=cap.export_walk_queue,
+        far_cap=cap.export_far_cap,
+        near_cap=cap.export_near_cap,
+        mac_type=mac_type,  # pyright: ignore[reportArgumentType]
+        node_active=let.active,
+        seed_a=let.seed_a,
+        seed_b=let.seed_b,
+        **criterion,
+    )
+
+
+def _let_pair_sides(
+    res_a: Array, res_b: Array, count: Array, let: Any, *, ndev: int
+) -> tuple[Array, Array, Array, Array, Array, Array]:
+    """:func:`_symmetric_pair_sides` for pairs in the LET's index space.
+
+    Parameters
+    ----------
+    res_a, res_b : Array
+        ``(P,)`` the walk's pair ends (LET indices).
+    count : Array
+        Live prefix length.
+    let : Any
+        :class:`jaccpot.distributed.let.LetBlocks`.
+    ndev : int
+        Mesh size.
+
+    Returns
+    -------
+    tuple
+        ``(live, mine, peer, theirs, mine_slot, theirs_slot)``: as
+        :func:`_symmetric_pair_sides` (summary indices), then each pair's slot in
+        the send buffer and in the receive buffer.
+    """
+    idx = jnp.int32
+    T = int(let.send_capacity)
+    span = int(let.orig.shape[0])
+    a = jnp.asarray(res_a).astype(idx)
+    b = jnp.asarray(res_b).astype(idx)
+    live = (jnp.arange(a.shape[0]) < count) & (a >= 0) & (b >= 0)
+    live = live & (a < span) & (b < span)
+    a_mine = a < T
+    mine_l = jnp.where(live, jnp.where(a_mine, a, b), 0)
+    theirs_l = jnp.where(live, jnp.where(a_mine, b, a), T)
+    # one end in each buffer (the seeds pair a send block with a receive block)
+    live = live & (mine_l < T) & (theirs_l >= T)
+    peer = let.peer[theirs_l]
+    mine = let.orig[mine_l]
+    theirs = let.orig[theirs_l]
+    live = live & (peer < ndev) & (mine >= 0) & (theirs >= 0)
+    return (
+        live,
+        jnp.where(live, mine, 0),
+        jnp.where(live, peer, 0),
+        jnp.where(live, theirs, 0),
+        mine_l,
+        theirs_l - T,
+    )
+
+
+def _let_rows_by_peer(
+    slot: Array, live: Array, let: Any, *, side: str, ndev: int, capacity: int
+) -> tuple[_PeerRows, Array]:
+    """:func:`_rows_by_peer` keyed by a LET buffer slot.
+
+    A slot of the send (receive) buffer IS one (peer, my (their) node): the blocks
+    run in device order, and within a block in the sender's ascending summary
+    index, so the slots are in the ``[ndev x S]`` key's order and the rows, sizes
+    and pair rows below equal :func:`_rows_by_peer`'s on the same pairs. The
+    presence map spans the buffer (``T`` or ``R`` slots), not ``ndev x S``.
+
+    Parameters
+    ----------
+    slot : Array
+        ``(P,)`` each pair's slot in the buffer of ``side``.
+    live : Array
+        ``(P,)`` live pairs.
+    let : Any
+        :class:`jaccpot.distributed.let.LetBlocks`.
+    side : str
+        ``"send"`` (my nodes) or ``"recv"`` (the peers'). Static.
+    ndev : int
+        Mesh size.
+    capacity : int
+        Static row capacity.
+
+    Returns
+    -------
+    tuple[_PeerRows, Array]
+        The rows (``present`` over the buffer's slots) and each row's slot.
+    """
+    idx = jnp.int32
+    T = int(let.send_capacity)
+    sl = slice(0, T) if side == "send" else slice(T, None)
+    peer_of = let.peer[sl]
+    orig_of = let.orig[sl]
+    span = int(peer_of.shape[0])
+    key = jnp.where(live, jnp.asarray(slot).astype(idx), span)
+    present = jnp.zeros((span,), idx).at[key].set(1, mode="drop")
+    before = jnp.cumsum(present, dtype=idx) - present
+    n_rows = jnp.sum(present, dtype=idx)
+    dest = jnp.where((present > 0) & (before < capacity), before, capacity)
+    rows = jnp.full((capacity,), -1, idx).at[dest].set(orig_of, mode="drop")
+    rows_slot = (
+        jnp.full((capacity,), -1, idx)
+        .at[dest]
+        .set(jnp.arange(span, dtype=idx), mode="drop")
+    )
+    sizes = jax.ops.segment_sum(
+        present, jnp.minimum(peer_of, ndev), num_segments=ndev + 1
+    )[:ndev].astype(idx)
+    pair_row = jnp.where(live, before[jnp.minimum(key, span - 1)], -1)
+    return (
+        _PeerRows(rows, sizes, pair_row, n_rows > capacity, n_rows, present),
+        rows_slot,
+    )
+
+
 def _symmetric_exchange(
     gathered: Array,
     me: Array,
@@ -1351,6 +1542,7 @@ def _symmetric_exchange(
     error_order: int = 0,
     node_mass: Optional[Array] = None,
     grad_sink: Optional[dict] = None,
+    let: Optional[Any] = None,
 ) -> dict:
     """The cross field with only multipoles and particles on the wire.
 
@@ -1406,6 +1598,12 @@ def _symmetric_exchange(
         :data:`GRAD_SINK_NEAR_FIELDS`) and each peer's order-free pair hashes
         (``pair_hashes``) are written into it, tracers of this trace. ``None``
         (default): nothing is recorded and the program is unchanged.
+    let : Optional[Any]
+        The LET exchange's blocks (:class:`jaccpot.distributed.let.LetBlocks`):
+        the walk runs over them instead of ``gathered`` (then ``None``), and every
+        (peer, node) row is keyed in their index space (:func:`_let_rows_by_peer`),
+        which orders rows as the ``[ndev x S]`` space does. ``None`` (default): the
+        all_gather exchange, the program unchanged.
 
     Returns
     -------
@@ -1426,7 +1624,9 @@ def _symmetric_exchange(
     """
     if int(error_order) > 0 and node_mass is None:
         raise ValueError("the criterion's far payload needs the node masses")
-    S = int(gathered.shape[1])
+    if let is not None and grad_sink is not None:
+        raise NotImplementedError("the LET exchange has no reverse-mode record")
+    S = int(gathered.shape[1]) if let is None else int(jnp.asarray(nodes).shape[0])
     idx = jnp.int32
     nodes = jnp.asarray(nodes).astype(idx)
     packed = jnp.asarray(mp.packed)
@@ -1435,28 +1635,49 @@ def _symmetric_exchange(
     num_internal = int(jnp.asarray(tree.left_child).shape[0])
     nr = jnp.asarray(tree.node_ranges)
 
-    res = jax.named_call(_symmetric_walk, name="cross_export_walk")(
-        gathered,
-        me,
-        theta,
-        cap,
-        mac_type=mac_type,
-        walk_fn=walk_fn,
-        error_order=int(error_order),
-    )
+    if let is None:
+        res = jax.named_call(_symmetric_walk, name="cross_export_walk")(
+            gathered,
+            me,
+            theta,
+            cap,
+            mac_type=mac_type,
+            walk_fn=walk_fn,
+            error_order=int(error_order),
+        )
+    else:
+        res = jax.named_call(_let_walk, name="cross_export_walk")(
+            let,
+            theta,
+            cap,
+            mac_type=mac_type,
+            walk_fn=walk_fn,
+            error_order=int(error_order),
+        )
     out: dict = {"walk": res}
 
     # ---- far: my multipoles out, the peers' in, one ragged exchange ----------
     with jax.named_scope("cross_send_far"):
-        fl, f_mine, f_peer, f_theirs = _symmetric_pair_sides(
-            res.far_a, res.far_b, res.far_count, me, S
-        )
-        exp_f = _rows_by_peer(
-            f_peer, f_mine, fl, ndev=ndev, S=S, capacity=cap.send_node_cap
-        )
-        imp_f = _rows_by_peer(
-            f_peer, f_theirs, fl, ndev=ndev, S=S, capacity=cap.recv_node_cap
-        )
+        if let is None:
+            fl, f_mine, f_peer, f_theirs = _symmetric_pair_sides(
+                res.far_a, res.far_b, res.far_count, me, S
+            )
+            exp_f = _rows_by_peer(
+                f_peer, f_mine, fl, ndev=ndev, S=S, capacity=cap.send_node_cap
+            )
+            imp_f = _rows_by_peer(
+                f_peer, f_theirs, fl, ndev=ndev, S=S, capacity=cap.recv_node_cap
+            )
+        else:
+            fl, f_mine, f_peer, f_theirs, f_ml, f_tl = _let_pair_sides(
+                res.far_a, res.far_b, res.far_count, let, ndev=ndev
+            )
+            exp_f, _ = _let_rows_by_peer(
+                f_ml, fl, let, side="send", ndev=ndev, capacity=cap.send_node_cap
+            )
+            imp_f, _ = _let_rows_by_peer(
+                f_tl, fl, let, side="recv", ndev=ndev, capacity=cap.recv_node_cap
+            )
         alive = (exp_f.rows >= 0)[:, None]
         send_node = nodes[jnp.maximum(exp_f.rows, 0)]
         columns = [
@@ -1547,15 +1768,26 @@ def _symmetric_exchange(
     pos_sorted = jnp.asarray(tree.positions_sorted)
     mass_sorted = jnp.asarray(tree.masses_sorted)
     with jax.named_scope("cross_send_near"):
-        nl, n_mine, n_peer, n_theirs = _symmetric_pair_sides(
-            res.near_a, res.near_b, res.near_count, me, S
-        )
-        exp_n = _rows_by_peer(
-            n_peer, n_mine, nl, ndev=ndev, S=S, capacity=cap.send_node_cap
-        )
-        imp_n = _rows_by_peer(
-            n_peer, n_theirs, nl, ndev=ndev, S=S, capacity=cap.recv_node_cap
-        )
+        if let is None:
+            nl, n_mine, n_peer, n_theirs = _symmetric_pair_sides(
+                res.near_a, res.near_b, res.near_count, me, S
+            )
+            exp_n = _rows_by_peer(
+                n_peer, n_mine, nl, ndev=ndev, S=S, capacity=cap.send_node_cap
+            )
+            imp_n = _rows_by_peer(
+                n_peer, n_theirs, nl, ndev=ndev, S=S, capacity=cap.recv_node_cap
+            )
+        else:
+            nl, n_mine, n_peer, n_theirs, n_ml, n_tl = _let_pair_sides(
+                res.near_a, res.near_b, res.near_count, let, ndev=ndev
+            )
+            exp_n, _ = _let_rows_by_peer(
+                n_ml, nl, let, side="send", ndev=ndev, capacity=cap.send_node_cap
+            )
+            imp_n, imp_n_let = _let_rows_by_peer(
+                n_tl, nl, let, side="recv", ndev=ndev, capacity=cap.recv_node_cap
+            )
         s_ok = exp_n.rows >= 0
         s_node = nodes[jnp.maximum(exp_n.rows, 0)]
         starts = nr[s_node, 0].astype(idx)
@@ -1591,11 +1823,17 @@ def _symmetric_exchange(
             method=searchsorted_method(),
         )
         r_peer = jnp.minimum(r_peer, ndev - 1)
-        r_count = jnp.where(
-            r_ok,
-            jnp.round(gathered[r_peer, jnp.maximum(imp_n.rows, 0), 7]).astype(idx),
-            0,
-        )
+        if let is None:
+            r_count = jnp.where(
+                r_ok,
+                jnp.round(gathered[r_peer, jnp.maximum(imp_n.rows, 0), 7]).astype(
+                    idx
+                ),
+                0,
+            )
+        else:
+            T = int(let.send_capacity)
+            r_count = jnp.where(r_ok, let.count[T + jnp.maximum(imp_n_let, 0)], 0)
         r_count = jnp.clip(r_count, 0, W)
         expect = jax.ops.segment_sum(
             r_count, jnp.where(r_ok, r_peer, ndev), num_segments=ndev + 1
@@ -1620,15 +1858,20 @@ def _symmetric_exchange(
         mine = jnp.where(
             live_node, jnp.maximum(ends[safe_node] - nr[safe_node, 0] + 1, 0), 0
         ).astype(idx)
-        shipped = exp_n.present.reshape(ndev, S) * mine[None, :]
-        theirs = jnp.round(gathered[..., 7]).astype(idx)
+        if let is None:
+            shipped = exp_n.present.reshape(ndev, S) * mine[None, :]
+            theirs = jnp.round(gathered[..., 7]).astype(idx)
+            received = imp_n.present.reshape(ndev, S) * theirs
+        else:
+            # the same products, on the LET's (peer, node) slots
+            T = int(let.send_capacity)
+            shipped = exp_n.present * mine[jnp.clip(let.orig[:T], 0, S - 1)]
+            received = imp_n.present * let.count[T:]
         needs = out["needs"]
         needs["send_node_cap"] = jnp.maximum(needs["send_node_cap"], exp_n.needed)
         needs["recv_node_cap"] = jnp.maximum(needs["recv_node_cap"], imp_n.needed)
         needs["send_particle_cap"] = jnp.sum(shipped, dtype=idx)
-        needs["recv_particle_cap"] = jnp.sum(
-            imp_n.present.reshape(ndev, S) * theirs, dtype=idx
-        )
+        needs["recv_particle_cap"] = jnp.sum(received, dtype=idx)
         needs["leaf_width"] = jnp.max(shipped)
         buffers_overflowed = (
             exp_f.overflow
@@ -1869,6 +2112,14 @@ def _criterion_walk_fn(order: int, theta_max: float) -> Callable[..., Any]:
 #: Capacities sized from a count are rounded up to a multiple of this.
 _CROSS_CAP_GRANULE = 1024
 
+#: The LET exchange's row buffers (``exchange="let"``); the all_gather path needs 0.
+_LET_CAPACITIES = ("let_send_cap", "let_recv_cap")
+
+#: The LET buffers' a priori size, in summary trees: a device near the middle of a
+#: 3-D decomposition hears from ~26 neighbours, but each sends the part of its tree
+#: near the shared surface (measured in docs/production_2026-11.md ``## M4``).
+_LET_ROWS_PER_SUMMARY_NODE = 4
+
 #: A priori demand of the symmetric exchange's buffers per live leaf of the worst
 #: shard and per peer, and the headroom over it: the factors the two-card probe sized
 #: its buffers with (``bench/multigpu_c4_cross_force_probe.py``; Plummer, leaf 64,
@@ -2002,6 +2253,8 @@ class CrossCapacities:
         recv_particle_cap: Optional[int] = None,
         summary_cell_level: Optional[int] = None,
         max_summary_nodes: Optional[int] = None,
+        let_send_cap: Optional[int] = None,
+        let_recv_cap: Optional[int] = None,
     ) -> None:
         self.max_cells = int(max_cells)
         # None: 1 under the two-sided export, 4 under the one-sided one (see
@@ -2062,6 +2315,22 @@ class CrossCapacities:
         # - 1 nodes, plus two per empty child. None: 2 x max_cells.
         self.max_summary_nodes = (
             2 * self.max_cells if max_summary_nodes is None else int(max_summary_nodes)
+        )
+        # The LET exchange's (``exchange="let"``, :mod:`jaccpot.distributed.let`) send
+        # and receive buffers of summary rows: this device's pruned tree once per
+        # peer, and every peer's for it. Both are at most (ndev - 1) x the summary
+        # tree (the all_gather's volume); the LET is the point when they are far
+        # less. None: _LET_ROWS_PER_SUMMARY_NODE x max_summary_nodes. Read only by
+        # the LET exchange.
+        self.let_send_cap = (
+            _LET_ROWS_PER_SUMMARY_NODE * self.max_summary_nodes
+            if let_send_cap is None
+            else int(let_send_cap)
+        )
+        self.let_recv_cap = (
+            _LET_ROWS_PER_SUMMARY_NODE * self.max_summary_nodes
+            if let_recv_cap is None
+            else int(let_recv_cap)
         )
 
     def __repr__(self) -> str:
@@ -2138,11 +2407,15 @@ class CrossCapacities:
             name: _sized(per_leaf * leaves * peers, headroom)
             for name, (per_leaf, headroom) in _A_PRIORI_PER_LEAF.items()
         }
+        summary_nodes = 2 * int(leaf_capacity) - 1
+        let_rows = summary_nodes * min(peers, _LET_ROWS_PER_SUMMARY_NODE)
         return cls(
             max_cells=int(leaf_capacity),
-            max_summary_nodes=2 * int(leaf_capacity) - 1,
+            max_summary_nodes=summary_nodes,
             leaf_width=int(leaf_width),
             summary_cell_level=summary_cell_level,
+            let_send_cap=let_rows,
+            let_recv_cap=let_rows,
             **sized,
         )
 
@@ -2274,6 +2547,8 @@ class CrossCapacities:
             name: _clamp_to_tree(name, _sized(need[name], h), leaf_capacity)
             for name in _NEEDS_LOWER_BOUND_BIT
             if name != "leaf_width"
+            # the LET buffers: a measurement on the all_gather exchange reads 0
+            and not (name in _LET_CAPACITIES and need[name] == 0)
         }
         changes["leaf_width"] = max(int(base.leaf_width), need["leaf_width"])
         return base._with(**_structural_bounds(changes, leaf_size))
@@ -2631,6 +2906,70 @@ def _with_separation_floor(
     return floored_walk
 
 
+def _cross_exchange(exchange: Optional[str]) -> str:
+    """The summary exchange :func:`make_cross_hook` runs.
+
+    Parameters
+    ----------
+    exchange : Optional[str]
+        ``"all_gather"``, ``"let"`` or ``None`` (``JACCPOT_CROSS_EXCHANGE``,
+        default ``all_gather``).
+
+    Returns
+    -------
+    str
+        ``"all_gather"`` or ``"let"``.
+
+    Raises
+    ------
+    ValueError
+        For any other ``exchange``.
+    """
+    if exchange is None:
+        from jaccpot._env import env_choice
+
+        return env_choice("JACCPOT_CROSS_EXCHANGE", "all_gather", ("all_gather", "let"))
+    if str(exchange) not in ("all_gather", "let"):
+        raise ValueError(f"exchange={exchange!r}: 'all_gather', 'let' or None")
+    return str(exchange)
+
+
+def _refuse_let(*, symmetric: bool, mac_type: str, grad_sink: Optional[dict]) -> None:
+    """Refuse the LET exchange where its pair sets are not the default's.
+
+    Parameters
+    ----------
+    symmetric : bool
+        The hook runs the symmetric exchange.
+    mac_type : str
+        The cross walks' geometric MAC.
+    grad_sink : Optional[dict]
+        The reverse-mode record.
+
+    Raises
+    ------
+    NotImplementedError
+        Off the symmetric exchange (the controls walk one tree against gathered
+        cells), for a MAC whose refusal :func:`jaccpot.distributed.let.let_open`
+        does not bound (``engblom``), and with ``grad_sink``.
+    """
+    if not symmetric:
+        raise NotImplementedError(
+            "make_cross_hook(exchange='let') runs on the symmetric exchange only "
+            "(the default: two-sided over leaves, no receiver walk, one theta)"
+        )
+    if str(mac_type) not in ("dehnen", "bh"):
+        raise NotImplementedError(
+            f"make_cross_hook(exchange='let'): mac_type={mac_type!r}; the LET's open "
+            "test bounds the dehnen/bh opening angle and eq (16a)"
+        )
+    if grad_sink is not None:
+        raise NotImplementedError(
+            "make_cross_hook(exchange='let', grad_sink=...): the reverse seams "
+            "replay the all_gather exchange"
+        )
+
+
 def _refuse_grad_sink(*, symmetric: bool, near_sink: Optional[dict]) -> None:
     """Refuse a reverse-mode record off what its seams replay.
 
@@ -2692,6 +3031,7 @@ def make_cross_hook(
     separation_floor: float = 0.0,
     error_criterion: bool = False,
     grad_sink: Optional[dict] = None,
+    exchange: Optional[str] = None,
 ) -> Callable[..., Optional[tuple]]:
     """Build the ``cross_hook`` for a mesh of ``ndev`` devices.
 
@@ -2770,6 +3110,13 @@ def make_cross_hook(
         from it. ``None`` (default): nothing recorded, the program unchanged.
         Given, the hook refuses every control exchange and the near layouts the
         reverse seams do not read (see Raises). Needs ``near_sink``.
+    exchange:
+        How the summary trees travel: ``"all_gather"`` (the default: every device
+        receives every peer's whole tree) or ``"let"`` (each peer receives only
+        the part of the tree its cross walk can open, :mod:`jaccpot.distributed.let`;
+        same pair sets, see there). ``None`` reads ``JACCPOT_CROSS_EXCHANGE``
+        (default ``all_gather``). The LET exchange runs on the symmetric exchange
+        with the ``dehnen``/``bh`` MAC or the criterion, forward only. Static.
 
     Returns
     -------
@@ -2828,6 +3175,9 @@ def make_cross_hook(
         )
     if grad_sink is not None:
         _refuse_grad_sink(symmetric=symmetric, near_sink=near_sink)
+    let_exchange_on = _cross_exchange(exchange) == "let"
+    if let_exchange_on:
+        _refuse_let(symmetric=symmetric, mac_type=mac_type, grad_sink=grad_sink)
     if error_criterion and _cross_mac_geometry_mode() != "com":
         raise NotImplementedError(
             "make_cross_hook(error_criterion=True) needs the COM MAC geometry "
@@ -2843,6 +3193,9 @@ def make_cross_hook(
     # symmetric exchange needed in this trace, so a caller whose flag fired can
     # re-plan the capacities from exact demand (`CrossCapacities.replanned`)
     needs_sink: dict = {}
+    # the LET exchange's test seams (``open_fn``: replaces ``let.let_open``), read
+    # at trace time; empty in production
+    let_options: dict = {}
 
     def hook(tree_artifacts: Any, criterion: Any = None) -> Optional[tuple]:
         # stage labels for per-device traces (`jax.named_scope` costs nothing at
@@ -2910,15 +3263,35 @@ def make_cross_hook(
         summary = pub.cut
         block_nodes = pub.block_nodes
         block = int(block_nodes.shape[0])
-        gathered = jax.lax.all_gather(pub.rows, axis_name, tiled=False)
-        all_cen = gathered[..., 0:3]
-        all_rad = gathered[..., 3]
         me = jax.lax.axis_index(axis_name)
+        if let_exchange_on:
+            from jaccpot.distributed.let import let_exchange
+
+            let_blocks = let_exchange(
+                pub.rows,
+                block_nodes >= 0,
+                me,
+                ndev=int(ndev),
+                send_capacity=int(cap.let_send_cap),
+                recv_capacity=int(cap.let_recv_cap),
+                axis_name=axis_name,
+                theta=float(theta),
+                separation_floor=floor,
+                error_order=0 if criterion is None else int(criterion.order),
+                theta_max=1.0 if criterion is None else float(criterion.theta_max),
+                open_fn=let_options.get("open_fn"),
+            )
+            gathered = None
+        else:
+            let_blocks = None
+            gathered = jax.lax.all_gather(pub.rows, axis_name, tiled=False)
+            all_cen = gathered[..., 0:3]
+            all_rad = gathered[..., 3]
 
         if symmetric:
             order = 0 if criterion is None else int(criterion.order)
             sym = _symmetric_exchange(
-                gathered,
+                gathered,  # pyright: ignore[reportArgumentType]
                 me,
                 block_nodes,
                 tree,
@@ -2944,8 +3317,11 @@ def make_cross_hook(
                 error_order=order,
                 node_mass=None if criterion is None else upward.mass_moments.mass,
                 **({} if grad_sink is None else {"grad_sink": grad_sink}),
+                **({} if let_blocks is None else {"let": let_blocks}),
             )
             far_overflow = pub.overflow | sym["far_overflow"]
+            if let_blocks is not None:
+                far_overflow = far_overflow | let_blocks.overflow
             flag_sink["far"] = far_overflow
             if near_sink is not None:
                 for k in _FLAT_NEAR_FIELDS + ("target_node", "source_row"):
@@ -2976,9 +3352,16 @@ def make_cross_hook(
                 max_summary_nodes=nodes_needed,
                 overflow=far_overflow | flag_sink.get("near", False),
             )
-            # a truncated summary hides part of a tree from every walk over it
+            if let_blocks is not None:
+                needs["let_send_cap"] = let_blocks.send_needed
+                needs["let_recv_cap"] = let_blocks.recv_needed
+            # a truncated summary hides part of a tree from every walk over it (a
+            # truncated LET buffer too)
+            hidden = pub.overflow
+            if let_blocks is not None:
+                hidden = hidden | let_blocks.overflow
             for bit in ("walk_lower_bound", "pairs_lower_bound"):
-                needs[bit] = needs[bit] | pub.overflow
+                needs[bit] = needs[bit] | hidden
             needs_sink["needs"] = jnp.stack(
                 [
                     jnp.asarray(needs.get(k, 0)).astype(jnp.int32)
@@ -3010,12 +3393,36 @@ def make_cross_hook(
                     record["send_particles"] = sym["send_particles"]
                     record["near_walk_peak"] = jnp.asarray(0, jnp.int32)
                     record["near_walk_far_pairs"] = jnp.asarray(0, jnp.int32)
+                if let_blocks is not None:
+                    from jaccpot.distributed.let import let_bytes
+
+                    wire = let_bytes(
+                        let_blocks,
+                        row_width=int(pub.rows.shape[1]) + 1,
+                        itemsize=int(jnp.dtype(pub.rows.dtype).itemsize),
+                    )
+                    for k, v in wire.items():
+                        record[f"let_{k}"] = v
+                    record["let_send_sizes"] = let_blocks.send_sizes
+                    record["let_recv_sizes"] = let_blocks.recv_sizes
+                    record["let_overflow"] = let_blocks.overflow
+                    record["let_orig"] = let_blocks.orig
+                    record["let_peer"] = let_blocks.peer
+                    record["let_send_capacity"] = int(let_blocks.send_capacity)
                 # the walk's pairs and what it read, for a check of each device's
                 # view of every cross pair (tests/distributed/
-                # test_mesh_segment_dehnen_error.py)
-                record["gathered"] = gathered
+                # test_mesh_segment_dehnen_error.py); the LET has no gathered table
+                if gathered is not None:
+                    record["gathered"] = gathered
                 for side in ("far_a", "far_b", "far_count", "near_a", "near_b"):
                     record[f"walk_{side}"] = getattr(w, side)
+                if let_blocks is not None:
+                    # the LET's pairs in the gathered [ndev x S] index space, so
+                    # both exchanges' pair sets compare as they are
+                    for side in ("far_a", "far_b", "near_a", "near_b"):
+                        record[f"walk_{side}"] = _let_global_index(
+                            getattr(w, side), let_blocks, me, block
+                        )
                 record["walk_near_count"] = w.near_count
                 # each imported far row's sender node (in the sender's summary
                 # index, rows grouped by peer) and, under the criterion, its mass
@@ -3514,6 +3921,8 @@ def make_cross_hook(
 
     hook.flag_sink = flag_sink  # pyright: ignore[reportFunctionMemberAccess]
     hook.needs_sink = needs_sink  # pyright: ignore[reportFunctionMemberAccess]
+    hook.let_options = let_options  # pyright: ignore[reportFunctionMemberAccess]
+    hook.exchange = "let" if let_exchange_on else "all_gather"  # pyright: ignore
     # what the refresh calls it with (`_call_cross_hook`)
     hook.error_criterion = bool(  # pyright: ignore[reportFunctionMemberAccess]
         error_criterion

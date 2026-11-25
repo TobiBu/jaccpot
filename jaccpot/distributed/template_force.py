@@ -1202,6 +1202,7 @@ def make_mesh_cross_hook(
     near_theta: Optional[float] = None,
     axis_name: str = AXIS_NAME,
     record: Optional[dict] = None,
+    exchange: Optional[str] = None,
 ) -> tuple[Optional[Callable[..., Any]], Optional[dict]]:
     """The cross hook and its near sink for this mesh, as ``setup_fused_force`` builds them.
 
@@ -1225,6 +1226,9 @@ def make_mesh_cross_hook(
         Mesh axis.
     record : Optional[dict]
         The hook's diagnostics record (tracers of the trace that ran it).
+    exchange : Optional[str]
+        The summary exchange (``make_cross_hook(exchange=...)``): ``"all_gather"``,
+        ``"let"``, or ``None`` for ``JACCPOT_CROSS_EXCHANGE``.
 
     Returns
     -------
@@ -1251,6 +1255,7 @@ def make_mesh_cross_hook(
         # keep their far pairs as far apart
         separation_floor=engine._walk_separation_floor(),
         error_criterion=bool(engine._flat_walk_criterion_active()),
+        **({} if exchange is None else {"exchange": exchange}),
     )
     return hook, sink
 
@@ -1349,6 +1354,12 @@ class FusedMeshForce:
         The cross hook's diagnostics record (``make_cross_hook(record=...)``):
         tracers of the trace that ran the hook, for a probe that reads them inside
         it. ``None`` (default): none.
+    cross_exchange : Optional[str]
+        How the summary trees travel between devices: ``"all_gather"`` (every
+        device gets every peer's whole tree) or ``"let"`` (each peer gets the part
+        its cross walk can open, :mod:`jaccpot.distributed.let`; the same pair
+        sets). ``None`` (default): ``JACCPOT_CROSS_EXCHANGE``, unset
+        ``all_gather``.
 
     Raises
     ------
@@ -1372,6 +1383,7 @@ class FusedMeshForce:
         level_floor: Optional[tuple[int, int]] = None,
         axis_name: str = AXIS_NAME,
         cross_record: Optional[dict] = None,
+        cross_exchange: Optional[str] = None,
     ) -> None:
         from jaccpot.distributed.cross import CrossCapacities
 
@@ -1409,6 +1421,8 @@ class FusedMeshForce:
         self.level_floor = None if level_floor is None else tuple(level_floor)
         self.axis_name = axis_name
         self.cross_record = cross_record
+        #: the summary exchange (``make_cross_hook(exchange=...)``; None: the env)
+        self.cross_exchange = cross_exchange
         self.setup: Optional[MeshForceSetup] = None
         #: the walk's peak wavefront a re-plan keeps for the next prepare
         self._peak_floor = 0
@@ -1436,6 +1450,7 @@ class FusedMeshForce:
             near_theta=self.near_theta,
             axis_name=self.axis_name,
             record=self.cross_record,
+            exchange=self.cross_exchange,
         )
 
     @property
