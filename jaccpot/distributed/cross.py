@@ -2683,6 +2683,9 @@ class CrossCapacities:
             if name == "leaf_width":
                 changes[name] = max(cap, need[name])
                 continue
+            if name in _LET_CAPACITIES and need[name] == 0:
+                # the all_gather exchange reads no LET buffer
+                continue
             grown = max(cap, _clamp_to_tree(name, _sized(need[name], h), leaf_capacity))
             if bit is not None and need[bit] and need[name] > cap:
                 grown = max(grown, 2 * cap)
