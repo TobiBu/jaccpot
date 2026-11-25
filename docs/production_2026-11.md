@@ -2193,3 +2193,63 @@ caller's state still held (2.8 GB).
   1e8 + 150 x 1e3 clusters. It fits now, but with little headroom. Releasing the old plan first is the lever if a
   bigger run needs it.
 - Re-plans compile a new program set (HH2b's finding): size the reserve generously.
+
+## HH4c — the clusters on the mesh: a carried scheme's mesh form (hybrid Hermite session 4, wave 8, 2026-11-24)
+
+nornax `docs/hybrid_hermite.md` section 16 has the scheme side (ownership, the slow force on the mesh, stripping, the
+API); this section the jaccpot side. Report: `mn-scratch/hh4c/REPORT.md`.
+
+### What was built (jaccpot)
+
+- **A carried scheme's mesh form** (`jaccpot/scheme.py`, `jaccpot/production.py`, `jaccpot/carried.py`). A
+  `CarriedScheme` (HH3b) with `bind_mesh(mesh) -> scheme` runs in the multi-GPU mode:
+  `ProductionRunner(mesh=m, scheme=s)` binds it (`self.scheme = s.bind_mesh(m)`) and runs `jaccpot.carried`'s loop
+  through it -- the same segments, retries, edges, diagnostics rows, callbacks and restart files as on one card; no
+  `MeshBackend`. `check_mesh_scheme` lets such a scheme through and still refuses a carried scheme without
+  `bind_mesh`. A bound scheme's optional `restore_specs(meta)` gives every restart array its sharding
+  (`checkpoint.restore_arrays`: each process reads its own shards); `RunResult.mode` is `"mesh"`. Escapers with a
+  carried scheme on the mesh are refused. `scheme=None` and `SplitStepScheme` s take the old code paths: default
+  programs unchanged by construction (identity below).
+- **`jaccpot.distributed.clusters_mesh.MortonPartition`**: the galaxy's ownership for nornax's mesh clusters, inside
+  `shard_map` -- `repartition(x, m, n_live, payload)` routes the rows with `sfc_repartition` in the force's box
+  (`global_mesh_bounds` with the force's box shape; every payload array travels bitwise with its row; a decline moves
+  nothing), and `owners(points, cuts)` is `sfc_repartition`'s rule (`searchsorted(cuts, morton(point))`, the cuts each
+  device's lowest live code as `migration.splitters_shard`) for a cluster's centre of mass.
+- **`FusedMeshForce.shard / potential_shard(targets=)`** (`template_force.mesh_force_shard`,
+  `mesh_potential_shard`): a callable `targets(provider, topology)` evaluated on the device's topology after the
+  force; its result is appended. nornax evaluates there the field of the device's sources at every cluster's stars
+  (`provider.target_field`), one rebuild for both, and sums the partial fields over the mesh. `targets=None` (every
+  existing caller) leaves the programs as they were.
+
+### Gates
+
+CPU, forced host devices (this host, loaded); the full table is nornax `docs/hybrid_hermite.md` section 16.
+
+1. **One-device mesh == the single-card clusters runner, bitwise** (the HH2b system, fused lane, galaxy preset CPU
+   route): 23 / 23 state leaves and every diagnostics row, 96 stars stripped, reserve re-plans 1 -> 79 -> 158.
+2. **2 and 4 devices vs one card**: the direct reference force 1.1e-16 (positions), membership identical; a cluster
+   crossing a fixed domain boundary moves as one block and the run is bitwise the run on a partition it never
+   crosses. The fused mesh lane on 2 devices (`FusedMeshForce` + `targets=` + `MortonPartition`): at the same
+   positions the stars' slow acceleration vs fp64 direct 2.2e-3 (one card 2.7e-3), the galaxy's 2.9e-3 (2.7e-3);
+   membership identical at every edge (empty slots masked out of the target walks); ledgered drift and momentum in
+   the card's class. 4 devices:
+   the same force class; the ledgered energy by fp64 direct sums of the same states drifts 3.0e-7 (card 3.6e-7),
+   while the runner's FMM energy diagnostic shows a -1.8e-5 offset from the first stripping edge on: term by term it
+   is all `W_gg`, the mesh potential of the galaxy rows (`mesh_potential_shard`; FMM - direct -3.0e-6 at the start,
+   -5.8e-6 after the edge, one card -1.6e-6, geometric theta 0.8), within its validated W accuracy; the clusters'
+   terms (`W_gc` through `targets=`, `W_cc_inter`) are within 5e-7.
+   **GPU** (2 shared A100s vs one card, functional; galaxy 1e6 `dehnen_error` + 10 x 1e4 clusters, 3 x 5 steps):
+   membership identical at the end (1037 stripped, the same ids), the slow accelerations 3.2e-4 (stars) and 2.1e-4
+   (galaxy) of the card's, ledgered drift <= 3.5e-8, momentum <= 3.5e-9, device peak 1.77 / 1.72 GB.
+3. **Restarts**: orbax per edge, fresh-process resumes at stripping edges, same device count: 0 / 19 arrays differ
+   (2 and 4 devices, direct), 0 / 23 (2 devices, fused mesh lane), bitwise at 1 device (fused).
+4. **Identity** `provider_hlo_identity compare w8-main-cpu hh4c-tip-cpu`: PASS 36/36.
+
+### Tests, identity, CI
+
+- `tests/distributed/test_carried_mesh_seam.py` (`distributed-tier`, 2 forced devices; its orbax case in
+  `distributed-checkpoint`): the seam on a test-local carried scheme (dispatch, mode, `.npz` and orbax restarts onto
+  the mesh's sharding, refusals) and `MortonPartition` (rows routed with their payload, every live row owned by the
+  device holding it, both box shapes).
+- `tests/distributed/test_mesh_force_targets.py` (`distributed_segment`): the hook leaves the force bitwise, the
+  partial fields summed over two devices are the field of all sources at the points.

@@ -516,7 +516,13 @@ def run_carried(
 
             meta = read_meta(path)
             names = list(meta["manifest"]["arrays"])
-            arrays = restore_arrays(path, {n: (None, None) for n in names})
+            specs = {n: (None, None) for n in names}
+            restore_specs = getattr(scheme, "restore_specs", None)
+            if callable(restore_specs) and meta.get("carried") is not None:
+                # a scheme on the mesh restores its arrays onto their shardings
+                # (every process reads its own shards; HH4c)
+                specs.update(restore_specs(meta["carried"]))
+            arrays = restore_arrays(path, specs)
             verify_shards(arrays, meta["manifest"])
         else:
             arrays, meta = load_restart(path)
@@ -808,7 +814,7 @@ def run_carried(
         wall_s=time.perf_counter() - started,
         time_anchor=anchor,
         state_owned=True,
-        mode="single",
+        mode="single" if getattr(runner, "mesh", None) is None else "mesh",
         escapers=(
             None
             if policy is None

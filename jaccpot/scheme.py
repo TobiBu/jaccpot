@@ -171,8 +171,8 @@ class CarriedScheme(Protocol):
     (``jaccpot.carried.run_carried``: segments, the retry/re-plan loop, edges,
     diagnostics rows, callbacks, restart files and their bitwise check). Every
     method is EAGER (called on the host between programs). Marked by
-    ``carried = True``; :func:`check_scheme` checks the members, the mesh refuses
-    it (:func:`check_mesh_scheme`).
+    ``carried = True``; :func:`check_scheme` checks the members; the mesh takes it
+    only with a mesh form (``bind_mesh``, below; :func:`check_mesh_scheme`).
 
     An optional ``max_retries`` attribute (int, default 2) bounds the re-plans per
     segment.
@@ -190,6 +190,14 @@ class CarriedScheme(Protocol):
     ``state`` after ``start`` (as the plain runner does once its split copied it),
     unless the carry holds that very array; a scheme must not keep the caller's
     array anywhere else.
+
+    Optional ``bind_mesh(mesh) -> scheme`` is the scheme's MESH FORM (HH4c): with
+    it ``ProductionRunner(mesh=..., scheme=...)`` runs the scheme in the multi-GPU
+    mode -- the same loop (:func:`jaccpot.carried.run_carried`), the scheme bound to
+    the mesh (its carry sharded over the mesh, its programs ``shard_map`` s). A bound
+    scheme may also give ``restore_specs(meta) -> {name: (sharding, shape)}`` for a
+    restart's arrays (:func:`jaccpot.checkpoint.restore_arrays`). Without
+    ``bind_mesh`` the mesh refuses a carried scheme (:func:`check_mesh_scheme`).
 
     Attributes
     ----------
@@ -577,6 +585,22 @@ def _has_shard_form(scheme: Any) -> bool:
     )
 
 
+def _has_carried_mesh_form(scheme: Any) -> bool:
+    """Whether a carried scheme runs on the mesh (``bind_mesh(mesh) -> scheme``, HH4c).
+
+    Parameters
+    ----------
+    scheme : Any
+        A carried scheme.
+
+    Returns
+    -------
+    bool
+        Whether it has a callable ``bind_mesh``.
+    """
+    return callable(getattr(scheme, "bind_mesh", None))
+
+
 def check_mesh_scheme(scheme: Any) -> Any:
     """:func:`check_scheme`, plus what the mesh needs; ``None`` passes through.
 
@@ -594,17 +618,21 @@ def check_mesh_scheme(scheme: Any) -> Any:
     ------
     ValueError
         For a scheme that is not rowwise and has no mesh form: its step would
-        read only one device's rows as if they were the system. (What
+        read only one device's rows as if they were the system; for a carried
+        scheme without ``bind_mesh`` (its mesh form, HH4c). (What
         :func:`check_scheme` refuses is a ``TypeError`` first.)
     """
     scheme = check_scheme(scheme)
     if is_carried_scheme(scheme):
+        if _has_carried_mesh_form(scheme):
+            return scheme
         raise ValueError(
             f"{type(scheme).__name__} carries its own block (the direct-sum "
-            "clusters): the multi-GPU mode does not run it yet (cluster ownership "
-            "by centre of mass, the back-reaction's multipole broadcast and the "
-            "stripped stars' mesh rows are nornax docs/hybrid_hermite.md section "
-            "12 item 2). Run it on one card (mesh=None)"
+            "clusters) and has no mesh form: the multi-GPU mode runs a carried "
+            "scheme only through its bind_mesh(mesh) (HH4c: nornax's "
+            "MeshClustersRunnerScheme -- cluster ownership by centre of mass, the "
+            "stars' field and back-reaction on the mesh, the stripped stars' mesh "
+            "rows). Run it on one card (mesh=None)"
         )
     if scheme is None or bool(scheme.rowwise) or _has_shard_form(scheme):
         return scheme
