@@ -6,7 +6,11 @@ This directory is THE HoreKa guide. One checkout of jaccpot `main`, one `setup_e
 nodes with the exact local software pins. Track H0 built it (2026-11-04, single-node baseline); track H1
 (2026-11-10) moved it to the mains of 2026-11-10 and folded in every other HoreKa job (the per-track
 directories `bench/slurm/{m1,m2g,mesc,a3,a4}/` and the stand-alone `bench/slurm/*.sbatch` now run as jobs of
-this bundle). Timings come only from HoreKa; the local cards are for functional and accuracy work.
+this bundle). Waves 6-8 added jobs hh, hh3 (hybrid Hermite clusters at 1e8) and m3_node1/4 (sharded checkpoints);
+track H2 (2026-11-25) moved the bundle to the mains of 2026-11-25, audited every job against them, added the
+wave-8 jobs hh4a (adaptive internal steps) and hh4c (the clusters on the mesh) and re-verified it end to end
+(`docs/production_2026-11.md` `## H2`). Nothing has run on HoreKa yet. Timings come only from HoreKa; the local
+cards are for functional and accuracy work.
 
 ## What you run
 
@@ -91,7 +95,7 @@ the batch step.
 
 | job | nodes x tasks | what it measures | rows | expected wall | `--time` |
 | --- | --- | --- | --- | --- | --- |
-| `preflight` | 1 x 4 | the environment (4 GPUs, the venv's plugin, a GPU op, srun), then one tiny row (2e5) of every entry point below (17 entries, one per job family; the multi-process ones as srun steps); a broken entry is recorded in `preflight/status/` and its job exits at once | 17 entries | 45-60 min | 2:00 |
+| `preflight` | 1 x 4 | the environment (4 GPUs, the venv's plugin, a GPU op, srun), then one tiny row (2e5) of every entry point below (20 entries, one per job family; the multi-process ones as srun steps; hh4c's mesh over the node's four cards in one process); a broken entry is recorded in `preflight/status/` and its job exits at once | 20 entries | 45-75 min | 2:00 |
 | `pins` | 1 x 1 | **L1** (8e6 clipped Plummer step), **L2** (1e8 step), **L3** (25M disc + bulge step + force rel-L2) on one card (`bench/dce_pins.py`), an **A-vs-A control**, and yggdrax **#104's extra cummax at 1e8** (L2 on main (A) vs the pre-#104 partition (B), A B A B A); `dce_pins compare` verdicts | 9 records | ~1.3 h | 3:00 |
 | `auto` | 1 x 1 | `cell_min_level="auto"` vs the galaxy preset's level 8 on mimirax's S10 bench (`seg_<N>_auto_adj` / `seg_<N>_adj`, `pre_<N>_fc1_auto` / `pre_<N>_fc1`) at 1e5, 1e6, 1e7, each pair A B B A | 24 | ~1.5 h | 3:00 |
 | `s1b` | 1 x 1 | S1b's particle-major L2P, Mosaic GPU vs Triton-Pallas (`s1b_mosaic_l2p.sbatch`): 2e6 and 2.5e7 disc, 1e8 Plummer | 3 sizes x 3 kernels | ~1 h | 2:00 |
@@ -106,6 +110,8 @@ the batch step.
 | `a3` | 1 x 1 | A3's summed drift (the default) vs the legacy order (`a3/position_precision_timing.sbatch`): the runner at 1e8 and 2.6e5, both MACs, A-B-A-B; A3's gate 3 (summed within +10 % at 1e8) | 16 | ~2 h | 4:00 |
 | `hh` | 1 x 1 | HH2a's `target_points` at production scale (`hh/target_points_timing.sbatch`): the galaxy `step` at 1e8 (base) vs `step_with_targets` with 1e4 / 1e5 / 1e6 cluster stars as targets (frontier walk; per-point M2P and per-group local far fields), both MACs; the cluster's back-reaction at all 1e8 galaxy points (`evaluate_back_reaction`, both far fields) and the full `target_points` back-reaction at 1e7 (comparison); the device peak per row | 17 | 1.5-2 h | 3:00 |
 | `hh3` | 1 x 1 | HH3a's many clusters at production scale (`hh/hybrid_clusters_timing.sbatch`, nornax's `FusedClustersForce`): the galaxy step at 1e8 (base) vs the whole slow evaluation with K = 10 x 1e4 and 150 x 1e3 clusters (galaxy -> all stars in one target plan, the grouped back-reaction at all 1e8 rows, the coupling `fmm` vs `none`); the grouped back-reaction alone; the coupling alone at 150 x 1e3 / 1e4; the device peak and compile temporaries per row | 9 | 2-3 h | 4:00 |
+| `hh4a` | 1 x 1 | HH4a's adaptive (Aarseth) internal steps (`hh/hybrid_clusters_runs.sbatch WHAT=share`, `bench/hybrid_clusters_runs.py share`, HH4a item 4): the O(K M^2) internal direct sum's share of a slow step through `FusedClustersForce`, fixed `n_sub` 16 vs adaptive (eta 0.02), at M = 1e3 (K 1, 10) / 1e4 / 1e5 with a 1e6 galaxy (HH4a's local rows) and M = 1e5 / 150 x 1e3 with a 1e8 galaxy; `coupling="fmm"` vs `"none"` with one 1e5-star cluster (HH4a: fmm cost ~60 s per slow step there). Per row: slow force, internal derivatives, both flows and a whole step of each scheme (median of 3), internal pairs, the shares, the device peak | 8 | 2-3 h | 5:00 |
+| `hh4c` | 1 x 1 | HH4c's clusters on the mesh (`hh/hybrid_clusters_runs.sbatch WHAT=mesh`, `bench/hybrid_clusters_runs.py mesh`): ONE process over 1 / 2 / 4 cards (`ProductionRunner(mesh=)` + nornax's `MeshClustersRunnerScheme`), 3 segments x 5 steps with stripping, cross + coupling fmm, HH4c's GPU-gate system scaled up: the single-card `ClustersRunnerScheme` and the 1-device mesh at 1e7 + 10 x 1e4, strong (1e7 on 2 / 4 cards), weak (1e7 per card on 2 / 4), the production 1e8 + 150 x 1e3 on 4 and 2 cards (2.5e7 / 5e7 per card) and 2e8 on 4 (5e7 per card: a ceiling probe, a failure is recorded). Per row: every edge (stripped, re-plans, owners, rows per device, drifts), the start's wall (the force's prepare + the start force), the first segment's wall (its compiles), the steady step, each card's peak | 9 | 3-4 h | 7:00 |
 | `m1_node1` | 1 x 4 | M1: momentum of the multi-GPU runner, local vs cross part (`m1/node1.sbatch`): 1 GPU at 1e7 (the yardstick), 4 x 1 GPU at 1e7 (both MACs) and 1e8 | 5 | ~1 h | 2:00 |
 | `m1_node2` | 2 x 4 | M1 over two nodes: 8 x 1 GPU at 1e7 (both MACs) and 1e8 | 3 | ~45 min | 1:30 |
 | `m2g_node1` | 1 x 4 | M2G (`m2g/node1.sbatch`): 4 processes x 1 GPU vs 1 x 4 at 8e6, both MACs, A-vs-A, per-task binding, deterministic arms; collectives probe; bitwise compares + timing | 14 steps | ~2 h | 3:30 |
@@ -121,11 +127,11 @@ for; their scripts are what these jobs run.
 
 ## The node-hour budget
 
-**The default set: ~64.5 node-hours expected, at most ~124 if every job hit its limit** (`submit_all.sh
+**The default set: ~70.5 node-hours expected, at most ~136 if every job hit its limit** (`submit_all.sh
 --dry-run` prints the worst case for what it would submit). The expected walls come from the same rows on the
 local shared A100s and from each job's own estimate (compile and setup dominate the multi-GPU rows: 2-10 min
 each); HoreKa's dedicated cards should be faster, not slower. Per job, expected (worst): forward 9 (16), mgrad
-7.5 (12), scaling_b 6.5 (12), grad 4.5 (9), scaling_a 3.5 (8), scaling_mp 3 (6), a1 2.5 (6), a3 2 (4), hh 1.75 (3), hh3 2.5 (4), m2g 4
+7.5 (12), scaling_b 6.5 (12), grad 4.5 (9), scaling_a 3.5 (8), scaling_mp 3 (6), a1 2.5 (6), a3 2 (4), hh 1.75 (3), hh3 2.5 (4), hh4a 2.5 (5), hh4c 3.5 (7), m2g 4
 (7.5), mesc 4.25 (8), m1 2.5 (5), escaper 1.75 (4), auto 1.5 (3), pins 1.3 (3), s1b 1 (2), preflight 1 (2), m3 5 (10: m3_node4 is four nodes).
 
 **A4 on top** (`--only a4`): the 1-card tier ~60-80 GPU-hours = 15-20 node-hours (charged per GPU), the node tier
@@ -138,11 +144,22 @@ each); HoreKa's dedicated cards should be faster, not slower. Per job, expected 
 2. `s1b` (1): the Mosaic question is settled (keep Triton; S1b);
 3. `grad` (4.5): S9's timings, informative, no pending decision;
 4. `mgrad`'s memory tier (`TIERS=weak,strong,check`; the job has no switch: resubmit `--only mgrad` with
-   `TIERS` exported) and `forward`'s 1e8 rows.
+   `TIERS` exported) and `forward`'s 1e8 rows;
+5. `hh4c`'s ceiling probe and `hh4a`'s 1e8 rows (`ROWS` exported for one `--only hh4c` / `--only hh4a` call,
+   e.g. `ROWS='_1e7_|_1e8_K150' ` for hh4c: `ROWS` reaches every job of that call through `--export=ALL`).
 
-A core set for a small budget (~25 node-hours): `--only scaling_a,scaling_mp,m2g_node1,m2g_node2,a3,forward,auto,pins`
-(the H0 gate, the production multi-GPU path, the multi-node bring-up, A3's gate 3, the two pending default
-decisions).
+**If the budget must be cut, submit in two waves** (track H2's recommendation, 2026-11-25). M4 (the LET exchange)
+and M5 (the multi-node bring-up) wait on the multi-process and multi-node numbers, so they go first:
+
+1. **The multi-node core, ~21 node-hours expected (41 at worst, `--dry-run`):**
+   `--only pins,scaling_mp,m1_node1,m1_node2,m2g_node1,m2g_node2,mesc_node1,mesc_node2,m3_node1,m3_node4`
+   (the sanity row, N processes x 1 GPU vs 1 x N, the cross-domain cost on 4 and 8 cards, the multi-node
+   bring-up and the #398 barrier probe across nodes, escapers on the mesh, sharded I/O at 1e8 and 1e9);
+2. **then the rest** of the default set, resubmitted into the same run (`H0_RUN_ID=<run id>`), dropping from the
+   list above as needed.
+
+The older single-node core (~25 node-hours) still answers the single-node questions:
+`--only scaling_a,scaling_mp,m2g_node1,m2g_node2,a3,forward,auto,pins`
 
 ## Reading `SUMMARY.md`
 
@@ -151,7 +168,7 @@ decisions).
    `logs/h0-<job>-<id>.out`. Then the preflight's entry verdicts.
 2. **Pins**: every L record; the A-vs-A spread (expect <= 0.3 %, as locally); the #104 cost at 1e8 (A mean vs B
    mean; it matters only beyond the A-vs-A spread; `dce_pins`' own envelope is max(3 %, 2x the spread)); **7.**
-   the sanity row: HoreKa's L pins over the local ones (`local_reference.json`, refreshed by H1 at these pins).
+   the sanity row: HoreKa's L pins over the local ones (`local_reference.json`, refreshed by H2 at these pins).
    B/p and L3's rel-L2 must agree to the digits shown (the same program on the same IC); the walls are a
    ratio (different cards: SXM vs PCIe, and the local cards are shared).
 3. **Scaling**: strong-scaling speed-ups, weak efficiency, B/p and GiB per card per memory row, the first memory
@@ -162,6 +179,9 @@ decisions).
 5. **8. The jobs folded in by H1**: scaling_mp's table (sp and mp rows, the mp / sp step ratio), forward's and
    mgrad's own summaries, the escaper / a1 / a3 rows, the M1 / M2G / MESC jobs' `SUMMARY.md`, a4's
    `SUMMARY-horeka-*.md`.
+6. **9. The jobs added since H1**: the rows of hh, hh3, hh4a and hh4c as tables (hh4a: the internal shares
+   fixed vs adaptive; hh4c: the start's and the first segment's walls, the steady step per card count, the stripped stars, each
+   card's peak) and M3's `SUMMARY.md` for m3_node1 / m3_node4.
 
 `rows.jsonl` has one JSON object per row with its job's provenance; the lead compares those with the local
 numbers.
