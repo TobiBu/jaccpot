@@ -177,6 +177,10 @@ def test_the_needs_name_the_capacities_they_size():
         "walk_lower_bound",
         "pairs_lower_bound",
         "mismatch",
+        # the LET exchange's buffers (M4), 0 under the all_gather exchange
+        "let_send_cap",
+        "let_recv_cap",
+        "let_coarse_cap",
     )
 
 
@@ -201,6 +205,11 @@ def test_the_defaults_are_unchanged():
         recv_particle_cap=(1 << 13) * 64,
         summary_cell_level=None,
         max_summary_nodes=2048,
+        # read only by the LET exchange (M4)
+        let_send_cap=4 * 2048,
+        let_recv_cap=4 * 2048,
+        let_coarse_cap=1024,
+        let_coarse_particles=64 * 64,
     )
 
 
