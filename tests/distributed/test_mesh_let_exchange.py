@@ -4,13 +4,14 @@
 summary tree its cross walk can open (:mod:`jaccpot.distributed.let`) instead of
 all_gathering every tree. Both ends of a cross pair walk the same sent and received
 blocks, so the pair sets agree by construction; they equal the all_gather path's
-when the open test is conservative (``tests/unit/distributed/test_let_open.py``
-checks the bound against brute force). Here, end to end on the fused mesh lane
+because the rows each peer receives are found by the walk itself (a request walk
+against every peer's coarse tree, :func:`jaccpot.distributed.let.let_exchange`). Here, end to end on the fused mesh lane
 (the CPU route of ``test_mesh_cross_momentum.py``: fp64, uniform cube, leaf 64, p4),
 the start force under both exchanges on the same decomposition:
 
 * every device's far and near pair sets (in the gathered ``[ndev x S]`` index
-  space) are the all_gather path's;
+  space) are the all_gather path's (the requests are exact: the request walk splits
+  a cut node exactly when the full walk does);
 * the accelerations are BITWISE the all_gather path's (the same pairs, the same
   shipped multipoles and particles, the same (target, source) order);
 * ``|sum m a| / sum m |a|`` at round-off;
@@ -52,6 +53,9 @@ pytestmark = [
 NDEV = {"dehnen": 4, "dehnen_error": 2}
 #: particles per device (the momentum test's 1024)
 PER_DEVICE = 1024
+#: the LET's request granularity (``CrossCapacities.let_coarse_particles``): small,
+#: so the toy trees are mostly requested subtree by subtree
+COARSE_PARTICLES = 2 * 64
 
 _RECORD = (
     "walk_far_a",
@@ -62,7 +66,7 @@ _RECORD = (
     "walk_near_count",
     "summary_nodes",
 )
-_LET_RECORD = ("let_send_rows", "let_recv_rows", "let_overflow")
+_LET_RECORD = ("let_send_rows", "let_recv_rows", "let_overflow", "let_requested")
 
 
 def _probe(force, shard, f_b, keys):
@@ -127,6 +131,9 @@ def test_the_let_exchange_is_the_all_gather_exchange(mac):
     caps = caps._with(
         let_send_cap=(ndev - 1) * caps.max_summary_nodes,
         let_recv_cap=(ndev - 1) * caps.max_summary_nodes,
+        let_coarse_cap=caps.max_summary_nodes,
+        # subtrees of at most two leaves' particles: the requests decide most rows
+        let_coarse_particles=COARSE_PARTICLES,
     )
     solver = tcm._solver(mac)
     got = {}
@@ -172,3 +179,5 @@ def test_the_let_exchange_is_the_all_gather_exchange(mac):
         f"{mac} x{ndev}: LET rows received {recv.tolist()}, all_gather {gathered.tolist()}"
     )
     assert np.all(recv <= gathered) and np.all(recv >= ndev - 1)
+    # the walks asked for subtrees (the requests did something)
+    assert int(rec_l["let_requested"].sum()) > 0

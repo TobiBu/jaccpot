@@ -117,6 +117,7 @@ CROSS_NEEDS_FIELDS = (
     "mismatch",
     "let_send_cap",
     "let_recv_cap",
+    "let_coarse_cap",
 )
 #: the capacity entries of :data:`CROSS_NEEDS_FIELDS`, and the lower-bound bit (if
 #: any) that qualifies each
@@ -133,6 +134,7 @@ _NEEDS_LOWER_BOUND_BIT = {
     "leaf_width": "pairs_lower_bound",
     "let_send_cap": None,
     "let_recv_cap": None,
+    "let_coarse_cap": None,
 }
 
 
@@ -1394,28 +1396,83 @@ def _let_walk(
     Any
         The walk result: pairs in the LET's index space.
     """
+    return _seeded_walk(
+        let.left,
+        let.right,
+        let.centers,
+        let.radii,
+        let.active,
+        let.table,
+        let.seed_a,
+        let.seed_b,
+        theta=theta,
+        cap=cap,
+        mac_type=mac_type,
+        walk_fn=walk_fn,
+        error_order=error_order,
+    )
+
+
+def _seeded_walk(
+    left: Array,
+    right: Array,
+    centers: Array,
+    radii: Array,
+    active: Array,
+    table: Optional[Array],
+    seed_a: Array,
+    seed_b: Array,
+    *,
+    theta: float,
+    cap: "CrossCapacities",
+    mac_type: str,
+    walk_fn: Optional[Callable[..., Any]],
+    error_order: int = 0,
+) -> Any:
+    """The cross walk (MAC, criterion, capacities) over a table with explicit seeds.
+
+    Parameters
+    ----------
+    left, right : Array
+        Child links (``-1``: none).
+    centers, radii : Array
+        Node geometry.
+    active : Array
+        Live nodes.
+    table : Optional[Array]
+        Eq (16a) columns (``error_order > 0``), else ``None``.
+    seed_a, seed_b : Array
+        Per seed the two roots (``-1``: none).
+    theta, cap, mac_type, walk_fn, error_order
+        As :func:`_symmetric_walk`.
+
+    Returns
+    -------
+    Any
+        The walk result.
+    """
     from yggdrax.interactions import dual_tree_walk_mutual
 
     criterion: dict = {}
     if int(error_order) > 0:
         if walk_fn is None:
             raise ValueError("the criterion's cross walk needs cross_walk_fn's walk")
-        criterion["error_table"] = let.table
+        criterion["error_table"] = table
     idx = jnp.int32
     return (walk_fn or dual_tree_walk_mutual)(
-        let.left,
-        let.right,
-        let.centers,
-        let.radii,
+        left,
+        right,
+        centers,
+        radii,
         float(theta),
         jnp.asarray(0, idx),
         max_pair_queue=cap.export_walk_queue,
         far_cap=cap.export_far_cap,
         near_cap=cap.export_near_cap,
         mac_type=mac_type,  # pyright: ignore[reportArgumentType]
-        node_active=let.active,
-        seed_a=let.seed_a,
-        seed_b=let.seed_b,
+        node_active=active,
+        seed_a=seed_a,
+        seed_b=seed_b,
         **criterion,
     )
 
@@ -2113,7 +2170,7 @@ def _criterion_walk_fn(order: int, theta_max: float) -> Callable[..., Any]:
 _CROSS_CAP_GRANULE = 1024
 
 #: The LET exchange's row buffers (``exchange="let"``); the all_gather path needs 0.
-_LET_CAPACITIES = ("let_send_cap", "let_recv_cap")
+_LET_CAPACITIES = ("let_send_cap", "let_recv_cap", "let_coarse_cap")
 
 #: The LET buffers' a priori size, in summary trees: a device near the middle of a
 #: 3-D decomposition hears from ~26 neighbours, but each sends the part of its tree
@@ -2255,6 +2312,8 @@ class CrossCapacities:
         max_summary_nodes: Optional[int] = None,
         let_send_cap: Optional[int] = None,
         let_recv_cap: Optional[int] = None,
+        let_coarse_cap: Optional[int] = None,
+        let_coarse_particles: Optional[int] = None,
     ) -> None:
         self.max_cells = int(max_cells)
         # None: 1 under the two-sided export, 4 under the one-sided one (see
@@ -2331,6 +2390,21 @@ class CrossCapacities:
             _LET_ROWS_PER_SUMMARY_NODE * self.max_summary_nodes
             if let_recv_cap is None
             else int(let_recv_cap)
+        )
+        # The LET's top (every peer all_gathers it): the root and every child of a
+        # node holding more than let_coarse_particles live particles. None:
+        # max_summary_nodes // 4 rows (at least 1024), and 64 leaves' worth of
+        # particles. A smaller particle bound requests finer subtrees and grows
+        # the top.
+        self.let_coarse_cap = (
+            max(self.max_summary_nodes // 4, _CROSS_CAP_GRANULE)
+            if let_coarse_cap is None
+            else int(let_coarse_cap)
+        )
+        self.let_coarse_particles = (
+            64 * self.leaf_width
+            if let_coarse_particles is None
+            else int(let_coarse_particles)
         )
 
     def __repr__(self) -> str:
@@ -2409,6 +2483,7 @@ class CrossCapacities:
         }
         summary_nodes = 2 * int(leaf_capacity) - 1
         let_rows = summary_nodes * min(peers, _LET_ROWS_PER_SUMMARY_NODE)
+        let_top = max(summary_nodes // 4, _CROSS_CAP_GRANULE)
         return cls(
             max_cells=int(leaf_capacity),
             max_summary_nodes=summary_nodes,
@@ -2416,6 +2491,7 @@ class CrossCapacities:
             summary_cell_level=summary_cell_level,
             let_send_cap=let_rows,
             let_recv_cap=let_rows,
+            let_coarse_cap=let_top,
             **sized,
         )
 
@@ -2934,15 +3010,13 @@ def _cross_exchange(exchange: Optional[str]) -> str:
     return str(exchange)
 
 
-def _refuse_let(*, symmetric: bool, mac_type: str, grad_sink: Optional[dict]) -> None:
+def _refuse_let(*, symmetric: bool, grad_sink: Optional[dict]) -> None:
     """Refuse the LET exchange where its pair sets are not the default's.
 
     Parameters
     ----------
     symmetric : bool
         The hook runs the symmetric exchange.
-    mac_type : str
-        The cross walks' geometric MAC.
     grad_sink : Optional[dict]
         The reverse-mode record.
 
@@ -2950,18 +3024,12 @@ def _refuse_let(*, symmetric: bool, mac_type: str, grad_sink: Optional[dict]) ->
     ------
     NotImplementedError
         Off the symmetric exchange (the controls walk one tree against gathered
-        cells), for a MAC whose refusal :func:`jaccpot.distributed.let.let_open`
-        does not bound (``engblom``), and with ``grad_sink``.
+        cells), and with ``grad_sink``.
     """
     if not symmetric:
         raise NotImplementedError(
             "make_cross_hook(exchange='let') runs on the symmetric exchange only "
             "(the default: two-sided over leaves, no receiver walk, one theta)"
-        )
-    if str(mac_type) not in ("dehnen", "bh"):
-        raise NotImplementedError(
-            f"make_cross_hook(exchange='let'): mac_type={mac_type!r}; the LET's open "
-            "test bounds the dehnen/bh opening angle and eq (16a)"
         )
     if grad_sink is not None:
         raise NotImplementedError(
@@ -3116,7 +3184,7 @@ def make_cross_hook(
         the part of the tree its cross walk can open, :mod:`jaccpot.distributed.let`;
         same pair sets, see there). ``None`` reads ``JACCPOT_CROSS_EXCHANGE``
         (default ``all_gather``). The LET exchange runs on the symmetric exchange
-        with the ``dehnen``/``bh`` MAC or the criterion, forward only. Static.
+        (any MAC, the criterion too), forward only. Static.
 
     Returns
     -------
@@ -3177,7 +3245,7 @@ def make_cross_hook(
         _refuse_grad_sink(symmetric=symmetric, near_sink=near_sink)
     let_exchange_on = _cross_exchange(exchange) == "let"
     if let_exchange_on:
-        _refuse_let(symmetric=symmetric, mac_type=mac_type, grad_sink=grad_sink)
+        _refuse_let(symmetric=symmetric, grad_sink=grad_sink)
     if error_criterion and _cross_mac_geometry_mode() != "com":
         raise NotImplementedError(
             "make_cross_hook(error_criterion=True) needs the COM MAC geometry "
@@ -3193,8 +3261,8 @@ def make_cross_hook(
     # symmetric exchange needed in this trace, so a caller whose flag fired can
     # re-plan the capacities from exact demand (`CrossCapacities.replanned`)
     needs_sink: dict = {}
-    # the LET exchange's test seams (``open_fn``: replaces ``let.let_open``), read
-    # at trace time; empty in production
+    # the LET exchange's test seams (``coarse_particles``: overrides the
+    # capacities'), read at trace time; empty in production
     let_options: dict = {}
 
     def hook(tree_artifacts: Any, criterion: Any = None) -> Optional[tuple]:
@@ -3267,6 +3335,30 @@ def make_cross_hook(
         if let_exchange_on:
             from jaccpot.distributed.let import let_exchange
 
+            let_order = 0 if criterion is None else int(criterion.order)
+            let_walk_fn = (
+                walk_fn
+                if criterion is None
+                else _with_separation_floor(
+                    cross_walk_fn(
+                        mac_type,
+                        error_order=let_order,
+                        theta_max=float(criterion.theta_max),
+                    ),
+                    floor,
+                )
+            )
+
+            def request_walk(*args: Any) -> Any:
+                return _seeded_walk(
+                    *args,
+                    theta=float(theta),
+                    cap=cap,
+                    mac_type=mac_type,
+                    walk_fn=let_walk_fn,
+                    error_order=let_order,
+                )
+
             let_blocks = let_exchange(
                 pub.rows,
                 block_nodes >= 0,
@@ -3274,12 +3366,13 @@ def make_cross_hook(
                 ndev=int(ndev),
                 send_capacity=int(cap.let_send_cap),
                 recv_capacity=int(cap.let_recv_cap),
+                coarse_capacity=int(cap.let_coarse_cap),
+                coarse_particles=int(
+                    let_options.get("coarse_particles", cap.let_coarse_particles)
+                ),
                 axis_name=axis_name,
-                theta=float(theta),
-                separation_floor=floor,
-                error_order=0 if criterion is None else int(criterion.order),
-                theta_max=1.0 if criterion is None else float(criterion.theta_max),
-                open_fn=let_options.get("open_fn"),
+                walk=request_walk,
+                error_order=let_order,
             )
             gathered = None
         else:
@@ -3355,6 +3448,17 @@ def make_cross_hook(
             if let_blocks is not None:
                 needs["let_send_cap"] = let_blocks.send_needed
                 needs["let_recv_cap"] = let_blocks.recv_needed
+                needs["let_coarse_cap"] = let_blocks.coarse_needed
+                # the request walk runs on the cross walk's capacities too
+                rw = let_blocks.request_walk
+                for cap_name, got_need in (
+                    ("export_far_cap", getattr(rw, "far_needed", rw.far_count)),
+                    ("export_near_cap", getattr(rw, "near_needed", rw.near_count)),
+                    ("export_walk_queue", rw.peak_wavefront),
+                ):
+                    needs[cap_name] = jnp.maximum(
+                        jnp.asarray(needs[cap_name]), jnp.asarray(got_need)
+                    )
             # a truncated summary hides part of a tree from every walk over it (a
             # truncated LET buffer too)
             hidden = pub.overflow
@@ -3406,6 +3510,8 @@ def make_cross_hook(
                     record["let_send_sizes"] = let_blocks.send_sizes
                     record["let_recv_sizes"] = let_blocks.recv_sizes
                     record["let_overflow"] = let_blocks.overflow
+                    record["let_requested"] = let_blocks.requested
+                    record["let_coarse_rows"] = let_blocks.coarse_needed
                     record["let_orig"] = let_blocks.orig
                     record["let_peer"] = let_blocks.peer
                     record["let_send_capacity"] = int(let_blocks.send_capacity)
@@ -3414,6 +3520,8 @@ def make_cross_hook(
                 # test_mesh_segment_dehnen_error.py); the LET has no gathered table
                 if gathered is not None:
                     record["gathered"] = gathered
+                else:
+                    record["gathered"] = jnp.zeros((1,), pub.rows.dtype)
                 for side in ("far_a", "far_b", "far_count", "near_a", "near_b"):
                     record[f"walk_{side}"] = getattr(w, side)
                 if let_blocks is not None:

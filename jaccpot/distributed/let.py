@@ -4,31 +4,35 @@ The default exchange all_gathers every device's whole two-sided summary tree
 (:func:`jaccpot.distributed.cross._summary_rows`), ``S`` rows per device, so every
 device receives ``(ndev - 1) x S`` rows per force, a volume that grows with the
 device count at fixed particles per device. The LET exchange sends a peer only the
-part of the summary tree that the cross walk against that peer can open.
+part of the tree that the cross walk against that peer opens, found EXACTLY by the
+walk itself, in three steps (:func:`let_exchange`):
 
-**What a peer receives.** Sender ``s`` decides, for every receiver ``d``, which of
-its summary nodes the walk between the two trees could SPLIT (:func:`let_open`),
-from a few numbers ``d`` publishes about its own tree (:func:`let_descriptor`: the
-box of its node centres, its largest leaf radius and, under eq (16a), its masses,
-thresholds and multipole powers binned by radius). A node goes to ``d`` when every
-ancestor was opened for ``d`` (the root always), with the child links rewritten into
-the block it travels in, so an unopened node arrives as a leaf. The blocks travel
-in one ragged all-to-all (:func:`let_exchange`).
+1. **Coarse trees.** Every device cuts its summary tree where a subtree holds at
+   most ``coarse_particles`` live particles: the TOP is the root and every child of
+   a node above that size; a top node at or below it is a CUT node, whose subtree a
+   peer may request. The tops travel in one all_gather (``coarse_capacity`` rows per
+   device, a small fraction of the tree).
+2. **Requests by the walk.** Every device runs the cross walk between its FULL tree
+   and every peer's top, in the walk's own orientation (lower device first). An
+   internal cut node gets two children: a PROBE (a leaf copy of itself) and a dead
+   slot. The walk splits the cut node exactly when the full walk would split it --
+   the pairs above the cut are the full walk's, decided on the same floats -- and
+   every split leaves at least one output pair with the probe in it (accepted, near,
+   or under the other side's split). A probe in any output pair is a request for
+   that cut node's subtree; the requests travel back in one all_to_all.
+3. **Blocks.** Each device sends every peer its top plus the subtrees that peer
+   requested, with the child links rewritten into the block (an unrequested cut node
+   arrives as a leaf), in one ragged all-to-all.
 
-**Why momentum still cancels (M1).** Both ends of a cross pair must derive the
-identical pair set from bitwise-identical data. Here both ends walk the SAME two
-blocks: device ``s`` walks (its block for ``d``, the block ``d`` sent it), device
-``d`` (the block ``s`` sent it, its block for ``s``) -- the same rows, bitwise, in
-the same orientation (lower device first). So the pair sets agree by
-construction, whatever :func:`let_open` decides.
+**Why the pair sets are the all_gather path's.** The full walk between two trees
+splits only top nodes and nodes inside requested subtrees (step 2 is exact), and
+every such node travels with its children; so the walk over the two blocks visits
+the full walk's pairs, on bitwise-identical rows.
 
-**Why the pairs equal the all_gather path's.** The walk over the pruned trees
-emits the full trees' pairs if it never splits a node that arrived as a leaf.
-:func:`let_open` is a conservative bound of exactly that: a node is opened for
-``d`` when SOME node of ``d`` could fail the MAC against it and be the side the walk
-splits (yggdrax splits the larger radius, or the internal side against a leaf).
-It is an over-estimate, and pinned against the all_gather path's pair sets in
-``tests/distributed/test_mesh_let_exchange.py``.
+**Why momentum still cancels (M1).** Device ``s`` walks (its block for ``d``, the
+block ``d`` sent it), device ``d`` (the block ``s`` sent it, its block for ``s``):
+the SAME two blocks in the same orientation, so both ends derive the identical pair
+set by construction.
 
 Everything downstream -- the multipole and particle exchanges, the near and far
 lists -- is the default exchange's (``cross._symmetric_exchange``), keyed in the
@@ -38,7 +42,7 @@ LET's own index space instead of the ``[ndev x S]`` gathered one.
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, NamedTuple, Optional
+from typing import Any, Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -48,13 +52,9 @@ from yggdrax.distributed.comm import ragged_all_to_all_exchange
 from jaccpot._searchsorted import searchsorted_method
 
 __all__ = [
-    "LET_BINS",
     "LetBlocks",
-    "let_descriptor",
     "let_bytes",
-    "let_descriptor_width",
     "let_exchange",
-    "let_open",
 ]
 
 # two-sided summary row columns (``cross._summary_rows``)
@@ -64,284 +64,6 @@ _COL_RIGHT = 5
 _COL_ACTIVE = 6
 _COL_COUNT = 7
 _COL_TABLE = 8  # cross._SUMMARY_TABLE_COL: G M, threshold, s_1..s_p
-
-#: radius bins of the descriptor: ``floor(log2 r) + _BIN_OFFSET``, clipped to
-#: ``[0, LET_BINS)`` (single octaves from 2**-16 to 2**8; the extremes collect the
-#: rest, which stays conservative: every bin carries its own largest radius and box)
-LET_BINS = 24
-_BIN_OFFSET = 16
-#: per bin and kind: centre box lo (3), hi (3), largest radius, largest G M, least
-#: threshold, and the least and largest distance of the centres from the device's
-#: reference point (its root's centre): the annulus they lie in
-_BIN_COLS = 11
-#: relative slack of every bound (the walk's own distance and radius sums round)
-_MARGIN = 1e-3
-#: eq (15)'s improvement factor ``8 max(rho) / (rho_A + rho_B)`` is at most 8
-_IMPROVEMENT_MAX = 8.0
-_TINY = 1e-30
-
-
-def let_descriptor_width(error_order: int) -> int:
-    """Columns of :func:`let_descriptor`.
-
-    Parameters
-    ----------
-    error_order : int
-        ``0``: the geometric MAC; ``p``: eq (16a) at order ``p``.
-
-    Returns
-    -------
-    int
-        ``3`` (the reference point) ``+ 2 x LET_BINS x 11`` (per radius bin, for all
-        nodes and for the leaves: the centre box, the largest radius, ``G M``, the
-        least threshold and the annulus of the centres about the reference point)
-        ``+ p`` (the largest normalised powers).
-    """
-    return 3 + 2 * LET_BINS * _BIN_COLS + int(error_order)
-
-
-def _radius_bin(radius: Array) -> Array:
-    r = jnp.maximum(radius, jnp.asarray(_TINY, radius.dtype))
-    b = jnp.floor(jnp.log2(r)).astype(jnp.int32) + _BIN_OFFSET
-    return jnp.clip(b, 0, LET_BINS - 1)
-
-
-def _bin_table(
-    rows: Array, member: Array, bins: Array, ref: Array, *, error_order: int
-) -> Array:
-    """``(LET_BINS, 11)`` per radius bin of the member rows: box, radius, G M,
-    threshold, annulus about ``ref``."""
-    dtype = rows.dtype
-    inf = jnp.asarray(jnp.inf, dtype)
-    b = jnp.where(member, bins, LET_BINS)
-    cen = rows[:, 0:3]
-    rho = jnp.sqrt(jnp.sum((cen - ref[None, :]) ** 2, axis=1))
-    rho_lo = jnp.full((LET_BINS,), inf, dtype).at[b].min(rho, mode="drop")
-    rho_hi = jnp.full((LET_BINS,), -inf, dtype).at[b].max(rho, mode="drop")
-    lo = jnp.full((LET_BINS, 3), inf, dtype).at[b].min(cen, mode="drop")
-    hi = jnp.full((LET_BINS, 3), -inf, dtype).at[b].max(cen, mode="drop")
-    rmax = jnp.zeros((LET_BINS,), dtype).at[b].max(rows[:, _COL_RADIUS], mode="drop")
-    if int(error_order) > 0:
-        gm = jnp.zeros((LET_BINS,), dtype).at[b].max(rows[:, _COL_TABLE], mode="drop")
-        thr = (
-            jnp.full((LET_BINS,), inf, dtype)
-            .at[b]
-            .min(rows[:, _COL_TABLE + 1], mode="drop")
-        )
-    else:
-        gm = jnp.zeros((LET_BINS,), dtype)
-        thr = jnp.full((LET_BINS,), inf, dtype)
-    return jnp.concatenate(
-        [
-            lo,
-            hi,
-            rmax[:, None],
-            gm[:, None],
-            thr[:, None],
-            rho_lo[:, None],
-            rho_hi[:, None],
-        ],
-        axis=1,
-    )
-
-
-def let_descriptor(rows: Array, valid: Array, *, error_order: int = 0) -> Array:
-    """What a device publishes about its summary tree for its peers' open tests.
-
-    Its live nodes binned by radius (one octave per bin), twice -- all of them and
-    the leaves alone -- and per bin the box of their centres, their largest radius
-    and, under eq (16a), their largest ``G M`` and least threshold; then the largest
-    normalised powers ``s_1..s_p`` of any live node. A peer bounds the distance to
-    every node of a bin by the distance to the bin's box, so a few large leaves far
-    out in a halo no longer pair their radius with the distance to the core. A bin's
-    centres also lie in an annulus about the device's root centre (the reference
-    point), which bounds the distance where the box cannot: the box of a shell of a
-    centrally concentrated system contains its centre.
-
-    Parameters
-    ----------
-    rows : Array
-        ``(S, k)`` this device's two-sided summary rows.
-    valid : Array
-        ``(S,)`` rows that hold a summary node.
-    error_order : int
-        ``0``: the geometric MAC; ``p``: eq (16a) at order ``p``. Static.
-
-    Returns
-    -------
-    Array
-        ``(let_descriptor_width(p),)``; an empty bin has the box ``+inf`` /
-        ``-inf``.
-    """
-    dtype = rows.dtype
-    live = valid & (rows[:, _COL_ACTIVE] > 0.5)
-    leaf = rows[:, _COL_LEFT] < 0
-    bins = _radius_bin(rows[:, _COL_RADIUS])
-    p = int(error_order)
-    # the reference point: the root's centre (row 0), or the origin without one
-    ref = jnp.where(live[0], rows[0, 0:3], 0.0)
-    tables = [
-        _bin_table(rows, live, bins, ref, error_order=p),
-        _bin_table(rows, live & leaf, bins, ref, error_order=p),
-    ]
-    cols = [ref] + [t.reshape(-1) for t in tables]
-    if p > 0:
-        powers = rows[:, _COL_TABLE + 2 : _COL_TABLE + 2 + p]
-        cols.append(jnp.max(jnp.where(live[:, None], powers, 0.0), axis=0))
-    return jnp.concatenate(cols).astype(dtype)
-
-
-def _eq16a_may_fail(
-    ra: Array,
-    gm_a: Array,
-    thr_a: Array,
-    s_a: list,
-    dmin: Array,
-    rb: Array,
-    gm_b: Array,
-    thr_b: Array,
-    smax: Array,
-    *,
-    order: int,
-    theta_max: float,
-) -> Array:
-    """Whether eq (16a) may refuse (A, B) for some B with radius at most ``rb``,
-    ``G M`` at most ``gm_b``, threshold at least ``thr_b`` and powers at most
-    ``smax``, at a centre distance of at least ``dmin`` (all broadcast).
-
-    Every term of eq (15)/(16a) (:func:`yggdrax._dehnen_accept.dehnen_pair_accept`)
-    grows with ``rho_B``, ``G M`` and the powers (all non-negative) and falls with
-    ``r`` (a degree-``p`` polynomial in ``rho / r`` over ``r^2``); the improvement
-    factor is at most 8. So the bound below is a supremum over such B.
-    """
-    p = int(order)
-    r = jnp.maximum(dmin, jnp.asarray(_TINY, dmin.dtype))
-    up = 1.0 + _MARGIN
-    a = ra * up / r
-    b = rb * up / r
-    conv = (ra + rb) * up >= theta_max * dmin
-    pa = [jnp.ones_like(a)]
-    pb = [jnp.ones_like(b)]
-    for _ in range(p):
-        pa.append(pa[-1] * a)
-        pb.append(pb[-1] * b)
-    e_ab = pb[p]
-    e_ba = pa[p]
-    for n in range(1, p + 1):
-        c = float(math.comb(p, n))
-        e_ab = e_ab + c * s_a[n - 1] * pa[n] * pb[p - n]
-        e_ba = e_ba + c * smax[n - 1] * pb[n] * pa[p - n]
-    scale = _IMPROVEMENT_MAX / (r * r)
-    down = 1.0 - _MARGIN
-    ab = gm_a * e_ab * scale >= thr_b * down
-    ba = gm_b * e_ba * scale >= thr_a * down
-    return conv | ab | ba | (dmin <= 0.0)
-
-
-def let_open(
-    rows: Array,
-    desc: Array,
-    *,
-    theta: float,
-    separation_floor: float = 0.0,
-    error_order: int = 0,
-    theta_max: float = 1.0,
-) -> Array:
-    """The nodes the cross walk against the described device could split.
-
-    yggdrax's mutual walk refines a refused pair by splitting the internal side,
-    the larger radius when both are internal (``extent_target >= extent_source``
-    splits the target). So node A of this device is split against B of the peer
-    only if the MAC refuses (A, B) and B is a leaf, or ``rho_B <= rho_A``. The
-    peer's nodes come in radius bins, each with the box of its centres, so for every
-    bin ``r >= dmin`` (A's centre to the bin's box), and the MAC's refusal is tested
-    at its supremum over the bin:
-
-    * B a leaf: the leaves' bins, ``rho_B`` up to each bin's largest leaf radius
-      (under eq (16a) with the bin's largest ``G M`` and least threshold);
-    * ``rho_B <= rho_A``: all nodes' bins up to A's own, ``rho_B`` up to
-      ``min(rho_A, the bin's largest radius)``.
-
-    Parameters
-    ----------
-    rows : Array
-        ``(S, k)`` this device's two-sided summary rows.
-    desc : Array
-        The peer's :func:`let_descriptor`.
-    theta : float
-        The geometric MAC's opening angle (``(rho_A + rho_B) <= theta r``).
-    separation_floor : float
-        The walks' separation floor (a far pair also needs
-        ``rho_A + rho_B + floor <= r``).
-    error_order : int
-        ``0``: the geometric MAC; ``p``: eq (16a). Static.
-    theta_max : float
-        Eq (16a)'s convergence clause.
-
-    Returns
-    -------
-    Array
-        ``(S,)`` bool: open (send the children). Internal live nodes only.
-    """
-    p = int(error_order)
-    dtype = rows.dtype
-    cen = rows[:, 0:3]
-    ra = rows[:, _COL_RADIUS][:, None]
-    nb = LET_BINS * _BIN_COLS
-    ref = desc[0:3]
-    rho_a = jnp.sqrt(jnp.sum((cen - ref[None, :]) ** 2, axis=1))[:, None]
-    up = 1.0 + _MARGIN
-    floor = float(separation_floor)
-    if p > 0:
-        gm_a = rows[:, _COL_TABLE][:, None]
-        thr_a = rows[:, _COL_TABLE + 1][:, None]
-        s_a = [rows[:, _COL_TABLE + 2 + n][:, None] for n in range(p)]
-        smax = [desc[3 + 2 * nb + n] for n in range(p)]
-
-    def may_fail(table: Array, rb: Array) -> Array:
-        lo, hi = table[:, 0:3], table[:, 3:6]
-        gap = jnp.maximum(
-            jnp.maximum(lo[None, :, :] - cen[:, None, :], cen[:, None, :] - hi[None]),
-            0.0,
-        )
-        box = jnp.sqrt(jnp.sum(gap * gap, axis=-1))
-        # the annulus rho_lo <= |c_B - ref| <= rho_hi: |c_A - c_B| is at least the
-        # gap of |c_A - ref| to it (triangle inequality)
-        ring = jnp.maximum(
-            jnp.maximum(table[None, :, 9] - rho_a, rho_a - table[None, :, 10]), 0.0
-        )
-        dmin = jnp.maximum(box, ring) * (1.0 - _MARGIN)
-        if p == 0:
-            fail = (ra + rb) * up >= float(theta) * dmin
-        else:
-            fail = _eq16a_may_fail(
-                ra,
-                gm_a,
-                thr_a,
-                s_a,
-                dmin,
-                rb,
-                table[None, :, 7],
-                table[None, :, 8],
-                smax,
-                order=p,
-                theta_max=float(theta_max),
-            )
-        if floor > 0.0:
-            fail = fail | ((ra + rb + jnp.asarray(floor, dtype)) * up >= dmin)
-        return fail
-
-    every = desc[3 : 3 + nb].reshape(LET_BINS, _BIN_COLS)
-    leaves = desc[3 + nb : 3 + 2 * nb].reshape(LET_BINS, _BIN_COLS)
-    smaller = (
-        jnp.arange(LET_BINS)[None, :] <= _radius_bin(rows[:, _COL_RADIUS])[:, None]
-    )
-    rb_small = jnp.minimum(ra, every[None, :, 6])
-    fail = jnp.any(smaller & may_fail(every, rb_small), axis=1)
-    fail = fail | jnp.any(may_fail(leaves, leaves[None, :, 6]), axis=1)
-    internal = rows[:, _COL_LEFT] >= 0
-    live = rows[:, _COL_ACTIVE] > 0.5
-    return fail & internal & live
 
 
 class LetBlocks(NamedTuple):
@@ -362,7 +84,7 @@ class LetBlocks(NamedTuple):
         ``(T + R,)``.
     active : Array
         ``(T + R,)`` bool.
-    table : Optional[Array]
+    table : Any
         ``(T + R, p + 2)`` eq (16a) columns, or ``None``.
     count : Array
         ``(T + R,)`` int32 live particles under each row (its sender's count).
@@ -376,10 +98,16 @@ class LetBlocks(NamedTuple):
         device's first; ``-1`` for this device and for a peer with an empty block.
     send_sizes, recv_sizes : Array
         ``(ndev,)`` rows sent to / received from each peer.
-    send_needed, recv_needed : Array
-        Total rows this device had to send / was sent (exact past the capacities).
+    send_needed, recv_needed, coarse_needed : Array
+        Rows this device had to send, was sent, and has in its top (exact past the
+        capacities).
+    requested : Array
+        ``(ndev,)`` cut nodes of this device each peer requested.
+    request_walk : Any
+        The request walk's result (its pair counts and overflow flags).
     overflow : Array
-        Either buffer overflowed (the walk then reads a truncated tree).
+        A buffer overflowed or a request walk lost pairs (any device): the blocks
+        may miss rows the walk opens.
     send_capacity : int
         ``T``. Static.
     """
@@ -389,7 +117,7 @@ class LetBlocks(NamedTuple):
     centers: Array
     radii: Array
     active: Array
-    table: Optional[Array]
+    table: Any
     count: Array
     orig: Array
     peer: Array
@@ -399,13 +127,29 @@ class LetBlocks(NamedTuple):
     recv_sizes: Array
     send_needed: Array
     recv_needed: Array
+    coarse_needed: Array
+    requested: Array
+    request_walk: Any
     overflow: Array
     send_capacity: int
 
 
 def _block_slots(sizes: Array, capacity: int) -> tuple[Array, Array, Array]:
-    """Per slot of a buffer laid out block by block: its block, whether it is live,
-    and every block's start."""
+    """Per slot of a buffer laid out block by block: its block, liveness, starts.
+
+    Parameters
+    ----------
+    sizes : Array
+        ``(ndev,)`` block sizes.
+    capacity : int
+        Buffer rows. Static.
+
+    Returns
+    -------
+    tuple[Array, Array, Array]
+        ``(block, live, start)``: per slot its block (``ndev`` past the live rows),
+        whether it is live, and every block's first slot.
+    """
     idx = jnp.int32
     sizes = sizes.astype(idx)
     start = jnp.cumsum(sizes, dtype=idx) - sizes
@@ -420,6 +164,63 @@ def _block_slots(sizes: Array, capacity: int) -> tuple[Array, Array, Array]:
     return jnp.where(live, block, sizes.shape[0]), live, start
 
 
+def _parents(left: Array, right: Array, internal: Array) -> Array:
+    """Each summary node's parent (``-1`` at the root and the padding).
+
+    Parameters
+    ----------
+    left, right : Array
+        ``(S,)`` child links.
+    internal : Array
+        ``(S,)`` internal live nodes.
+
+    Returns
+    -------
+    Array
+        ``(S,)`` int32 parents.
+    """
+    S = int(left.shape[0])
+    idx = jnp.int32
+    at = jnp.arange(S, dtype=idx)
+    sentinel = jnp.asarray(S, idx)
+    return (
+        jnp.full((S,), -1, idx)
+        .at[jnp.where(internal, left, sentinel)]
+        .set(at, mode="drop")
+        .at[jnp.where(internal, right, sentinel)]
+        .set(at, mode="drop")
+    )
+
+
+def _probes_in(a: Array, b: Array, n: Array, *, S: int, C: int, dead: int) -> Array:
+    """The probe slots (``peer x C + top slot``) of a pair list's ends, ``-1`` else.
+
+    Parameters
+    ----------
+    a, b : Array
+        ``(P,)`` the pairs' ends in the request walk's index space.
+    n : Array
+        Live prefix length.
+    S, C, dead : int
+        This device's rows, the top capacity and the dead row. Static.
+
+    Returns
+    -------
+    Array
+        ``(2 P,)`` int32.
+    """
+    idx = jnp.int32
+    live = jnp.arange(jnp.asarray(a).shape[0]) < n
+    block = 2 * C
+    out = []
+    for end in (a, b):
+        e = jnp.asarray(end).astype(idx)
+        off = e - S
+        is_probe = live & (e >= S) & (e < dead) & ((off % block) >= C)
+        out.append(jnp.where(is_probe, (off // block) * C + (off % block) - C, -1))
+    return jnp.concatenate(out)
+
+
 def let_exchange(
     rows: Array,
     valid: Array,
@@ -428,14 +229,13 @@ def let_exchange(
     ndev: int,
     send_capacity: int,
     recv_capacity: int,
+    coarse_capacity: int,
+    coarse_particles: int,
     axis_name: str,
-    theta: float,
-    separation_floor: float = 0.0,
+    walk: Callable[..., Any],
     error_order: int = 0,
-    theta_max: float = 1.0,
-    open_fn: Optional[Callable[..., Array]] = None,
 ) -> LetBlocks:
-    """Send every peer the part of this device's summary tree its walk can open.
+    """Send every peer the part of this device's summary tree its walk opens.
 
     Parameters
     ----------
@@ -449,13 +249,18 @@ def let_exchange(
         Mesh size. Static.
     send_capacity, recv_capacity : int
         Static row capacities of the send and receive buffers.
+    coarse_capacity : int
+        Static rows of a device's top (the coarse tree every peer gathers).
+    coarse_particles : int
+        A subtree holding at most this many live particles is requested whole or
+        not at all. Static.
     axis_name : str
         Mesh axis.
-    theta, separation_floor, error_order, theta_max
-        The cross walk's MAC (:func:`let_open`).
-    open_fn : Optional[Callable[..., Array]]
-        Replaces :func:`let_open` (``(rows, desc) -> (S,) bool``): a test seam
-        (opening everything gives the all_gather path's trees).
+    walk : Callable[..., Any]
+        The cross walk: ``walk(left, right, centers, radii, active, table, seed_a,
+        seed_b)`` with the caller's MAC and capacities (``cross._let_walk``'s).
+    error_order : int
+        ``p`` under eq (16a) (the rows carry its table), else ``0``. Static.
 
     Returns
     -------
@@ -464,136 +269,222 @@ def let_exchange(
     """
     idx = jnp.int32
     S, k = int(rows.shape[0]), int(rows.shape[1])
-    T, R = int(send_capacity), int(recv_capacity)
+    T, R, C = int(send_capacity), int(recv_capacity), int(coarse_capacity)
+    nd = int(ndev)
     dtype = rows.dtype
     p = int(error_order)
+    width = p + 2
     me = jnp.asarray(me).astype(idx)
-
-    desc = jax.named_call(let_descriptor, name="cross_let_descriptor")(
-        rows, valid, error_order=p
-    )
-    all_desc = jax.lax.all_gather(desc, axis_name, tiled=False)
+    at = jnp.arange(S, dtype=idx)
+    dev = jnp.arange(nd, dtype=idx)
+    lower_mine = me < dev
 
     left = jnp.round(rows[:, _COL_LEFT]).astype(idx)
     right = jnp.round(rows[:, _COL_RIGHT]).astype(idx)
     internal = valid & (left >= 0)
-    sentinel = jnp.asarray(S, idx)
-    parent = (
-        jnp.full((S,), -1, idx)
-        .at[jnp.where(internal, left, sentinel)]
-        .set(jnp.arange(S, dtype=idx), mode="drop")
-        .at[jnp.where(internal, right, sentinel)]
-        .set(jnp.arange(S, dtype=idx), mode="drop")
-    )
-    has_parent = parent >= 0
-    anc0 = jnp.where(has_parent, parent, jnp.arange(S, dtype=idx))
-    rounds = max(1, int(math.ceil(math.log2(max(S, 2)))))
-    orig_col = jnp.arange(S, dtype=idx).astype(dtype)[:, None]
+    parent = _parents(left, right, internal)
+    count = jnp.round(rows[:, _COL_COUNT]).astype(idx)
 
-    def opened(d_desc: Array) -> Array:
-        if open_fn is not None:
-            return jnp.asarray(open_fn(rows, d_desc), bool) & internal
-        return let_open(
-            rows,
-            d_desc,
-            theta=theta,
-            separation_floor=separation_floor,
-            error_order=p,
-            theta_max=theta_max,
-        )
-
-    def per_peer(d: Array, carry: tuple) -> tuple:
-        buf, offset, sizes = carry
-        op = opened(all_desc[d]) & internal
-        # a node travels when every ancestor was opened: pointer doubling over
-        # "my parent was not opened" up the path to the root
-        blocked = has_parent & ~op[jnp.maximum(parent, 0)]
-        anc = anc0
-        for _ in range(rounds):
-            blocked = blocked | blocked[anc]
-            anc = anc[anc]
-        sent = valid & ~blocked & (d != me)
-        pos = jnp.cumsum(sent, dtype=idx) - 1
-        size = jnp.sum(sent, dtype=idx)
-        go = op & sent
-        new_left = jnp.where(go, pos[jnp.maximum(left, 0)], -1).astype(dtype)
-        new_right = jnp.where(go, pos[jnp.maximum(right, 0)], -1).astype(dtype)
-        out = jnp.concatenate(
+    # ---- 1. the top: the root and every child of a node above the size --------
+    with jax.named_scope("cross_let_top"):
+        big = internal & (count > int(coarse_particles))
+        top = valid & ((parent < 0) | big[jnp.maximum(parent, 0)])
+        cut = top & internal & ~big
+        tpos = jnp.cumsum(top, dtype=idx) - 1
+        coarse_needed = jnp.sum(top, dtype=idx)
+        tslot = jnp.where(top & (tpos < C), tpos, C)
+        c_left = jnp.where(big, tpos[jnp.maximum(left, 0)], -1)
+        c_right = jnp.where(big, tpos[jnp.maximum(right, 0)], -1)
+        coarse_rows = jnp.concatenate(
             [
                 rows[:, :_COL_LEFT],
-                new_left[:, None],
-                new_right[:, None],
+                c_left.astype(dtype)[:, None],
+                c_right.astype(dtype)[:, None],
                 rows[:, _COL_ACTIVE:],
-                orig_col,
+                cut.astype(dtype)[:, None],
             ],
             axis=1,
         )
-        slot = jnp.where(sent, offset + pos, T)
-        buf = buf.at[slot].set(out, mode="drop")
-        return buf, offset + size, sizes.at[d].set(size)
+        coarse = jnp.zeros((C, k + 1), dtype).at[tslot].set(coarse_rows, mode="drop")
+        n_top = jnp.minimum(coarse_needed, C)
+    tops = jax.lax.all_gather(coarse, axis_name, tiled=False)
+    n_tops = jax.lax.all_gather(n_top, axis_name, tiled=False)
 
-    buf0 = jnp.zeros((T, k + 1), dtype)
+    # ---- 2. the request walk: my full tree against every peer's top -----------
+    with jax.named_scope("cross_let_request"):
+        # index space: [my S rows | per peer: C top rows, C probes | one dead row]
+        block = 2 * C
+        base = S + dev * block
+        dead = S + nd * block
+        top_live = jnp.arange(C, dtype=idx)[None, :] < n_tops[:, None]
+        t_live = top_live & (dev != me)[:, None]
+        t_cut = t_live & (tops[..., k] > 0.5)
+        t_l = jnp.round(tops[..., _COL_LEFT]).astype(idx)
+        t_r = jnp.round(tops[..., _COL_RIGHT]).astype(idx)
+        probe = base[:, None] + C + jnp.arange(C, dtype=idx)[None, :]
+        top_left = jnp.where(t_cut, probe, jnp.where(t_l >= 0, base[:, None] + t_l, -1))
+        top_right = jnp.where(t_cut, dead, jnp.where(t_r >= 0, base[:, None] + t_r, -1))
+        none = jnp.full((nd, C), -1, idx)
+        tail = jnp.full((1,), -1, idx)
+        q_left = jnp.concatenate(
+            [
+                jnp.where(internal, left, -1),
+                jnp.stack([top_left, none], 1).reshape(-1),
+                tail,
+            ]
+        )
+        q_right = jnp.concatenate(
+            [
+                jnp.where(internal, right, -1),
+                jnp.stack([top_right, none], 1).reshape(-1),
+                tail,
+            ]
+        )
+        # a probe is a leaf copy of its cut node; live only under a cut node
+        top_rows = tops[..., :k]
+        q_rows = jnp.concatenate(
+            [
+                rows,
+                jnp.stack([top_rows, top_rows], 1).reshape(nd * block, k),
+                jnp.zeros((1, k), dtype),
+            ],
+            axis=0,
+        )
+        t_act = t_live & (tops[..., _COL_ACTIVE] > 0.5)
+        q_active = jnp.concatenate(
+            [
+                valid & (rows[:, _COL_ACTIVE] > 0.5),
+                jnp.stack([t_act, t_act & t_cut], 1).reshape(-1),
+                jnp.zeros((1,), bool),
+            ]
+        )
+        alive = (dev != me) & (n_tops > 0) & valid[0]
+        root_mine = jnp.zeros((nd,), idx)
+        seed_a = jnp.where(alive, jnp.where(lower_mine, root_mine, base), -1)
+        seed_b = jnp.where(alive, jnp.where(lower_mine, base, root_mine), -1)
+        req_walk = walk(
+            q_left,
+            q_right,
+            q_rows[:, 0:3],
+            q_rows[:, _COL_RADIUS],
+            q_active,
+            q_rows[:, _COL_TABLE : _COL_TABLE + width] if p > 0 else None,
+            seed_a.astype(idx),
+            seed_b.astype(idx),
+        )
+        kw = dict(S=S, C=C, dead=dead)
+        hits = jnp.concatenate(
+            [
+                _probes_in(req_walk.far_a, req_walk.far_b, req_walk.far_count, **kw),
+                _probes_in(req_walk.near_a, req_walk.near_b, req_walk.near_count, **kw),
+            ]
+        )
+        span = nd * C
+        asked = (
+            jnp.zeros((span,), idx)
+            .at[jnp.where(hits >= 0, hits, span)]
+            .set(1, mode="drop")
+            .reshape(nd, C)
+        )
+        req_overflow = (
+            req_walk.far_overflow | req_walk.near_overflow | req_walk.queue_overflow
+        )
+    # row d of `asked` goes to device d; row r of `got` came from device r
+    got = jax.lax.all_to_all(asked, axis_name, 0, 0, tiled=True)
+
+    # ---- 3. the blocks: the top plus every requested subtree ------------------
     with jax.named_scope("cross_let_pack"):
+        # each node's top ancestor (itself in the top): pointer doubling
+        rounds = max(1, int(math.ceil(math.log2(max(S, 2)))))
+        jump = jnp.where(top | (parent < 0), at, parent)
+        for _ in range(rounds):
+            jump = jump[jump]
+        anc_slot = jnp.where(valid, jnp.minimum(tpos[jump], C), C)
+        orig_col = at.astype(dtype)[:, None]
+
+        def per_peer(d: Array, carry: tuple) -> tuple:
+            buf, offset, sizes = carry
+            wanted = jnp.concatenate([got[d] > 0, jnp.zeros((1,), bool)])
+            sent = valid & (top | wanted[anc_slot]) & (d != me)
+            pos = jnp.cumsum(sent, dtype=idx) - 1
+            size = jnp.sum(sent, dtype=idx)
+            go = sent & internal & sent[jnp.maximum(left, 0)]
+            new_left = jnp.where(go, pos[jnp.maximum(left, 0)], -1).astype(dtype)
+            new_right = jnp.where(go, pos[jnp.maximum(right, 0)], -1).astype(dtype)
+            out = jnp.concatenate(
+                [
+                    rows[:, :_COL_LEFT],
+                    new_left[:, None],
+                    new_right[:, None],
+                    rows[:, _COL_ACTIVE:],
+                    orig_col,
+                ],
+                axis=1,
+            )
+            slot = jnp.where(sent, offset + pos, T)
+            buf = buf.at[slot].set(out, mode="drop")
+            return buf, offset + size, sizes.at[d].set(size)
+
         buf, send_needed, send_sizes = jax.lax.fori_loop(
             0,
-            int(ndev),
+            nd,
             per_peer,
-            (buf0, jnp.asarray(0, idx), jnp.zeros((int(ndev),), idx)),
+            (jnp.zeros((T, k + 1), dtype), jnp.asarray(0, idx), jnp.zeros((nd,), idx)),
         )
+        requested = jnp.sum(got, axis=1, dtype=idx)
     recv, recv_sizes, _ = jax.named_call(
         ragged_all_to_all_exchange, name="cross_exchange_let"
     )(buf, send_sizes, output_capacity=R, axis_name=axis_name)
     recv_sizes = recv_sizes.astype(idx)
     recv_needed = jnp.sum(recv_sizes, dtype=idx)
-    overflow = (send_needed > T) | (recv_needed > R)
+    # a short top or a lost request hides rows from a PEER: everyone flags
+    lost = jax.lax.pmax(
+        ((coarse_needed > C) | req_overflow).astype(idx), axis_name
+    ).astype(bool)
+    overflow = (send_needed > T) | (recv_needed > R) | lost
 
-    # ---- the walk table over [send | recv] ------------------------------------
+    # ---- the final walk's table over [send | recv] -----------------------------
     s_peer, s_live, s_start = _block_slots(send_sizes, T)
     r_peer, r_live, r_start = _block_slots(recv_sizes, R)
     both = jnp.concatenate([buf, recv], axis=0)
     live = jnp.concatenate([s_live, r_live])
     peer = jnp.concatenate([s_peer, r_peer])
-    base = jnp.concatenate(
+    first = jnp.concatenate(
         [
-            s_start[jnp.minimum(s_peer, ndev - 1)],
-            T + r_start[jnp.minimum(r_peer, ndev - 1)],
+            s_start[jnp.minimum(s_peer, nd - 1)],
+            T + r_start[jnp.minimum(r_peer, nd - 1)],
         ]
     )
 
     def link(col: int) -> Array:
         local = jnp.round(both[:, col]).astype(idx)
-        out = jnp.where(live & (local >= 0), base + local, -1)
+        out = jnp.where(live & (local >= 0), first + local, -1)
         return jnp.where(out < T + R, out, -1)
 
-    orig = jnp.where(live, jnp.round(both[:, k]).astype(idx), -1)
-    count = jnp.where(live, jnp.round(both[:, _COL_COUNT]).astype(idx), 0)
-    width = p + 2
-    table = both[:, _COL_TABLE : _COL_TABLE + width] if p > 0 else None
-
-    dev = jnp.arange(int(ndev), dtype=idx)
-    root_mine = s_start
+    alive2 = (dev != me) & (send_sizes > 0) & (recv_sizes > 0)
+    alive2 = alive2 & (s_start < T) & (r_start < R)
     root_peer = T + r_start
-    alive = (dev != me) & (send_sizes > 0) & (recv_sizes > 0)
-    alive = alive & (s_start < T) & (r_start < R)
-    lower_mine = me < dev
-    seed_a = jnp.where(alive, jnp.where(lower_mine, root_mine, root_peer), -1)
-    seed_b = jnp.where(alive, jnp.where(lower_mine, root_peer, root_mine), -1)
+    seed2_a = jnp.where(alive2, jnp.where(lower_mine, s_start, root_peer), -1)
+    seed2_b = jnp.where(alive2, jnp.where(lower_mine, root_peer, s_start), -1)
     return LetBlocks(
         left=link(_COL_LEFT),
         right=link(_COL_RIGHT),
         centers=both[:, 0:3],
         radii=both[:, _COL_RADIUS],
         active=live & (both[:, _COL_ACTIVE] > 0.5),
-        table=table,
-        count=count,
-        orig=orig,
-        peer=jnp.where(live, peer, int(ndev)),
-        seed_a=seed_a.astype(idx),
-        seed_b=seed_b.astype(idx),
+        table=both[:, _COL_TABLE : _COL_TABLE + width] if p > 0 else None,
+        count=jnp.where(live, jnp.round(both[:, _COL_COUNT]).astype(idx), 0),
+        orig=jnp.where(live, jnp.round(both[:, k]).astype(idx), -1),
+        peer=jnp.where(live, peer, nd),
+        seed_a=seed2_a.astype(idx),
+        seed_b=seed2_b.astype(idx),
         send_sizes=send_sizes,
         recv_sizes=recv_sizes,
         send_needed=send_needed,
         recv_needed=recv_needed,
+        coarse_needed=coarse_needed,
+        requested=requested,
+        request_walk=req_walk,
         overflow=overflow,
         send_capacity=T,
     )
