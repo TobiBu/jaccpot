@@ -68,6 +68,7 @@ __all__ = [
     "migration_need_shard",
     "ownership_splitters",
     "splitters_shard",
+    "work_balanced_splitters_shard",
 ]
 
 #: the migration's buffer could not hold a device's leavers or arrivals: declined
@@ -261,6 +262,92 @@ def balanced_splitters_shard(
     offset = (jnp.cumsum(counts) - counts)[me]
     targets = (jnp.arange(1, ndev, dtype=jnp.int64) * jnp.sum(counts)) // ndev
     local = targets - offset
+    mine = (local >= 0) & (local < n_live)
+    offered = jnp.where(mine, ordered[jnp.clip(local, 0, cap - 1)], _CODE_SENTINEL)
+    return jax.lax.pmin(offered, axis_name)
+
+
+def work_balanced_splitters_shard(
+    positions: Array,
+    count: Array,
+    work: Array,
+    *,
+    cubic: bool,
+    max_rows: Optional[int] = None,
+    axis_name: str = AXIS_NAME,
+) -> Array:
+    """Cuts that split the WORK evenly, for an ownership of exact ranges (M4).
+
+    :func:`balanced_splitters_shard` with every row weighted by its ``work`` (the
+    force's per-particle cost: near and far interactions; any non-negative
+    weight): cut ``j`` is the code of the first row, in global Morton order, whose
+    inclusive cumulative work exceeds ``j / ndev`` of the total. As there, the
+    devices' live codes in device order are the sorted global sequence, so the
+    rank of that row is exact: every device counts its rows at or below the target
+    (a ``psum``), and the device holding the rank offers its code (a ``pmin``).
+
+    A work-balanced device can hold many more rows than the mean. ``max_rows``
+    bounds that: each cut's global rank is clipped to within ``s`` rows of the
+    count-balanced rank ``j N / ndev``, ``s = (max_rows - ceil(N / ndev)) // 2``,
+    so no device ends with more than ``max_rows`` rows and the migration to these
+    cuts is never declined for its shard (:data:`OVERFLOW_SHARD`). Uniform work
+    gives :func:`balanced_splitters_shard`'s cuts up to the rank's rounding.
+
+    Parameters
+    ----------
+    positions : Array
+        ``(cap, 3)`` this device's positions.
+    count : Array
+        ``(1,)`` its live rows.
+    work : Array
+        ``(cap,)`` each row's cost (padding ignored), non-negative.
+    cubic : bool
+        The force's box shape.
+    max_rows : Optional[int]
+        Most rows a device may end with (its shard, less headroom). ``None``: no
+        bound. Static.
+    axis_name : str
+        Mesh axis.
+
+    Returns
+    -------
+    Array
+        ``(ndev - 1,)`` ``uint64`` cuts, identical on every device (valid under the
+        same conditions as :func:`balanced_splitters_shard`).
+    """
+    cap = positions.shape[0]
+    n_live = jnp.minimum(count[0], cap).astype(jnp.int32)
+    live = jnp.arange(cap) < n_live
+    codes = _codes(positions, n_live, cubic=cubic, axis_name=axis_name)
+    keyed = jnp.where(live, codes, _CODE_SENTINEL)
+    order = jnp.argsort(keyed, stable=True)
+    ordered = keyed[order]
+    w = jnp.where(live, jnp.maximum(jnp.asarray(work), 0), 0)[order]
+    w = w.astype(jnp.float64 if jax.config.jax_enable_x64 else jnp.float32)
+    inclusive = jnp.cumsum(w)
+    mine_total = inclusive[-1]
+    totals = jax.lax.all_gather(mine_total, axis_name, tiled=False)
+    counts = jax.lax.all_gather(n_live, axis_name, tiled=False)
+    ndev = counts.shape[0]
+    me = jax.lax.axis_index(axis_name)
+    offset_w = (jnp.cumsum(totals) - totals)[me]
+    offset_n = (jnp.cumsum(counts) - counts)[me]
+    total_w = jnp.sum(totals)
+    n_total = jnp.sum(counts).astype(jnp.int64)
+    j = jnp.arange(1, ndev, dtype=jnp.int64)
+    target = j.astype(w.dtype) * total_w / ndev
+    # rows at or below each target, mine then everyone's: the cut's global rank
+    # (``inclusive`` is non-decreasing; the padding sorts last with no work)
+    below = jnp.minimum(
+        jnp.searchsorted(offset_w + inclusive, target, side="right"), n_live
+    ).astype(jnp.int64)
+    rank = jax.lax.psum(below, axis_name)
+    if max_rows is not None:
+        even = (j * n_total) // ndev
+        slack = jnp.maximum((int(max_rows) - (n_total + ndev - 1) // ndev) // 2, 0)
+        rank = jnp.clip(rank, even - slack, even + slack)
+    rank = jnp.clip(rank, 0, jnp.maximum(n_total - 1, 0))
+    local = rank - offset_n
     mine = (local >= 0) & (local < n_live)
     offered = jnp.where(mine, ordered[jnp.clip(local, 0, cap - 1)], _CODE_SENTINEL)
     return jax.lax.pmin(offered, axis_name)
