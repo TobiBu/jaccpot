@@ -46,6 +46,22 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _ragged_exchange_flags import add_ragged_exchange_flags  # noqa: E402
 
+
+def _allow_py_spy() -> None:
+    """Let py-spy read this process's stack (``ptrace_scope`` 1): read a stuck rank before killing it."""
+    try:
+        import ctypes
+
+        ctypes.CDLL(None).prctl(
+            0x59616D61, ctypes.c_ulong(-1), 0, 0, 0
+        )  # PR_SET_PTRACER, ANY
+    except Exception:  # noqa: BLE001 - not Linux, or no prctl: nothing to allow
+        pass
+
+
+_allow_py_spy()
+
+
 MC, RC, EPS_G, DT = 1e-4, 0.012, 0.005, 2e-3
 EPS_C = RC / 20
 
