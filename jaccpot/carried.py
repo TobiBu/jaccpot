@@ -94,7 +94,6 @@ def trace_state(engines: Sequence[Any]) -> dict:
     """
     from jaccpot.production import _jsonable
     from jaccpot.runtime import _level_shapes
-
     from jaccpot.runtime._large_n_pipeline import (
         _STATIC_TARGET_BLOCKS_CAP_ATTR,
         _STATIC_TARGET_BLOCKS_PREFLIGHT_ATTR,
