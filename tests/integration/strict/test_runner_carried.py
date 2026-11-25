@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import sys
 from typing import Any, ClassVar
 
 import jax
@@ -31,6 +32,7 @@ import numpy as np
 import pytest
 
 from jaccpot.carried import (
+    install_recorded_tree,
     pinned_trace_state,
     provider_record,
     provider_with_record,
@@ -209,6 +211,8 @@ class _Leapfrog:
     def restore(self, arrays, meta, *, solver, settings, dt, escapers):
         x = jnp.asarray(arrays["x"])
         m = jnp.asarray(arrays["m"])
+        # the writer's tree bounds before the re-prepare (HH5 item 3)
+        install_recorded_tree([solver], meta["pin"])
         prov, _ = self._prepare(solver, x, m)
         prov, ok = provider_with_record(prov, meta["provider"])
         mismatches = [] if ok else ["template"]
@@ -473,3 +477,69 @@ def test_donate_input_donates_the_first_segment_too(one_go):
     # runner's donate_input; the masses (the carry's own leaf here) are kept
     assert state.is_deleted()
     assert not masses.is_deleted()
+
+
+def _grown_solver(capacity: int = 2048):
+    """A solver whose leaf capacity grew past what a prepare at the run's
+    positions sizes (a tree re-plan, ``_replan_tree_from_needs``, sets it so; and
+    ``leaf_capacity="auto"`` is fixed at a solver's FIRST prepare, at another
+    state than any restart's)."""
+    solver = _solver()
+    solver._impl._tree_leaf_capacity = int(capacity)
+    return solver
+
+
+@pytest.mark.parametrize("fmt", ["npz", "orbax"])
+def test_a_restart_keeps_the_writers_tree_and_target_block_preflight(
+    fmt, tmp_path, monkeypatch
+):
+    """HH5 item 3: the writer's leaf capacity differs from a fresh prepare's.
+
+    The writer's programs (and its recorded template) have the leaf count its
+    engine settled on (here grown, as a tree re-plan grows it); a restore's
+    re-prepare at the restart's positions in a fresh process settles on another.
+    Then (1) the fused payload's static target-block preflight was keyed with the
+    restore's leaf count, so the restored traced refresh refused to start ("fused
+    payload static target-block cap was not preflighted", HH4b at 1e7); (2) the
+    static-radix topology key differed (a restore reported not bitwise,
+    ``provider_key``). Now the pinned record carries the writer's preflight key
+    and cap, and ``install_recorded_tree`` gives the re-prepare the writer's tree
+    bounds: the restore continues, bitwise, with no mismatch. A scheme that does
+    not call it still continues (the record's key), and says ``provider_key``.
+    """
+    if fmt == "orbax":
+        pytest.importorskip("orbax.checkpoint")
+    state, masses = _system()
+    seg = dict(steps=STEPS, domain_guard="off", diagnostics_every_energy=1)
+
+    def runner(solver, **more):
+        return ProductionRunner(
+            solver,
+            settings=SETTINGS,
+            segment=SegmentConfig(**seg, **more),
+            scheme=_Leapfrog(),
+        )
+
+    whole = runner(_grown_solver()).run(
+        state, masses, dt=DT, num_steps=STEPS * SEGMENTS
+    )
+    written = whole.carried.pin["engines"][0]["static_target_blocks"]["preflight"]
+    assert written is not None and written[0] == 2048  # the grown leaf count
+    path = str(tmp_path / ("r.npz" if fmt == "npz" else "ckpt"))
+    runner(_grown_solver(), restart_every=1, restart_path=path).run(
+        state, masses, dt=DT, num_steps=STEPS
+    )
+    # a fresh engine: a prepare at the restart's positions sizes 1024 leaves
+    res = runner(_solver()).run(dt=DT, num_steps=STEPS * SEGMENTS, restart_from=path)
+    assert res.restored["bitwise"] and not res.restored["mismatches"], res.restored
+    _same(_final(res), _final(whole))
+    # a scheme whose restore re-prepares without the writer's tree bounds
+    monkeypatch.setattr(
+        sys.modules[__name__], "install_recorded_tree", lambda engines, record: None
+    )
+    with pytest.warns(UserWarning, match="not bitwise"):
+        res = runner(_solver()).run(
+            dt=DT, num_steps=STEPS * SEGMENTS, restart_from=path
+        )
+    assert "provider_key" in res.restored["mismatches"]
+    _same(_final(res), _final(whole))
