@@ -7,11 +7,14 @@ device count at fixed particles per device. The LET exchange sends a peer only t
 part of the tree that the cross walk against that peer opens, found EXACTLY by the
 walk itself, in request rounds (:func:`let_exchange`):
 
-1. **Round r** (granularity ``coarse_particles[r]`` live particles, decreasing):
-   each device sends every peer the nodes whose parent is EXPANDED for that peer --
-   above the round's size, or requested by that peer in an earlier round. Expanded
-   is closed upward, so every ancestor of a sent node is expanded too. A sent
-   internal node that is not expanded is a CUT node.
+1. **Round r** (sizes ``coarse_particles``, live particles, decreasing): each
+   device sends every peer the nodes whose parent is EXPANDED for that peer --
+   above the FIRST size, requested by that peer, or inside a subtree it requested
+   in round ``j < r`` and above round ``j + 1``'s size (whole when that subtree is
+   already within it). Finer sizes apply only inside requested subtrees, so a far
+   peer gets the first round's top alone. Expanded is closed upward, so every
+   ancestor of a sent node is expanded too. A sent internal node that is not
+   expanded is a CUT node.
 2. **Request walk.** Each device runs the cross walk between its FULL tree and every
    block it received, in the walk's own orientation (lower device first), with
    every cut node given two children: a PROBE (a leaf copy of itself) and a dead
@@ -20,8 +23,8 @@ walk itself, in request rounds (:func:`let_exchange`):
    pair holding the probe (accepted, near, or under the other side's split). A
    probe in an output pair is a request; the requests go back to the senders in a
    ragged all-to-all aligned with their send buffers.
-3. **Final blocks.** The last round's blocks with every last-round request's
-   subtree whole, in one ragged all-to-all.
+3. **Final blocks.** The same rule after the last round, whose requests go whole,
+   in one ragged all-to-all.
 
 **Why the pair sets are the all_gather path's.** A node the full walk splits has
 every ancestor split; the highest one that is not expanded was a cut node in some

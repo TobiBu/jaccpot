@@ -2270,11 +2270,14 @@ devices, both MACs; GPU 2 cards), pair sets identical on every device, momentum 
 Request rounds of decreasing granularity (`CrossCapacities.let_coarse_particles`, default `(64, 4)` leaves' worth of
 live particles), between the summary rows (`_summary_rows`) and the default exchange's walk:
 
-1. **Round blocks.** In round `r` each device sends every peer the nodes whose parent is EXPANDED for that peer: above
-   the round's size, or requested by that peer in an earlier round. Expanded is closed upward (a big node's parent is
-   bigger; a requested node was sent, so its parent was expanded), so every ancestor of a sent node is expanded and
-   no per-peer ancestor query is needed. A sent internal node that is not expanded is a CUT node (a flag column).
-   One ragged all-to-all.
+1. **Round blocks.** In round `r` each device sends every peer the nodes whose parent is EXPANDED for that peer:
+   above the FIRST size (everywhere), requested by that peer, or inside a subtree the peer requested in round `j < r`
+   and above round `j + 1`'s size (the whole subtree when it already holds no more than that size). The finer sizes
+   apply only inside requested subtrees, so a far peer gets the first round's top and nothing more. Expanded is closed
+   upward, so every ancestor of a sent node is expanded and no per-peer ancestor query is needed; every cut node of a
+   round is a node of that round's global top (the root and the children of nodes above its size), so one
+   peer-independent pointer doubling per size finds the requester of every node inside a requested subtree. A sent
+   internal node that is not expanded is a CUT node (a flag column). One ragged all-to-all.
 2. **Request walk.** Each device runs the cross walk (same MAC, criterion table, floor, capacities and orientation:
    lower device first) between its FULL tree and every block it received, in one seeded walk. Every cut node gets two
    children: a PROBE (a leaf copy of itself) and a dead slot. Above the cuts the walk is the full walk on the same
@@ -2282,8 +2285,7 @@ live particles), between the summary rows (`_summary_rows`) and the default exch
    probe (accepted, near, or under the other side's split), and an unsplit cut node never puts its probe in a pair.
    A probe in an output pair is a request; the requests go back in a ragged all-to-all whose blocks are the received
    blocks reversed, so they arrive aligned with the sender's own send buffer.
-3. **Final blocks.** The last round's rule, with every last-round request's subtree sent whole (each node's top
-   ancestor at the finest granularity: one pointer doubling per force), in one ragged all-to-all; the cross walk runs
+3. **Final blocks.** The same rule after the last round, whose requests go whole, in one ragged all-to-all; the cross walk runs
    over them (`_let_walk`) and the default exchange continues.
 
 - **The pair sets are the all_gather path's, exactly.** A node the full walk splits has every ancestor split. The
@@ -2314,6 +2316,9 @@ live particles), between the summary rows (`_summary_rows`) and the default exch
   every row. The radix tree of a centrally concentrated system has nodes of radius 8+ around a 0.3 core, and no compact
   summary of a peer's tree bounds that: even the bare opening angle at theta 1 opened every node, against 38-42 % of
   rows the walk actually needed (2 x 1e6, `dehnen_error`). The request walk asks the walk instead of bounding it.
+  Then one request round at 64 leaves asked for ~every cut node under eq (16a) (100 % of rows); a second round at 4
+  leaves (57 %) at first applied its size everywhere, so every peer got the finest top (~34k of 104k rows per peer on
+  four cards) whatever it requested; finer sizes now apply only inside requested subtrees.
 
 ### API
 
@@ -2339,8 +2344,8 @@ live particles), between the summary rows (`_summary_rows`) and the default exch
 | walk table | `ndev x S_cap` rows (the gathered table) | `T + R` rows (`T = let_send_cap`) |
 | presence maps (4 per force) | `ndev x S_cap` int32 each | `T` or `R` int32 each |
 | request rounds | - | per round: a send buffer `T x (k + 2)` and a receive buffer `R x (k + 2)`, a request walk over `S + 2 R + 1` rows (the cross walk's list capacities), the requests back (`R` floats out, `T` in) |
-| opened flags | - | `ndev x S` bool (the requests so far, per peer) |
-| per-peer pack | - | `O(S)` temporaries per peer (fori_loop), one `log2 S` pointer doubling per force |
+| request tags | - | `ndev x S` int8 (the round each node was requested in, per peer) |
+| per-peer pack | - | `O(S)` temporaries per peer (fori_loop); one `log2 S` pointer doubling per size, per force |
 
 `k = 8` (geometric) or `8 + p + 2` (eq (16a)). On CPU the ragged exchange's fallback all_gathers the send buffer
 (`ndev x T` rows), so the memory claim holds on the native (GPU) transport only. The single-card default path is
