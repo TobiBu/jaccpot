@@ -117,7 +117,6 @@ CROSS_NEEDS_FIELDS = (
     "mismatch",
     "let_send_cap",
     "let_recv_cap",
-    "let_coarse_cap",
 )
 #: the capacity entries of :data:`CROSS_NEEDS_FIELDS`, and the lower-bound bit (if
 #: any) that qualifies each
@@ -134,7 +133,6 @@ _NEEDS_LOWER_BOUND_BIT = {
     "leaf_width": "pairs_lower_bound",
     "let_send_cap": None,
     "let_recv_cap": None,
-    "let_coarse_cap": None,
 }
 
 
@@ -2170,7 +2168,7 @@ def _criterion_walk_fn(order: int, theta_max: float) -> Callable[..., Any]:
 _CROSS_CAP_GRANULE = 1024
 
 #: The LET exchange's row buffers (``exchange="let"``); the all_gather path needs 0.
-_LET_CAPACITIES = ("let_send_cap", "let_recv_cap", "let_coarse_cap")
+_LET_CAPACITIES = ("let_send_cap", "let_recv_cap")
 
 #: The LET buffers' a priori size, in summary trees: a device near the middle of a
 #: 3-D decomposition hears from ~26 neighbours, but each sends the part of its tree
@@ -2312,8 +2310,7 @@ class CrossCapacities:
         max_summary_nodes: Optional[int] = None,
         let_send_cap: Optional[int] = None,
         let_recv_cap: Optional[int] = None,
-        let_coarse_cap: Optional[int] = None,
-        let_coarse_particles: Optional[int] = None,
+        let_coarse_particles: Optional[tuple[int, ...]] = None,
     ) -> None:
         self.max_cells = int(max_cells)
         # None: 1 under the two-sided export, 4 under the one-sided one (see
@@ -2391,20 +2388,15 @@ class CrossCapacities:
             if let_recv_cap is None
             else int(let_recv_cap)
         )
-        # The LET's top (every peer all_gathers it): the root and every child of a
-        # node holding more than let_coarse_particles live particles. None:
-        # max_summary_nodes // 4 rows (at least 1024), and 64 leaves' worth of
-        # particles. A smaller particle bound requests finer subtrees and grows
-        # the top.
-        self.let_coarse_cap = (
-            max(self.max_summary_nodes // 4, _CROSS_CAP_GRANULE)
-            if let_coarse_cap is None
-            else int(let_coarse_cap)
-        )
+        # The LET's request rounds (:func:`jaccpot.distributed.let.let_exchange`),
+        # decreasing subtree sizes in live particles: round r sends every peer the
+        # nodes under nodes above the r-th size or requested before, and the walks
+        # request the cut nodes they split. One request walk per entry. None: 64
+        # and 4 leaves' worth.
         self.let_coarse_particles = (
-            64 * self.leaf_width
+            (64 * self.leaf_width, 4 * self.leaf_width)
             if let_coarse_particles is None
-            else int(let_coarse_particles)
+            else tuple(int(m) for m in let_coarse_particles)
         )
 
     def __repr__(self) -> str:
@@ -2418,7 +2410,7 @@ class CrossCapacities:
         fields = ", ".join(f"{k}={v}" for k, v in vars(self).items())
         return f"CrossCapacities({fields})"
 
-    def _with(self, **changes: int) -> "CrossCapacities":
+    def _with(self, **changes: Any) -> "CrossCapacities":
         """A copy with some capacities replaced.
 
         Parameters
@@ -2433,7 +2425,11 @@ class CrossCapacities:
         """
         new = copy.copy(self)
         for name, value in changes.items():
-            setattr(new, name, int(value))
+            if isinstance(value, (tuple, list)):
+                # the LET's request rounds (let_coarse_particles)
+                setattr(new, name, tuple(int(v) for v in value))
+            else:
+                setattr(new, name, int(value))
         return new
 
     @classmethod
@@ -2483,7 +2479,6 @@ class CrossCapacities:
         }
         summary_nodes = 2 * int(leaf_capacity) - 1
         let_rows = summary_nodes * min(peers, _LET_ROWS_PER_SUMMARY_NODE)
-        let_top = max(summary_nodes // 4, _CROSS_CAP_GRANULE)
         return cls(
             max_cells=int(leaf_capacity),
             max_summary_nodes=summary_nodes,
@@ -2491,7 +2486,6 @@ class CrossCapacities:
             summary_cell_level=summary_cell_level,
             let_send_cap=let_rows,
             let_recv_cap=let_rows,
-            let_coarse_cap=let_top,
             **sized,
         )
 
@@ -3366,9 +3360,11 @@ def make_cross_hook(
                 ndev=int(ndev),
                 send_capacity=int(cap.let_send_cap),
                 recv_capacity=int(cap.let_recv_cap),
-                coarse_capacity=int(cap.let_coarse_cap),
-                coarse_particles=int(
-                    let_options.get("coarse_particles", cap.let_coarse_particles)
+                coarse_particles=tuple(
+                    int(m)
+                    for m in let_options.get(
+                        "coarse_particles", cap.let_coarse_particles
+                    )
                 ),
                 axis_name=axis_name,
                 walk=request_walk,
@@ -3448,7 +3444,6 @@ def make_cross_hook(
             if let_blocks is not None:
                 needs["let_send_cap"] = let_blocks.send_needed
                 needs["let_recv_cap"] = let_blocks.recv_needed
-                needs["let_coarse_cap"] = let_blocks.coarse_needed
                 # the request walk runs on the cross walk's capacities too
                 rw = let_blocks.request_walk
                 for cap_name, got_need in (

@@ -180,7 +180,6 @@ def test_the_needs_name_the_capacities_they_size():
         # the LET exchange's buffers (M4), 0 under the all_gather exchange
         "let_send_cap",
         "let_recv_cap",
-        "let_coarse_cap",
     )
 
 
@@ -208,8 +207,7 @@ def test_the_defaults_are_unchanged():
         # read only by the LET exchange (M4)
         let_send_cap=4 * 2048,
         let_recv_cap=4 * 2048,
-        let_coarse_cap=1024,
-        let_coarse_particles=64 * 64,
+        let_coarse_particles=(64 * 64, 4 * 64),
     )
 
 

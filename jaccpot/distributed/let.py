@@ -5,29 +5,31 @@ The default exchange all_gathers every device's whole two-sided summary tree
 device receives ``(ndev - 1) x S`` rows per force, a volume that grows with the
 device count at fixed particles per device. The LET exchange sends a peer only the
 part of the tree that the cross walk against that peer opens, found EXACTLY by the
-walk itself, in three steps (:func:`let_exchange`):
+walk itself, in request rounds (:func:`let_exchange`):
 
-1. **Coarse trees.** Every device cuts its summary tree where a subtree holds at
-   most ``coarse_particles`` live particles: the TOP is the root and every child of
-   a node above that size; a top node at or below it is a CUT node, whose subtree a
-   peer may request. The tops travel in one all_gather (``coarse_capacity`` rows per
-   device, a small fraction of the tree).
-2. **Requests by the walk.** Every device runs the cross walk between its FULL tree
-   and every peer's top, in the walk's own orientation (lower device first). An
-   internal cut node gets two children: a PROBE (a leaf copy of itself) and a dead
-   slot. The walk splits the cut node exactly when the full walk would split it --
-   the pairs above the cut are the full walk's, decided on the same floats -- and
-   every split leaves at least one output pair with the probe in it (accepted, near,
-   or under the other side's split). A probe in any output pair is a request for
-   that cut node's subtree; the requests travel back in one all_to_all.
-3. **Blocks.** Each device sends every peer its top plus the subtrees that peer
-   requested, with the child links rewritten into the block (an unrequested cut node
-   arrives as a leaf), in one ragged all-to-all.
+1. **Round r** (granularity ``coarse_particles[r]`` live particles, decreasing):
+   each device sends every peer the nodes whose parent is EXPANDED for that peer --
+   above the round's size, or requested by that peer in an earlier round. Expanded
+   is closed upward, so every ancestor of a sent node is expanded too. A sent
+   internal node that is not expanded is a CUT node.
+2. **Request walk.** Each device runs the cross walk between its FULL tree and every
+   block it received, in the walk's own orientation (lower device first), with
+   every cut node given two children: a PROBE (a leaf copy of itself) and a dead
+   slot. Above the cuts the walk is the full walk on the same floats, so it splits
+   a cut node exactly when the full walk would, and every split leaves an output
+   pair holding the probe (accepted, near, or under the other side's split). A
+   probe in an output pair is a request; the requests go back to the senders in a
+   ragged all-to-all aligned with their send buffers.
+3. **Final blocks.** The last round's blocks with every last-round request's
+   subtree whole, in one ragged all-to-all.
 
-**Why the pair sets are the all_gather path's.** The full walk between two trees
-splits only top nodes and nodes inside requested subtrees (step 2 is exact), and
-every such node travels with its children; so the walk over the two blocks visits
-the full walk's pairs, on bitwise-identical rows.
+**Why the pair sets are the all_gather path's.** A node the full walk splits has
+every ancestor split; the highest one that is not expanded was a cut node in some
+round's block and was requested there. So every node the full walk splits travels
+with its children, and the walk over the final blocks visits the full walk's pairs
+on bitwise-identical rows. No bound and no MAC geometry: the requests follow the
+walk's own decisions (an earlier, bound-based version sent every row of a Plummer
+domain: no compact summary of a peer's radix tree bounds which nodes it splits).
 
 **Why momentum still cancels (M1).** Device ``s`` walks (its block for ``d``, the
 block ``d`` sent it), device ``d`` (the block ``s`` sent it, its block for ``s``):
@@ -98,13 +100,14 @@ class LetBlocks(NamedTuple):
         device's first; ``-1`` for this device and for a peer with an empty block.
     send_sizes, recv_sizes : Array
         ``(ndev,)`` rows sent to / received from each peer.
-    send_needed, recv_needed, coarse_needed : Array
-        Rows this device had to send, was sent, and has in its top (exact past the
-        capacities).
+    send_needed, recv_needed : Array
+        Rows this device had to send / was sent (exact past the capacities).
+    coarse_needed : Array
+        The largest request round's rows sent or received.
     requested : Array
-        ``(ndev,)`` cut nodes of this device each peer requested.
+        ``(ndev,)`` cut nodes of this device each peer requested, all rounds.
     request_walk : Any
-        The request walk's result (its pair counts and overflow flags).
+        The last request walk's result (its pair counts and overflow flags).
     overflow : Array
         A buffer overflowed or a request walk lost pairs (any device): the blocks
         may miss rows the walk opens.
@@ -192,33 +195,95 @@ def _parents(left: Array, right: Array, internal: Array) -> Array:
     )
 
 
-def _probes_in(a: Array, b: Array, n: Array, *, S: int, C: int, dead: int) -> Array:
-    """The probe slots (``peer x C + top slot``) of a pair list's ends, ``-1`` else.
+def _round_blocks(
+    rows: Array,
+    valid: Array,
+    internal: Array,
+    left: Array,
+    right: Array,
+    parent: Array,
+    expanded: Callable[[Array], Array],
+    full_below: Callable[[Array], Array],
+    me: Array,
+    *,
+    ndev: int,
+    capacity: int,
+    tail: Callable[[Array, Array], Array],
+) -> tuple[Array, Array, Array]:
+    """Lay out one block per peer: the nodes whose parent is expanded for it.
 
     Parameters
     ----------
-    a, b : Array
-        ``(P,)`` the pairs' ends in the request walk's index space.
-    n : Array
-        Live prefix length.
-    S, C, dead : int
-        This device's rows, the top capacity and the dead row. Static.
+    rows : Array
+        ``(S, k)`` summary rows.
+    valid, internal : Array
+        ``(S,)`` summary nodes, and those with children.
+    left, right, parent : Array
+        ``(S,)`` links.
+    expanded : Callable[[Array], Array]
+        ``expanded(d) -> (S,)`` nodes whose children peer ``d`` gets. Closed
+        upward (an expanded node's parent is expanded), so a node travels when its
+        parent is expanded: every ancestor then is.
+    full_below : Callable[[Array], Array]
+        ``full_below(d) -> (S,)`` nodes that travel whatever their parent (inside
+        a subtree ``d`` gets whole).
+    me : Array
+        This device's index.
+    ndev : int
+        Mesh size. Static.
+    capacity : int
+        Send buffer rows. Static.
+    tail : Callable[[Array, Array], Array]
+        ``tail(d, sent) -> (S, m)`` extra columns per row.
 
     Returns
     -------
-    Array
-        ``(2 P,)`` int32.
+    tuple[Array, Array, Array]
+        ``(buffer, needed, sizes)``: rows with the links rewritten into the block
+        (``-1`` where the children stay home), then the summary index, then
+        ``tail``; the rows the blocks needed; per peer sizes.
     """
     idx = jnp.int32
-    live = jnp.arange(jnp.asarray(a).shape[0]) < n
-    block = 2 * C
-    out = []
-    for end in (a, b):
-        e = jnp.asarray(end).astype(idx)
-        off = e - S
-        is_probe = live & (e >= S) & (e < dead) & ((off % block) >= C)
-        out.append(jnp.where(is_probe, (off // block) * C + (off % block) - C, -1))
-    return jnp.concatenate(out)
+    S = int(rows.shape[0])
+    dtype = rows.dtype
+    orig_col = jnp.arange(S, dtype=idx).astype(dtype)[:, None]
+    width = int(rows.shape[1]) + 1 + int(tail(jnp.asarray(0, idx), valid).shape[1])
+
+    def per_peer(d: Array, carry: tuple) -> tuple:
+        buf, offset, sizes = carry
+        ex = expanded(d)
+        sent = valid & ((parent < 0) | ex[jnp.maximum(parent, 0)] | full_below(d))
+        sent = sent & (d != me)
+        pos = jnp.cumsum(sent, dtype=idx) - 1
+        size = jnp.sum(sent, dtype=idx)
+        go = sent & internal & sent[jnp.maximum(left, 0)]
+        new_left = jnp.where(go, pos[jnp.maximum(left, 0)], -1).astype(dtype)
+        new_right = jnp.where(go, pos[jnp.maximum(right, 0)], -1).astype(dtype)
+        out = jnp.concatenate(
+            [
+                rows[:, :_COL_LEFT],
+                new_left[:, None],
+                new_right[:, None],
+                rows[:, _COL_ACTIVE:],
+                orig_col,
+                tail(d, sent).astype(dtype),
+            ],
+            axis=1,
+        )
+        slot = jnp.where(sent, offset + pos, capacity)
+        buf = buf.at[slot].set(out, mode="drop")
+        return buf, offset + size, sizes.at[d].set(size)
+
+    return jax.lax.fori_loop(
+        0,
+        int(ndev),
+        per_peer,
+        (
+            jnp.zeros((int(capacity), width), dtype),
+            jnp.asarray(0, idx),
+            jnp.zeros((int(ndev),), idx),
+        ),
+    )
 
 
 def let_exchange(
@@ -229,8 +294,7 @@ def let_exchange(
     ndev: int,
     send_capacity: int,
     recv_capacity: int,
-    coarse_capacity: int,
-    coarse_particles: int,
+    coarse_particles: tuple[int, ...],
     axis_name: str,
     walk: Callable[..., Any],
     error_order: int = 0,
@@ -248,12 +312,13 @@ def let_exchange(
     ndev : int
         Mesh size. Static.
     send_capacity, recv_capacity : int
-        Static row capacities of the send and receive buffers.
-    coarse_capacity : int
-        Static rows of a device's top (the coarse tree every peer gathers).
-    coarse_particles : int
-        A subtree holding at most this many live particles is requested whole or
-        not at all. Static.
+        Static row capacities of the send and receive buffers (every round's
+        blocks are part of the final ones).
+    coarse_particles : tuple[int, ...]
+        The request rounds' granularities, decreasing: in round ``r`` a node above
+        ``coarse_particles[r]`` live particles, or one a peer requested earlier,
+        has its children sent; the others are CUT nodes a peer may request. The
+        last round's requests bring whole subtrees. Static.
     axis_name : str
         Mesh axis.
     walk : Callable[..., Any]
@@ -265,11 +330,11 @@ def let_exchange(
     Returns
     -------
     LetBlocks
-        The blocks and the walk table over them.
+        The final blocks and the walk table over them.
     """
     idx = jnp.int32
     S, k = int(rows.shape[0]), int(rows.shape[1])
-    T, R, C = int(send_capacity), int(recv_capacity), int(coarse_capacity)
+    T, R = int(send_capacity), int(recv_capacity)
     nd = int(ndev)
     dtype = rows.dtype
     p = int(error_order)
@@ -278,169 +343,178 @@ def let_exchange(
     at = jnp.arange(S, dtype=idx)
     dev = jnp.arange(nd, dtype=idx)
     lower_mine = me < dev
+    levels = tuple(int(m) for m in coarse_particles)
+    if not levels or any(b >= a for a, b in zip(levels, levels[1:])):
+        raise ValueError(f"coarse_particles={levels}: one or more, decreasing")
 
     left = jnp.round(rows[:, _COL_LEFT]).astype(idx)
     right = jnp.round(rows[:, _COL_RIGHT]).astype(idx)
     internal = valid & (left >= 0)
     parent = _parents(left, right, internal)
     count = jnp.round(rows[:, _COL_COUNT]).astype(idx)
+    # opened[d, x]: peer d's walk splits my node x (a cut node it requested)
+    opened = jnp.zeros((nd, S), bool)
+    lost = jnp.asarray(False)
+    rounds_needed = []
+    requested = jnp.zeros((nd,), idx)
+    req_walk = None
 
-    # ---- 1. the top: the root and every child of a node above the size --------
-    with jax.named_scope("cross_let_top"):
-        big = internal & (count > int(coarse_particles))
-        top = valid & ((parent < 0) | big[jnp.maximum(parent, 0)])
-        cut = top & internal & ~big
-        tpos = jnp.cumsum(top, dtype=idx) - 1
-        coarse_needed = jnp.sum(top, dtype=idx)
-        tslot = jnp.where(top & (tpos < C), tpos, C)
-        c_left = jnp.where(big, tpos[jnp.maximum(left, 0)], -1)
-        c_right = jnp.where(big, tpos[jnp.maximum(right, 0)], -1)
-        coarse_rows = jnp.concatenate(
-            [
-                rows[:, :_COL_LEFT],
-                c_left.astype(dtype)[:, None],
-                c_right.astype(dtype)[:, None],
-                rows[:, _COL_ACTIVE:],
-                cut.astype(dtype)[:, None],
-            ],
-            axis=1,
-        )
-        coarse = jnp.zeros((C, k + 1), dtype).at[tslot].set(coarse_rows, mode="drop")
-        n_top = jnp.minimum(coarse_needed, C)
-    tops = jax.lax.all_gather(coarse, axis_name, tiled=False)
-    n_tops = jax.lax.all_gather(n_top, axis_name, tiled=False)
+    for r, m in enumerate(levels):
+        with jax.named_scope(f"cross_let_round{r}"):
+            big = internal & (count > m)
 
-    # ---- 2. the request walk: my full tree against every peer's top -----------
-    with jax.named_scope("cross_let_request"):
-        # index space: [my S rows | per peer: C top rows, C probes | one dead row]
-        block = 2 * C
-        base = S + dev * block
-        dead = S + nd * block
-        top_live = jnp.arange(C, dtype=idx)[None, :] < n_tops[:, None]
-        t_live = top_live & (dev != me)[:, None]
-        t_cut = t_live & (tops[..., k] > 0.5)
-        t_l = jnp.round(tops[..., _COL_LEFT]).astype(idx)
-        t_r = jnp.round(tops[..., _COL_RIGHT]).astype(idx)
-        probe = base[:, None] + C + jnp.arange(C, dtype=idx)[None, :]
-        top_left = jnp.where(t_cut, probe, jnp.where(t_l >= 0, base[:, None] + t_l, -1))
-        top_right = jnp.where(t_cut, dead, jnp.where(t_r >= 0, base[:, None] + t_r, -1))
-        none = jnp.full((nd, C), -1, idx)
-        tail = jnp.full((1,), -1, idx)
-        q_left = jnp.concatenate(
-            [
-                jnp.where(internal, left, -1),
-                jnp.stack([top_left, none], 1).reshape(-1),
-                tail,
-            ]
-        )
-        q_right = jnp.concatenate(
-            [
-                jnp.where(internal, right, -1),
-                jnp.stack([top_right, none], 1).reshape(-1),
-                tail,
-            ]
-        )
-        # a probe is a leaf copy of its cut node; live only under a cut node
-        top_rows = tops[..., :k]
-        q_rows = jnp.concatenate(
-            [
+            def expanded(d: Array, big: Array = big, opened: Array = opened) -> Array:
+                return big | opened[d]
+
+            def no_subtree(d: Array) -> Array:
+                return jnp.zeros((S,), bool)
+
+            def cut_col(
+                d: Array, sent: Array, big: Array = big, opened: Array = opened
+            ) -> Array:
+                return (sent & internal & ~(big | opened[d]))[:, None]
+
+            buf, needed, sizes = _round_blocks(
                 rows,
-                jnp.stack([top_rows, top_rows], 1).reshape(nd * block, k),
-                jnp.zeros((1, k), dtype),
-            ],
-            axis=0,
-        )
-        t_act = t_live & (tops[..., _COL_ACTIVE] > 0.5)
-        q_active = jnp.concatenate(
-            [
-                valid & (rows[:, _COL_ACTIVE] > 0.5),
-                jnp.stack([t_act, t_act & t_cut], 1).reshape(-1),
-                jnp.zeros((1,), bool),
-            ]
-        )
-        alive = (dev != me) & (n_tops > 0) & valid[0]
-        root_mine = jnp.zeros((nd,), idx)
-        seed_a = jnp.where(alive, jnp.where(lower_mine, root_mine, base), -1)
-        seed_b = jnp.where(alive, jnp.where(lower_mine, base, root_mine), -1)
-        req_walk = walk(
-            q_left,
-            q_right,
-            q_rows[:, 0:3],
-            q_rows[:, _COL_RADIUS],
-            q_active,
-            q_rows[:, _COL_TABLE : _COL_TABLE + width] if p > 0 else None,
-            seed_a.astype(idx),
-            seed_b.astype(idx),
-        )
-        kw = dict(S=S, C=C, dead=dead)
-        hits = jnp.concatenate(
-            [
-                _probes_in(req_walk.far_a, req_walk.far_b, req_walk.far_count, **kw),
-                _probes_in(req_walk.near_a, req_walk.near_b, req_walk.near_count, **kw),
-            ]
-        )
-        span = nd * C
-        asked = (
-            jnp.zeros((span,), idx)
-            .at[jnp.where(hits >= 0, hits, span)]
-            .set(1, mode="drop")
-            .reshape(nd, C)
-        )
-        req_overflow = (
-            req_walk.far_overflow | req_walk.near_overflow | req_walk.queue_overflow
-        )
-    # row d of `asked` goes to device d; row r of `got` came from device r
-    got = jax.lax.all_to_all(asked, axis_name, 0, 0, tiled=True)
-
-    # ---- 3. the blocks: the top plus every requested subtree ------------------
-    with jax.named_scope("cross_let_pack"):
-        # each node's top ancestor (itself in the top): pointer doubling
-        rounds = max(1, int(math.ceil(math.log2(max(S, 2)))))
-        jump = jnp.where(top | (parent < 0), at, parent)
-        for _ in range(rounds):
-            jump = jump[jump]
-        anc_slot = jnp.where(valid, jnp.minimum(tpos[jump], C), C)
-        orig_col = at.astype(dtype)[:, None]
-
-        def per_peer(d: Array, carry: tuple) -> tuple:
-            buf, offset, sizes = carry
-            wanted = jnp.concatenate([got[d] > 0, jnp.zeros((1,), bool)])
-            sent = valid & (top | wanted[anc_slot]) & (d != me)
-            pos = jnp.cumsum(sent, dtype=idx) - 1
-            size = jnp.sum(sent, dtype=idx)
-            go = sent & internal & sent[jnp.maximum(left, 0)]
-            new_left = jnp.where(go, pos[jnp.maximum(left, 0)], -1).astype(dtype)
-            new_right = jnp.where(go, pos[jnp.maximum(right, 0)], -1).astype(dtype)
-            out = jnp.concatenate(
-                [
-                    rows[:, :_COL_LEFT],
-                    new_left[:, None],
-                    new_right[:, None],
-                    rows[:, _COL_ACTIVE:],
-                    orig_col,
-                ],
-                axis=1,
+                valid,
+                internal,
+                left,
+                right,
+                parent,
+                expanded,
+                no_subtree,
+                me,
+                ndev=nd,
+                capacity=T,
+                tail=cut_col,
             )
-            slot = jnp.where(sent, offset + pos, T)
-            buf = buf.at[slot].set(out, mode="drop")
-            return buf, offset + size, sizes.at[d].set(size)
+            recv, recv_sizes, _ = ragged_all_to_all_exchange(
+                buf, sizes, output_capacity=R, axis_name=axis_name
+            )
+            recv_sizes = recv_sizes.astype(idx)
+            rounds_needed.append(jnp.maximum(needed, jnp.sum(recv_sizes)))
+            lost = lost | (needed > T) | (jnp.sum(recv_sizes) > R)
+            # the request walk: [my S rows | the R received rows | R probes | dead]
+            r_peer, r_live, r_start = _block_slots(recv_sizes, R)
+            first = S + r_start[jnp.minimum(r_peer, nd - 1)]
+            dead = S + 2 * R
+            is_cut = r_live & (recv[:, k + 1] > 0.5)
+            probe = S + R + jnp.arange(R, dtype=idx)
 
-        buf, send_needed, send_sizes = jax.lax.fori_loop(
-            0,
-            nd,
-            per_peer,
-            (jnp.zeros((T, k + 1), dtype), jnp.asarray(0, idx), jnp.zeros((nd,), idx)),
+            def link(col: int, cut_to: Array) -> Array:
+                local = jnp.round(recv[:, col]).astype(idx)
+                out = jnp.where(r_live & (local >= 0), first + local, -1)
+                return jnp.where(is_cut, cut_to, out)
+
+            none = jnp.full((R,), -1, idx)
+            q_left = jnp.concatenate(
+                [jnp.where(internal, left, -1), link(_COL_LEFT, probe), none, none[:1]]
+            )
+            q_right = jnp.concatenate(
+                [
+                    jnp.where(internal, right, -1),
+                    link(_COL_RIGHT, jnp.full((R,), dead, idx)),
+                    none,
+                    none[:1],
+                ]
+            )
+            got_rows = recv[:, :k]
+            q_rows = jnp.concatenate(
+                [rows, got_rows, got_rows, jnp.zeros((1, k), dtype)], axis=0
+            )
+            r_act = r_live & (recv[:, _COL_ACTIVE] > 0.5)
+            q_active = jnp.concatenate(
+                [
+                    valid & (rows[:, _COL_ACTIVE] > 0.5),
+                    r_act,
+                    r_act & is_cut,
+                    jnp.zeros((1,), bool),
+                ]
+            )
+            alive = (dev != me) & (recv_sizes > 0) & valid[0] & (r_start < R)
+            root_peer = S + r_start
+            root_mine = jnp.zeros((nd,), idx)
+            seed_a = jnp.where(alive, jnp.where(lower_mine, root_mine, root_peer), -1)
+            seed_b = jnp.where(alive, jnp.where(lower_mine, root_peer, root_mine), -1)
+            req_walk = walk(
+                q_left,
+                q_right,
+                q_rows[:, 0:3],
+                q_rows[:, _COL_RADIUS],
+                q_active,
+                q_rows[:, _COL_TABLE : _COL_TABLE + width] if p > 0 else None,
+                seed_a.astype(idx),
+                seed_b.astype(idx),
+            )
+            hit = jnp.zeros((R + 1,), idx)
+            for a, b, n in (
+                (req_walk.far_a, req_walk.far_b, req_walk.far_count),
+                (req_walk.near_a, req_walk.near_b, req_walk.near_count),
+            ):
+                live = jnp.arange(jnp.asarray(a).shape[0]) < n
+                for end in (a, b):
+                    e = jnp.asarray(end).astype(idx)
+                    probe_hit = live & (e >= S + R) & (e < dead)
+                    hit = hit.at[jnp.where(probe_hit, e - S - R, R)].set(1)
+            lost = lost | req_walk.far_overflow | req_walk.near_overflow
+            lost = lost | req_walk.queue_overflow
+            # the requests back to their senders, aligned with their send buffers
+            back, _, _ = ragged_all_to_all_exchange(
+                hit[:R, None].astype(dtype),
+                recv_sizes,
+                output_capacity=T,
+                axis_name=axis_name,
+            )
+            s_peer, s_live, _ = _block_slots(sizes, T)
+            asked = s_live & (back[:, 0] > 0.5) & (buf[:, k + 1] > 0.5)
+            node = jnp.round(buf[:, k]).astype(idx)
+            opened = opened.at[
+                jnp.where(asked, s_peer, nd), jnp.where(asked, node, 0)
+            ].set(True, mode="drop")
+            requested = requested + jax.ops.segment_sum(
+                asked.astype(idx), jnp.where(asked, s_peer, nd), nd + 1
+            )[:nd].astype(idx)
+
+    # ---- the final blocks: the last round's, the last requests' subtrees whole --
+    with jax.named_scope("cross_let_pack"):
+        last = levels[-1]
+        big = internal & (count > last)
+        top = valid & ((parent < 0) | big[jnp.maximum(parent, 0)])
+        # each node's top ancestor at the last granularity: pointer doubling
+        jump = jnp.where(top | (parent < 0), at, parent)
+        for _ in range(max(1, int(math.ceil(math.log2(max(S, 2)))))):
+            jump = jump[jump]
+
+        def expanded_final(d: Array) -> Array:
+            return big | opened[d]
+
+        def whole(d: Array) -> Array:
+            return opened[d][jump] & ~top
+
+        def no_tail(d: Array, sent: Array) -> Array:
+            return jnp.zeros((S, 0), dtype)
+
+        buf, send_needed, send_sizes = _round_blocks(
+            rows,
+            valid,
+            internal,
+            left,
+            right,
+            parent,
+            expanded_final,
+            whole,
+            me,
+            ndev=nd,
+            capacity=T,
+            tail=no_tail,
         )
-        requested = jnp.sum(got, axis=1, dtype=idx)
     recv, recv_sizes, _ = jax.named_call(
         ragged_all_to_all_exchange, name="cross_exchange_let"
     )(buf, send_sizes, output_capacity=R, axis_name=axis_name)
     recv_sizes = recv_sizes.astype(idx)
     recv_needed = jnp.sum(recv_sizes, dtype=idx)
-    # a short top or a lost request hides rows from a PEER: everyone flags
-    lost = jax.lax.pmax(
-        ((coarse_needed > C) | req_overflow).astype(idx), axis_name
-    ).astype(bool)
+    # a lost request hides rows from a PEER: everyone flags
+    lost = jax.lax.pmax(lost.astype(idx), axis_name).astype(bool)
     overflow = (send_needed > T) | (recv_needed > R) | lost
 
     # ---- the final walk's table over [send | recv] -----------------------------
@@ -456,7 +530,7 @@ def let_exchange(
         ]
     )
 
-    def link(col: int) -> Array:
+    def final_link(col: int) -> Array:
         local = jnp.round(both[:, col]).astype(idx)
         out = jnp.where(live & (local >= 0), first + local, -1)
         return jnp.where(out < T + R, out, -1)
@@ -467,8 +541,8 @@ def let_exchange(
     seed2_a = jnp.where(alive2, jnp.where(lower_mine, s_start, root_peer), -1)
     seed2_b = jnp.where(alive2, jnp.where(lower_mine, root_peer, s_start), -1)
     return LetBlocks(
-        left=link(_COL_LEFT),
-        right=link(_COL_RIGHT),
+        left=final_link(_COL_LEFT),
+        right=final_link(_COL_RIGHT),
         centers=both[:, 0:3],
         radii=both[:, _COL_RADIUS],
         active=live & (both[:, _COL_ACTIVE] > 0.5),
@@ -482,7 +556,7 @@ def let_exchange(
         recv_sizes=recv_sizes,
         send_needed=send_needed,
         recv_needed=recv_needed,
-        coarse_needed=coarse_needed,
+        coarse_needed=jnp.max(jnp.stack(rounds_needed)),
         requested=requested,
         request_walk=req_walk,
         overflow=overflow,

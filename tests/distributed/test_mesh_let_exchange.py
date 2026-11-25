@@ -53,9 +53,9 @@ pytestmark = [
 NDEV = {"dehnen": 4, "dehnen_error": 2}
 #: particles per device (the momentum test's 1024)
 PER_DEVICE = 1024
-#: the LET's request granularity (``CrossCapacities.let_coarse_particles``): small,
-#: so the toy trees are mostly requested subtree by subtree
-COARSE_PARTICLES = 2 * 64
+#: the LET's request rounds (``CrossCapacities.let_coarse_particles``): small, so
+#: the toy trees are mostly requested subtree by subtree
+COARSE_PARTICLES = (8 * 64, 64)
 
 _RECORD = (
     "walk_far_a",
@@ -131,8 +131,7 @@ def test_the_let_exchange_is_the_all_gather_exchange(mac):
     caps = caps._with(
         let_send_cap=(ndev - 1) * caps.max_summary_nodes,
         let_recv_cap=(ndev - 1) * caps.max_summary_nodes,
-        let_coarse_cap=caps.max_summary_nodes,
-        # subtrees of at most two leaves' particles: the requests decide most rows
+        # small subtrees: the requests decide most rows of the toy trees
         let_coarse_particles=COARSE_PARTICLES,
     )
     solver = tcm._solver(mac)
