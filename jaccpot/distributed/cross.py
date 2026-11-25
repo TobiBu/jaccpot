@@ -1597,7 +1597,7 @@ def _let_rows_by_peer(
 
 
 def _symmetric_exchange(
-    gathered: Array,
+    gathered: Optional[Array],
     me: Array,
     nodes: Array,
     tree: Any,
@@ -1632,8 +1632,9 @@ def _symmetric_exchange(
 
     Parameters
     ----------
-    gathered : Array
-        ``(ndev, S, 8)`` every device's two-sided summary rows (with counts).
+    gathered : Optional[Array]
+        ``(ndev, S, 8)`` every device's two-sided summary rows (with counts);
+        ``None`` with ``let``.
     me : Array
         This device's index along the mesh axis.
     nodes : Array
@@ -3394,7 +3395,7 @@ def make_cross_hook(
         if symmetric:
             order = 0 if criterion is None else int(criterion.order)
             sym = _symmetric_exchange(
-                gathered,  # pyright: ignore[reportArgumentType]
+                gathered,
                 me,
                 block_nodes,
                 tree,
