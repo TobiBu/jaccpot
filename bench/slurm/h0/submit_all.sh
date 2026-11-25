@@ -69,6 +69,8 @@ JOBS=(
   "a3|1|1|04:00:00|yes|A3: summed vs legacy drift at 1e8 and 2.6e5"
   "hh|1|1|03:00:00|yes|HH2a: target_points vs the galaxy step at 1e8 x 1e4-1e6, the 1e8 back-reaction"
   "hh3|1|1|04:00:00|yes|HH3a: the K-cluster slow step (K 10 x 1e4, 150 x 1e3) vs the galaxy step at 1e8"
+  "hh4a|1|1|05:00:00|yes|HH4a: the internal direct sum's share of a slow step, fixed vs adaptive steps, M 1e3-1e5"
+  "hh4c|1|1|07:00:00|yes|HH4c: the clusters on the mesh, one process on 1/2/4 cards, 1e7-2e8 galaxy + K clusters"
   "m1_node1|1|$G|02:00:00|yes|M1: momentum local vs cross, 1 GPU and 4 x 1 GPU"
   "m1_node2|2|$G|01:30:00|yes|M1: momentum local vs cross, 8 x 1 GPU over two nodes"
   "m2g_node1|1|$G|03:30:00|yes|M2G: 4 processes x 1 GPU vs 1 x 4, bitwise + timing"
@@ -143,7 +145,14 @@ if [ "${SMOKE:-}" = 1 ]; then
     start=$SECONDS
     if SMOKE=1 H0_JACCPOT=$H0_JACCPOT H0_RUN=$H0_RUN H0_JOB=$name H0_GPUS_PER_NODE=$gpn \
       bash "$H0_DIR/jobs/$name.sh" > "$H0_RUN/logs/$name.out" 2>&1; then
-      echo "    ok in $((SECONDS - start)) s (log $H0_RUN/logs/$name.out)"
+      # the per-row benches record a failed row as a FAILED line and go on (the job still exits 0)
+      nf=$(grep -c FAILED "$H0_RUN/logs/$name.out" || true)
+      if [ "$nf" -gt 0 ]; then
+        echo "    rows FAILED: $nf FAILED line(s) in $((SECONDS - start)) s (log $H0_RUN/logs/$name.out)"
+        failed+=("$name")
+      else
+        echo "    ok in $((SECONDS - start)) s (log $H0_RUN/logs/$name.out)"
+      fi
     else
       rc=$?
       echo "    FAILED rc=$rc in $((SECONDS - start)) s (log $H0_RUN/logs/$name.out)"
