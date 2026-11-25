@@ -2231,7 +2231,8 @@ CPU, forced host devices (this host, loaded); the full table is nornax `docs/hyb
    crossing a fixed domain boundary moves as one block and the run is bitwise the run on a partition it never
    crosses. The fused mesh lane on 2 devices (`FusedMeshForce` + `targets=` + `MortonPartition`): at the same
    positions the stars' slow acceleration vs fp64 direct 2.2e-3 (one card 2.7e-3), the galaxy's 2.9e-3 (2.7e-3);
-   membership identical at the first stripping edge; ledgered drift and momentum in the card's class. 4 devices:
+   membership identical at every edge (empty slots masked out of the target walks); ledgered drift and momentum in
+   the card's class. 4 devices:
    the same force class; the ledgered energy by fp64 direct sums of the same states drifts 3.0e-7 (card 3.6e-7),
    while the runner's FMM energy diagnostic shows a -1.8e-5 offset from the first stripping edge on: term by term it
    is all `W_gg`, the mesh potential of the galaxy rows (`mesh_potential_shard`; FMM - direct -3.0e-6 at the start,
