@@ -145,8 +145,10 @@ if [ "${SMOKE:-}" = 1 ]; then
     start=$SECONDS
     if SMOKE=1 H0_JACCPOT=$H0_JACCPOT H0_RUN=$H0_RUN H0_JOB=$name H0_GPUS_PER_NODE=$gpn \
       bash "$H0_DIR/jobs/$name.sh" > "$H0_RUN/logs/$name.out" 2>&1; then
-      # the per-row benches record a failed row as a FAILED line and go on (the job still exits 0)
-      nf=$(grep -c FAILED "$H0_RUN/logs/$name.out" || true)
+      # the per-row benches record a failed row as a FAILED line and go on (the job still exits 0); s1b times
+      # the GPU kernels themselves, so on the CPU every kernel "fails" by design (the preflight's rule too)
+      nf=0
+      [ "$name" = s1b ] || nf=$(grep -c FAILED "$H0_RUN/logs/$name.out" || true)
       if [ "$nf" -gt 0 ]; then
         echo "    rows FAILED: $nf FAILED line(s) in $((SECONDS - start)) s (log $H0_RUN/logs/$name.out)"
         failed+=("$name")
