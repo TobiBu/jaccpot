@@ -2319,8 +2319,8 @@ autocvd, A and A-vs-A). B/p, far pairs and L3's rel-L2 reproduce H1's exactly; w
     a galaxy-caps re-plan), pins, hh, hh3, s1b (its 8 FAILED lines are the GPU kernels it times, failing on the CPU
     by design), m1_node1/2, scaling_a (6669 s), m2g_node1 (4832 s) / node2, scaling_mp, mesc_node1/2, m3_node1/4
     (again after the m3 fix: 885 / 591 s), scaling_b (7495 s), escaper, a1, a3, a4 (4629 s), grad (10,164 s),
-    forward (3476 s); auto and mgrad were still compiling when the PR opened (their preflight entries had passed
-    on the CPU and on the GPU); the PR records their result.
+    forward (3476 s), mgrad (19,921 s), auto (24,177 s: one row per argument pattern, the level-8 seggrad row
+    13,926 s). `submit_all.sh`'s own SMOKE loop (stream A) ended `failed: none`; the memory guard never fired.
 - **GPU preflight** (local shared cards via `on-free-card`, functional only, no timing claims; `H0_LOCAL_SRUN=1`):
   **20/20 entries ok** -- on card 6: pins, grad (step / nested / offload at 2e5), s1b, auto, forward (with
   `vgrad`), a3, a4, escaper, a1, hh, hh3, hh4a; on two cards: scaling, scaling_mp, mgrad, m1, m2g, mesc, hh4c (the
