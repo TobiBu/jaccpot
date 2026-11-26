@@ -2253,3 +2253,91 @@ CPU, forced host devices (this host, loaded); the full table is nornax `docs/hyb
   device holding it, both box shapes).
 - `tests/distributed/test_mesh_force_targets.py` (`distributed_segment`): the hook leaves the force bitwise, the
   partial fields summed over two devices are the field of all sources at the points.
+
+## H2 — the HoreKa bundle on the mains of 2026-11-25 (wave 9, 2026-11-25)
+
+Nothing had run on HoreKa yet; since H1 audited the bundle (2026-11-10) jaccpot main moved through waves 6-8 and
+the bundle gained jobs hh, hh3, m3_node1/4. H2 moved `bench/slurm/h0/` to today's mains, audited every job, added
+the wave-8 jobs and re-verified it end to end. Library code is untouched (`git diff main -- jaccpot/` empty); only
+`bench/` and `docs/` changed. `bench/slurm/h0/README.md` stays THE guide; the runbook is in it and in the PR.
+
+**Pins.** yggdrax 24de6c3 (jaccpot's CI installs yggdrax main), nornax e9097126 for EVERY job, mimirax 339c041d,
+Odisseo `jaccpot-integration` a0e8848 (vepe99/Odisseo#49 still open). The separate `src/nornax-hh3` worktree of
+job hh3 (`H0_NORNAX_HH3_COMMIT`) is retired: its last pin was e9097126 itself. `requirements.txt` unchanged (jax
+0.11.2; jaccpot `>=0.11.2,<0.12` and `orbax-checkpoint>=0.12.9,<0.13`, the siblings `jax>=0.8`). The pre-#104 A-B
+arm stays: aaf8d6d's `_cell_partition.py` is still the only change to that file since #104, drops into 24de6c3,
+imports, and a 4096-particle CPU step in the bundle's venv gives main's far-pair count on both arms (87,704, as on
+f722c24).
+
+**Audit against today's code.**
+- No bench script or sbatch H1 audited changed since (`git diff 828c79c1 main -- bench/` adds files only), so their
+  arguments and H1's parser check stand. The jobs added since (hh, hh3, m3_node1/4) were checked against their
+  parsers' `--help` (choices included), as were their smoke `ROWS`.
+- The library's changes since H1 are additive with defaults kept (`target_points`, the carried runner, donated
+  segments only on the carried path, M3, the mesh's carried scheme; nornax's `skip_massless=False`); the default
+  programs stayed identity-checked wave by wave. yggdrax f722c24 -> 24de6c3 adds a segment-min/max path for leaf
+  bounds; the L pins show the fused lane's counts and B/p unchanged (below).
+- Every `JACCPOT_*` knob a job sets is still read, except two inert `JACCPOT_STATIC_STRICT_*` switches that the
+  vendored Odisseo harness (`compare_force.py`) sets; X6 removed them before H1 (harmless, left as vendored).
+- Fixed: `summarize.py` did not know jobs hh, hh3, m3_node1/4 (no status line, no rows). Section 9 lists them and
+  the new jobs; the status table and the SMOKE loop now flag a job whose log has FAILED row lines (the per-row
+  benches record a failed row and exit 0).
+- The grad job's CPU smoke leaves out `r_8e6_T16_grad_offload` (H1: ~390 GB compile, a 646 GB trace).
+
+**New jobs** (`bench/hybrid_clusters_runs.py`, `bench/slurm/hh/hybrid_clusters_runs.sbatch`, from HH4a's item-4 and
+HH4c's GPU-gate scripts; HH4c's/HH4a's systems: Hernquist galaxy + Plummer clusters on circular orbits):
+- `hh4a` (1 x 1, 5 h): the O(K M^2) internal sum's share of a slow step, fixed `n_sub` 16 vs `AarsethSteps(eta
+  0.02)`, M = 1e3 (K 1, 10) / 1e4 / 1e5 on a 1e6 galaxy and 1e5 / 150 x 1e3 on 1e8; `coupling` fmm vs none at 1e5.
+- `hh4c` (1 x 1 process over 4 cards, 7 h): `ProductionRunner(mesh=)` + `MeshClustersRunnerScheme` on 1 / 2 / 4
+  cards vs the single-card `ClustersRunnerScheme`: strong and weak at 1e7 (per card) + 10 x 1e4, the production
+  1e8 + 150 x 1e3 on 4 and 2 cards, 2e8 on 4 as a ceiling probe; start / first-segment / steady-step walls,
+  stripping, re-plans, owners, each card's peak.
+- Preflight entries hh4a and hh4c (20 entries now). Budget: the default set ~70.5 node-hours expected, 136 at
+  worst; the multi-node core M4/M5 wait on (`pins,scaling_mp,m1_*,m2g_*,mesc_*,m3_*`) ~21 expected, 41 at worst.
+
+**Local reference** (`local_reference.json`: L1-L3 at the new pins, shared A100-PCIE-40GB cards 3 and 6 via
+autocvd, A and A-vs-A). B/p, far pairs and L3's rel-L2 reproduce H1's exactly; walls are a ratio check only.
+
+| pin | step ms min (A / A-b) | B/p | far pairs | L3 force rel-L2 |
+| --- | --- | --- | --- | --- |
+| L1 (8e6 clipped Plummer) | 77.65 / 76.82 | 315.74 | 39,093,974 | - |
+| L2 (1e8) | 858.97 / 851.80 | 256.77 | 402,173,018 | - |
+| L3 (25M disc + bulge) | 240.77 / 239.50 | 255.36 | 94,801,662 | 4.179115652e-4 |
+
+**Gates.**
+- `git diff main -- jaccpot/` empty.
+- `setup_env.sh` end to end on a fresh HoreKa-layout root (`stage_data.sh` into it: 26 files, 12.4 GB, sha256 ok):
+  rc 0 in 255 s; exact wheels, `pip check` clean, the CUDA plugin in the venv, the clones at their pins, the
+  pre-#104 arm.
+- `submit_all.sh --dry-run --all`: 25 sbatch lines (account, partition, nodes 1 / 2 / 4, tasks per node 1 / 4,
+  `--time`, exports, every job `afterok` on the preflight) plus a4's IC job, 21 arrays and summary; worst case 136
+  node-hours for the default set.
+- **CPU smoke** (`SMOKE=1`, N 2048-8192, the setup_env root, forced CPU devices, multi-process steps as local
+  processes on gloo; streams in parallel as H1 ran them, each job exactly as the SMOKE loop runs it; run `h2smoke`):
+  - the preflight: **20/20 entries ok** (37,648 s; auto's entry alone ~2.5 h);
+  - every job rc 0 with no FAILED row: hh4a 864 s, hh4c 1222 s (2-device mesh: owners [0, 0, 1], rows migrated,
+    a galaxy-caps re-plan), pins, hh, hh3, s1b (its 8 FAILED lines are the GPU kernels it times, failing on the CPU
+    by design), m1_node1/2, scaling_a (6669 s), m2g_node1 (4832 s) / node2, scaling_mp, mesc_node1/2, m3_node1/4
+    (again after the m3 fix: 885 / 591 s), scaling_b (7495 s), escaper, a1, a3, a4 (4629 s), grad (10,164 s),
+    forward (3476 s); auto and mgrad were still compiling when the PR opened (their preflight entries had passed
+    on the CPU and on the GPU); the PR records their result.
+- **GPU preflight** (local shared cards via `on-free-card`, functional only, no timing claims; `H0_LOCAL_SRUN=1`):
+  **20/20 entries ok** -- on card 6: pins, grad (step / nested / offload at 2e5), s1b, auto, forward (with
+  `vgrad`), a3, a4, escaper, a1, hh, hh3, hh4a; on two cards: scaling, scaling_mp, mgrad, m1, m2g, mesc, hh4c (the
+  mesh over 2 GPUs: clusters on both devices, rows migrated, 3 stripped, no re-plan, ~1 GB per card) and m3.
+  It found one real defect: `bench/m3_checkpoint_io.py` was the only multi-GPU bench without the NCCL
+  ragged-exchange flags (XLA's one-shot kernel; the library warns it is 4-6x slower). The first m3 entry sat for
+  61 min (rank 0 spinning, rank 1 asleep, GPUs idle) and I stopped it; with the flags it passed in 554 s. The m3
+  bench and the new hybrid bench now also let py-spy read their stacks (`ptrace_scope` 1 refused it here).
+- jaccpot CI: `test_shards.py check` rc 0; the bench-tooling shard (CI's selection) 157 passed; the top-level
+  `tests/unit` guards with `JACCPOT_RUNTIME_TYPECHECK=1` rc 0 (543 passed); pre-commit clean on every touched file.
+
+**Open issues.**
+- `site.env`: `H0_ACCOUNT` / `H0_ROOT` are placeholders (submit refuses until set); `dev_accelerated` for the
+  preflight, `--mem=0` and the partition name `accelerated` are still unverified on HoreKa (as in H0/H1).
+- The multi-process steps inside an allocation (scaling_mp, m1, m2g, mesc, m3) follow M2G's pattern, untested on
+  SLURM; the preflight's entries test it on the first node before any other node-hours are spent.
+- hh4c's walls are dominated by the start's prepare and compiles (HH4c: every start and re-plan re-prepares
+  `FusedMeshClustersForce`); its 2e8 row is a ceiling probe that may fail on 40 GB cards (recorded either way).
+  hh4a and hh4c's expected walls (2-3 h, 3-4 h) are estimates: no row has run on a dedicated node.
+- The two inert `JACCPOT_STATIC_STRICT_*` variables the vendored harness sets (removed in X6) are harmless.
