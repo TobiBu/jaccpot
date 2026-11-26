@@ -2263,7 +2263,7 @@ what that peer's cross walk can open, keep M1's momentum argument, and get the s
 
 **Answer:** yes, opt-in (`exchange="let"`), bitwise to the all_gather path on every configuration tried (CPU 2/4/8
 devices, both MACs; GPU 2 cards), pair sets identical on every device, momentum at round-off.
-@@VOLUME_SUMMARY@@
+On 2 and 4 A100s (1e6 Plummer per card) the LET receives 3.8-5.8x fewer bytes per device than the all_gather, within 1.39-1.48x of the exact minimum; whether the volume stays flat at 32 GPUs is HoreKa's to measure (M5).
 
 ### Design (`jaccpot/distributed/let.py`)
 
@@ -2334,7 +2334,81 @@ live particles), between the summary rows (`_summary_rows`) and the default exch
   exchanges, so pair sets compare as they are.
 
 ### Gates
-@@GATES@@
+**GPU (gate 5; also gates 1-3 at production-like size).** Plummer (a = 0.3, r < 20), 1e6 particles per card, galaxy
+of the probe `m4/exp/let_probe.py`: leaf 64, p4, theta 0.8 / eq (16a) at eps 1e-4 (floor 0.0246), fp32 working dtype,
+`--xla_gpu_deterministic_ops=true` + the #398 ragged flags (native NCCL), cards by autocvd on the shared host
+(functional only, no timings). Each run: the start force on one decomposition with the all_gather exchange twice
+(A-vs-A control) and the LET once; the pair sets compared per device in the gathered index space; the exact minimal LET
+counted from the all_gather walk's pairs (every node a pair touches, its ancestors and the children of every split
+node). Capacities `for_shard`, LET buffers `(ndev - 1) x S`, default rounds `(4096, 256)` particles.
+
+| MAC | cards | acc vs all_gather | pair sets | A-vs-A | rows recv / device: all_gather live, LET mean (max), exact | bytes recv / device: all_gather (padded), LET mean (max) |
+|---|---|---|---|---|---|---|
+| `dehnen` | 2 | bitwise | 2/2 equal | bitwise | 109,047; 43,134 (43,255); 30,939 | 8.39 MB; 1.55 MB (1.56) |
+| `dehnen_error` | 2 | bitwise | 2/2 equal | bitwise | 109,047; 63,647 (66,033); 43,859 | 14.68 MB; 3.82 MB (3.96) |
+| `dehnen` | 4 | bitwise | 4/4 equal | bitwise | 311,755; 107,851 (183,807); 86,593 | 25.17 MB; 3.88 MB (6.62) |
+| `dehnen_error` | 4 | bitwise | 4/4 equal | bitwise | 311,755; 174,831 (256,619); 124,379 | 44.04 MB; 10.49 MB (15.40) |
+
+Final code (e0528f5b). No overflow, no hang, `momentum` (`|sum m a| / sum m |a|`, fp32) 5.1e-9 to 7.3e-9 on both
+exchanges alike. The LET sends 1.25-1.45x the exact minimum (whole requested subtrees of at most 256 particles).
+Rounds: `(65536, 4096, 256)` on four cards is bitwise too and sends the same (109,380 / 174,831 rows): with four
+domains every peer is a neighbour; at 2 cards `(4096, 512, 64)` sent 1.50x exact against `(4096, 256)`'s 1.45x. One
+round at 1024 particles requested ~every cut node under eq (16a) (100 % of rows). The four-card rows above were first
+run before the device-order fix: device 3's pair set differed there (below).
+
+**CPU, forced devices (gate 1; fp64).** The same probe on forced CPU devices (the interpret-mode lane), 8192 particles
+per device, leaf 64, the A4 ICs subsampled (`a4/local/ics/{galaxy,merger}.npz`) and Plummer; rounds `(4096, 256)`:
+
+| MAC | IC | dev | N/dev | dtype | acc bitwise | pairs equal | momentum | live S/dev | all_gather live rows recv (mean) | LET rows recv mean / max | exact rows recv | LET/exact | all_gather B recv (padded) | LET B recv mean / max | requests | overflow |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| dehnen | galaxy | 4 | 8192 | f64 | True | True | 1.4e-10 | 931 | 2794 | 2451 / 2665 | 1769 | 1.39 | 393024 | 176472 / 191880 | 622 | False |
+| dehnen | merger | 4 | 8192 | f64 | True | True | 1.9e-10 | 942 | 2826 | 2425 / 2791 | 2015 | 1.2 | 393024 | 174636 / 200952 | 616 | False |
+| dehnen | plummer | 8 | 8192 | f64 | True | True | 2.8e-17 | 920 | 6445 | 4353 / 5471 | 2945 | 1.48 | 917056 | 313470 / 393912 | 2130 | False |
+| dehnen (c28d4e21) | plummer | 2 | 8192 | f64 | True | True | 2.0e-17 | 1008 | 1008 | 1008 / 1121 | 996 | 1.01 | 131008 | 72576 / 80712 | 127 | False |
+| dehnen (c28d4e21) | plummer | 4 | 8192 | f64 | True | True | 2.1e-17 | 927 | 2781 | 2750 / 2811 | 2400 | 1.15 | 393024 | 198000 / 202392 | 672 | False |
+
+`dehnen_error` on CPU: the CI test (2 devices) and M1's momentum test (below); its CPU compiles took 2-2.5 h each on
+this host, so the larger CPU cases ran `dehnen` and eq (16a) is covered on 2 and 4 A100s above. Rows marked
+`(c28d4e21)` ran the rule before e0528f5b (finer sizes everywhere: more rows, the same pairs). At these
+sizes most rows are needed (~1000 summary nodes per device): the CPU rows pin exactness on more devices and ICs, the
+GPU rows show the volume. The galaxy and merger ICs' momentum residuals, 1.4e-10 and 1.9e-10, are the same on both
+exchanges (bitwise): their particle masses differ by component (disc, bulge, halo), unlike M1's equal-mass round-off
+table; a one-card check of that is open (not an exchange question). A
+`dehnen_error` merger run was invalid (the all_gather force itself flagged a local-lane capacity, bit 512, under the
+probe's fixed test capacities) and is not reported.
+
+**Bytes (gate 2): not demonstrable on <= 4 devices; the claim moves to M5.** At 1e6 per card the LET's received bytes
+per device grow 2.5x from 2 to 4 cards (`dehnen`; `dehnen_error` 2.7x) against the all_gather's 3.0x: the LET is 5.4x
+/ 6.5x (`dehnen`) and 3.8x / 4.2x (`dehnen_error`) below the all_gather at 2 / 4 cards, but on four Morton domains of a
+Plummer sphere every domain borders every other at the centre, so the neighbour count has not saturated. What stays
+O(ndev) in the LET is the first round's top (the root and the children of every node above 4096 particles, ~11k of
+~105k rows at 1e6 per card), which every peer receives, near or far. Flatness needs the neighbour count to saturate
+(a device in a 3-D decomposition of 32 has ~26 neighbours at most) and a coarser first round for the far peers
+(`let_coarse_particles=(65536, 4096, 256)` is bitwise and costs the same at four cards): M5 item 1.
+
+**Momentum (gate 3).** `tests/distributed/test_mesh_cross_momentum.py` (M1) with `JACCPOT_CROSS_EXCHANGE=let`: 2
+passed, residuals identical to the all_gather run's (`dehnen` total 1.74e-17, cross part 4.06e-17, share 0.52;
+`dehnen_error` 6.45e-17 / 1.23e-16). Every probe row above: momentum identical on both exchanges.
+
+**Multi-process (scope 3) and restarts (gate 6).** M3's `write_and_restart` scenario
+(`tests/distributed/_checkpoint_scenarios.py`: ESC's Plummer 1024 + 8 fliers, escapers off, the fused CPU lane
+`dehnen`, 6 segments x 10 steps at dt 1e-3, migrating, an orbax checkpoint at every edge) with
+`JACCPOT_CROSS_EXCHANGE=let`, one process x 2 devices (`sp`) and 2 processes x 1 device (`mp`, `jax.distributed`,
+gloo), and the all_gather exchange (`sp`) as reference (`m4/exp/restart_let.py`): the run in one go, a fresh runner
+restarted from its middle checkpoint, and a chain of three runs each restarted from the previous one's last checkpoint
+are **bitwise** equal (state and carried acceleration) on both sides; `sp == mp` bitwise; and the LET runs equal the
+all_gather run bitwise. 24/24 comparisons.
+
+**Identity.** `provider_hlo_identity compare w9-main-cpu m4-tip-cpu`: **PASS 36/36** (the single-card programs; the
+diff touches `jaccpot/distributed/` only).
+
+**CI.** `tests/distributed/test_mesh_let_exchange.py` (new job `test-distributed-segment-let`, 4 forced devices):
+2 passed locally with `JACCPOT_RUNTIME_TYPECHECK=1` in 4:47, CI-like peak RSS 4.35 GB (`-n 0`); the LET receives
+fewer rows than the all_gather's live ones on every device (`dehnen` x4: 213-241 vs 325-369). `test_shards.py check`
+rc 0. Top-level `tests/unit` guards and `tests/unit/distributed` (typecheck): pass.
+`tests/distributed/test_cross_capacities_cpu_e2e.py` (4 forced devices): 6 passed, 2 skipped, after a fix
+(`replanned` grew the LET buffers from a need of 0). pre-commit clean.
+
 
 ### Memory per device (from the shapes)
 
