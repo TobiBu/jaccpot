@@ -208,6 +208,7 @@ def test_the_defaults_are_unchanged():
         let_send_cap=4 * 2048,
         let_recv_cap=4 * 2048,
         let_coarse_particles=(64 * 64, 4 * 64),
+        let_far_particles=16 * 64 * 64,
     )
 
 

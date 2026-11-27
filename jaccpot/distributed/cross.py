@@ -2326,6 +2326,7 @@ class CrossCapacities:
         let_send_cap: Optional[int] = None,
         let_recv_cap: Optional[int] = None,
         let_coarse_particles: Optional[tuple[int, ...]] = None,
+        let_far_particles: Optional[int] = None,
     ) -> None:
         self.max_cells = int(max_cells)
         # None: 1 under the two-sided export, 4 under the one-sided one (see
@@ -2412,6 +2413,14 @@ class CrossCapacities:
             (64 * self.leaf_width, 4 * self.leaf_width)
             if let_coarse_particles is None
             else tuple(int(m) for m in let_coarse_particles)
+        )
+        # The LET's first round for a FAR peer (root spheres apart): a coarser top,
+        # since every peer gets the first round's top. None: 16 x the first size.
+        # 0: off (every peer the first size).
+        self.let_far_particles = (
+            16 * self.let_coarse_particles[0]
+            if let_far_particles is None
+            else int(let_far_particles)
         )
 
     def __repr__(self) -> str:
@@ -3387,6 +3396,9 @@ def make_cross_hook(
                 axis_name=axis_name,
                 walk=request_walk,
                 error_order=let_order,
+                far_particles=(
+                    int(let_options.get("far_particles", cap.let_far_particles)) or None
+                ),
             )
             gathered = None
         else:

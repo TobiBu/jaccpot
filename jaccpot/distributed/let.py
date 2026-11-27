@@ -47,7 +47,7 @@ LET's own index space instead of the ``[ndev x S]`` gathered one.
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -395,6 +395,7 @@ def let_exchange(
     axis_name: str,
     walk: Callable[..., Any],
     error_order: int = 0,
+    far_particles: Optional[int] = None,
 ) -> LetBlocks:
     """Send every peer the part of this device's summary tree its walk opens.
 
@@ -423,6 +424,13 @@ def let_exchange(
         seed_b)`` with the caller's MAC and capacities (``cross._let_walk``'s).
     error_order : int
         ``p`` under eq (16a) (the rows carry its table), else ``0``. Static.
+    far_particles : Optional[int]
+        The first round's size for a FAR peer (its root sphere and this device's
+        do not overlap: centres farther apart than the two root radii), coarser
+        than ``coarse_particles[0]``: a far peer's walk opens little, and every
+        peer gets the first round's top, so this is what keeps the rows per
+        device from growing with the device count. The later rounds are the
+        same. ``None``: every peer gets ``coarse_particles[0]``. Static.
 
     Returns
     -------
@@ -456,19 +464,36 @@ def let_exchange(
     rounds_needed = []
     requested = jnp.zeros((nd,), idx)
     req_walk = None
-    big0 = internal & (count > levels[0])
     # each node's cut ancestor at every round's size: the node of that round's
     # top (the root and the children of nodes above the size) over it, itself in
     # the top; one pointer doubling per size, the same for every peer
     doubling = max(1, int(math.ceil(math.log2(max(S, 2)))))
-    cut_anc = []
-    for m in levels:
+
+    def top_ancestor(m: int) -> Array:
         big_m = internal & (count > m)
         in_top = valid & ((parent < 0) | big_m[jnp.maximum(parent, 0)])
         jump = jnp.where(in_top | (parent < 0), at, parent)
         for _ in range(doubling):
             jump = jump[jump]
-        cut_anc.append(jump)
+        return jump
+
+    cut_anc = [top_ancestor(m) for m in levels]
+    first_near = internal & (count > levels[0])
+    if far_particles is None:
+        is_far = jnp.zeros((nd,), bool)
+        first_far, anc_far = first_near, cut_anc[0]
+    else:
+        if int(far_particles) <= levels[0]:
+            raise ValueError(
+                f"far_particles={far_particles} must exceed the first size {levels[0]}"
+            )
+        # far peers: the root spheres (row 0: centre, radius) do not overlap
+        root = jnp.where(valid[0], rows[0, 0:4], 0.0)
+        roots = jax.lax.all_gather(root, axis_name, tiled=False)
+        gap = jnp.sqrt(jnp.sum((roots[:, 0:3] - root[None, 0:3]) ** 2, axis=1))
+        is_far = gap > roots[:, 3] + root[3]
+        first_far = internal & (count > int(far_particles))
+        anc_far = top_ancestor(int(far_particles))
 
     def expanded_after(d: Array, done: int, tag: Array) -> Array:
         """Nodes whose children peer ``d`` gets after ``done`` request rounds: above
@@ -476,15 +501,19 @@ def let_exchange(
         and above round ``j + 1``'s size (the whole subtree after the last round,
         or when it already holds no more than that size). Closed upward."""
         t = tag[d]
-        out = big0 | (t > 0)
+        far = is_far[d]
+        out = jnp.where(far, first_far, first_near) | (t > 0)
         for j in range(done):
-            inside = t[cut_anc[j]] == j + 1
+            # a far peer's first round cut at its own size (its cut nodes are
+            # that top's nodes)
+            anc = jnp.where(far, anc_far, cut_anc[0]) if j == 0 else cut_anc[j]
+            inside = t[anc] == j + 1
             if j + 1 < len(levels):
                 # down to the next size; whole when the requested subtree is
                 # already within it. Every cut node of a round is then a node of
                 # that round's top, so cut_anc finds the requester of every node
                 # inside a requested subtree
-                small = count[cut_anc[j]] <= levels[j + 1]
+                small = count[anc] <= levels[j + 1]
                 inside = inside & ((count > levels[j + 1]) | small)
             out = out | (inside & internal)
         return out
