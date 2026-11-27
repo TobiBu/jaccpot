@@ -429,7 +429,7 @@ def let_exchange(
         ``p`` under eq (16a) (the rows carry its table), else ``0``. Static.
     far_particles : Optional[int]
         The first round's size for a FAR peer (its domain's box and this device's,
-        each the box of every live node's sphere, are separated), coarser
+        each the box of every live leaf's sphere, are separated), coarser
         than ``coarse_particles[0]``: a far peer's walk opens little, and every
         peer gets the first round's top, so this is what keeps the rows per
         device from growing with the device count. The later rounds are the
@@ -490,9 +490,10 @@ def let_exchange(
             raise ValueError(
                 f"far_particles={far_particles} must exceed the first size {levels[0]}"
             )
-        # far peers: the domains' boxes (every live node's sphere, centre +- radius,
-        # so every particle) are separated along some axis
-        live = valid & (rows[:, _COL_ACTIVE] > 0.5)
+        # far peers: the domains' boxes (every live LEAF's sphere, centre +- radius,
+        # so every particle; an internal node's sphere would cover its whole
+        # subtree's) are separated along some axis
+        live = valid & (rows[:, _COL_ACTIVE] > 0.5) & (rows[:, _COL_LEFT] < 0)
         big_ = jnp.asarray(jnp.inf, dtype)
         lo = jnp.min(jnp.where(live[:, None], rows[:, 0:3] - rows[:, 3:4], big_), 0)
         hi = jnp.max(jnp.where(live[:, None], rows[:, 0:3] + rows[:, 3:4], -big_), 0)
