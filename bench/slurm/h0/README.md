@@ -57,7 +57,7 @@ profiler traces (`H0_COLLECT_TRACES=1` adds those). A few MB. Its `SUMMARY.md` i
 | --- | --- |
 | Python packages | `requirements.txt`: the local venv's exact pins (jax / jaxlib / CUDA-12 plugin + pjrt 0.11.2, the `nvidia-*` 12.9 wheels, numpy 2.5.3, ...), installed `--no-deps` into a plain `python -m venv` (no `--system-site-packages`: that once resolved the CUDA plugin to another environment's `.so`); `setup_env.sh` checks every version and that the plugin is the venv's. Unchanged by H1 and H2 (every sibling main's `pyproject.toml` is satisfied) |
 | jaccpot | this checkout (main) |
-| yggdrax, nornax, mimirax | cloned at the commits in `pins.env` (the mains of 2026-11-25: yggdrax 24de6c3, nornax e9097126, mimirax 339c041d; one nornax for every job), imported through `PYTHONPATH` (no editable installs, so an A-B arm is a path swap) |
+| yggdrax, nornax, mimirax | cloned at the commits in `pins.env` (the mains of 2026-11-25, nornax of 2026-11-27: yggdrax 24de6c3, nornax 3a75a41 (#41, HH5), mimirax 339c041d; one nornax for every job), imported through `PYTHONPATH` (no editable installs, so an A-B arm is a path swap) |
 | yggdrax before #104 | `src/yggdrax-pre104`: yggdrax main with `yggdrax/_cell_partition.py` from aaf8d6d (the only change to that file since is #104: the arm isolates its extra cummax) |
 | Odisseo | cloned at `pins.env`'s `jaccpot-integration` commit a0e8848, for job a4's IC tool only (`tools/a4_galaxy_ics.py`); nothing imports it |
 | Odisseo's bench harness | `harness/benchmark_multigpu/{common,codes}` (vendored; the ICs, the fp64 direct sum, the contention monitor the benches import) |
