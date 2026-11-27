@@ -96,7 +96,7 @@ def test_work_cuts_even_the_work_and_keep_the_force(mac):
     assert imb_before > 1.1, imb_before  # the case is unbalanced
     assert imb_after <= 1.1 and imb_after < imb_before, (imb_before, imb_after)
 
-    g = runner.state.gather()
+    g = runner.gather()
     m = np.asarray(g["masses"], np.float64)
     acc = np.asarray(g["acceleration"], np.float64)
     residual = np.linalg.norm((m[:, None] * acc).sum(0)) / np.sum(
@@ -106,6 +106,6 @@ def test_work_cuts_even_the_work_and_keep_the_force(mac):
 
     # deterministic: the same segments again, bitwise
     again, _ = _run(mac)
-    g2 = again.state.gather()
+    g2 = again.gather()
     for name in ("positions", "velocities", "acceleration"):
         tmp._assert_bitwise(g2[name], g[name], f"work cuts, run twice: {name}")
