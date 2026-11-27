@@ -225,14 +225,10 @@ def _reports(handle) -> list:
 
     caps = getattr(handle.force, "cross_caps", None)
     ndev = int(handle.ndev)
-    gathered_rows = (
-        None if caps is None else (ndev - 1) * int(caps.max_summary_nodes)
-    )
+    gathered_rows = None if caps is None else (ndev - 1) * int(caps.max_summary_nodes)
     out = []
     for r in getattr(handle, "reports", []):
-        cross = dict(
-            zip(CROSS_NEEDS_FIELDS, list(r.needs)[-len(CROSS_NEEDS_FIELDS) :])
-        )
+        cross = dict(zip(CROSS_NEEDS_FIELDS, list(r.needs)[-len(CROSS_NEEDS_FIELDS) :]))
         work = getattr(r, "work", []) or []
         out.append(
             {

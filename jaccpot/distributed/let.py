@@ -119,6 +119,8 @@ class LetBlocks(NamedTuple):
         ``T``. Static.
     walk_split : Array
         Received rows from devices below this one (:func:`device_order_walk`).
+    far_peers : Any
+        ``(ndev,)`` bool: the peers that got the far first round.
     """
 
     left: Array
@@ -142,6 +144,7 @@ class LetBlocks(NamedTuple):
     overflow: Array
     send_capacity: int
     walk_split: Array
+    far_peers: Any = None
 
 
 def _block_slots(sizes: Array, capacity: int) -> tuple[Array, Array, Array]:
@@ -715,6 +718,7 @@ def let_exchange(
         overflow=overflow,
         send_capacity=T,
         walk_split=r_start[me],
+        far_peers=is_far,
     )
 
 

@@ -1,6 +1,6 @@
 """SUMMARY.md of an M4 job: per arm the step wall, the LET rows vs all_gather's, the work imbalance.
 
-    python bench/slurm/m4/summarize.py OUT_DIR > OUT_DIR/SUMMARY.md
+python bench/slurm/m4/summarize.py OUT_DIR > OUT_DIR/SUMMARY.md
 """
 
 from __future__ import annotations
@@ -27,13 +27,19 @@ def main(out: str) -> None:
         r = json.loads(res.read_text())
         edges = [e for e in r.get("edges", []) if e.get("wall_s") is not None]
         steps = max(int(r.get("steps", 1)), 1)
-        walls = [e["wall_s"] / steps for e in edges[1:]] or [e["wall_s"] / steps for e in edges]
+        walls = [e["wall_s"] / steps for e in edges[1:]] or [
+            e["wall_s"] / steps for e in edges
+        ]
         segs = r.get("segments_report", [])
         let_rows = max((s.get("let_recv_rows_max") or 0 for s in segs), default=None)
-        ag = next((s.get("all_gather_rows") for s in segs if s.get("all_gather_rows")), None)
+        ag = next(
+            (s.get("all_gather_rows") for s in segs if s.get("all_gather_rows")), None
+        )
         reb = [s for s in segs if s.get("imbalance_before") is not None]
         imb = (
-            f"{reb[-1]['imbalance_before']:.3f} -> {reb[-1]['imbalance_after']:.3f}" if reb else "-"
+            f"{reb[-1]['imbalance_before']:.3f} -> {reb[-1]['imbalance_after']:.3f}"
+            if reb
+            else "-"
         )
         print(
             f"| {res.parent.name} | {r.get('devices')} | {r.get('num_particles'):.3g} | {r.get('exchange')} | "

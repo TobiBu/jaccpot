@@ -3537,6 +3537,9 @@ def make_cross_hook(
                     record["let_overflow"] = let_blocks.overflow
                     record["let_requested"] = let_blocks.requested
                     record["let_coarse_rows"] = let_blocks.coarse_needed
+                    record["let_far_peers"] = jnp.sum(
+                        jnp.asarray(let_blocks.far_peers), dtype=jnp.int32
+                    )
                     record["let_orig"] = let_blocks.orig
                     record["let_peer"] = let_blocks.peer
                     record["let_send_capacity"] = int(let_blocks.send_capacity)
