@@ -61,6 +61,8 @@ JOBS = (
     "hh4c",
     "m3_node1",
     "m3_node4",
+    "m4_node1",
+    "m4_node2",
     "a4",
 )
 
@@ -870,6 +872,8 @@ def section_folded(o: Out, run: Path, provs: dict) -> None:
         "m2g_node2",
         "mesc_node1",
         "mesc_node2",
+        "m4_node1",
+        "m4_node2",
     ):
         section_text(
             o,

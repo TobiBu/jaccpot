@@ -95,7 +95,7 @@ the batch step.
 
 | job | nodes x tasks | what it measures | rows | expected wall | `--time` |
 | --- | --- | --- | --- | --- | --- |
-| `preflight` | 1 x 4 | the environment (4 GPUs, the venv's plugin, a GPU op, srun), then one tiny row (2e5) of every entry point below (20 entries, one per job family; the multi-process ones as srun steps; hh4c's mesh over the node's four cards in one process); a broken entry is recorded in `preflight/status/` and its job exits at once | 20 entries | 45-75 min | 2:00 |
+| `preflight` | 1 x 4 | the environment (4 GPUs, the venv's plugin, a GPU op, srun), then one tiny row (2e5) of every entry point below (21 entries, one per job family; the multi-process ones as srun steps; hh4c's mesh over the node's four cards in one process); a broken entry is recorded in `preflight/status/` and its job exits at once | 21 entries | 45-80 min | 2:00 |
 | `pins` | 1 x 1 | **L1** (8e6 clipped Plummer step), **L2** (1e8 step), **L3** (25M disc + bulge step + force rel-L2) on one card (`bench/dce_pins.py`), an **A-vs-A control**, and yggdrax **#104's extra cummax at 1e8** (L2 on main (A) vs the pre-#104 partition (B), A B A B A); `dce_pins compare` verdicts | 9 records | ~1.3 h | 3:00 |
 | `auto` | 1 x 1 | `cell_min_level="auto"` vs the galaxy preset's level 8 on mimirax's S10 bench (`seg_<N>_auto_adj` / `seg_<N>_adj`, `pre_<N>_fc1_auto` / `pre_<N>_fc1`) at 1e5, 1e6, 1e7, each pair A B B A | 24 | ~1.5 h | 3:00 |
 | `s1b` | 1 x 1 | S1b's particle-major L2P, Mosaic GPU vs Triton-Pallas (`s1b_mosaic_l2p.sbatch`): 2e6 and 2.5e7 disc, 1e8 Plummer | 3 sizes x 3 kernels | ~1 h | 2:00 |
@@ -120,6 +120,8 @@ the batch step.
 | `mesc_node2` | 2 x 4 | MESC over two nodes: 8 x 1 GPU, both MACs, on / off | 4 | ~1.25 h | 2:30 |
 | `m3_node1` | 1 x 4 | M3's sharded checkpoints (`bench/m3_checkpoint_io.py`, `bench/slurm/m3/README.md`): a 1e8 Plummer written by 4 x 1 GPU twice (the second replaces the first); restored on the same 4 processes, on 1 process x 4 GPUs (same count: bitwise), elastically on 2 x 1 GPU and on 1 GPU, each with one continued segment; the walltime-chaining mechanics (a run stopped by its deadline, continued from its last checkpoint). Per rank: write / restore seconds, shard and disk bytes, peak host RSS, device peak | 7 steps | ~1 h | 2:00 |
 | `m3_node4` | 4 x 4 | M3 at **1e9**: written by 16 x 1 GPU (6.25e7 per card), restored on the same 16 and elastically on 12 (3 nodes) and 8 (2 nodes, 1.25e8 per card: past the mesh's per-card ceiling on 40 GB, recorded either way) | 4 steps | ~1 h | 2:00 |
+| `m4_node1` | 1 x 4 | M4 (`bench/slurm/m4/node1.sbatch`, `bench/m4_exchange_cuts.py`): the LET exchange vs all_gather x work vs count cuts as 4 x 1 GPU through the production runner, disc + bulge (galaxy preset), 1e7 all four combinations, 1e8 the default vs LET + work cuts; per arm the step wall, the LET rows vs the all_gather's, the work imbalance before / after each rebalance, momentum | 6 | 1.5-2 h | 3:00 |
+| `m4_node2` | 2 x 4 | M4 over two nodes: the same arms as 8 x 1 GPU (1e7 at 1.25e6 per GPU, 2e8 at 2.5e7 per GPU); with node1 the 4 -> 8 GPU trend of the LET's rows and of the walls (NVLink + InfiniBand) | 6 | 1.5-2 h | 3:00 |
 | `a4` | arrays | the A4 accuracy suite (delegated to `bench/slurm/a4/submit.sh`, its README has the ladders): an IC job (CPU partition, agama), one job array per ladder and tier (1-card tier: one A100 per rung; node tier: one exclusive node per rung), the summary; afterok the preflight | 53 + 21 rungs | see below | per ladder |
 
 The per-track READMEs (`bench/slurm/{m1,m2g,mesc,a4,m3}/README.md`) say what each arm measures and what to look
@@ -127,12 +129,12 @@ for; their scripts are what these jobs run.
 
 ## The node-hour budget
 
-**The default set: ~70.5 node-hours expected, at most ~136 if every job hit its limit** (`submit_all.sh
+**The default set: ~76.5 node-hours expected, at most ~145 if every job hit its limit** (`submit_all.sh
 --dry-run` prints the worst case for what it would submit). The expected walls come from the same rows on the
 local shared A100s and from each job's own estimate (compile and setup dominate the multi-GPU rows: 2-10 min
 each); HoreKa's dedicated cards should be faster, not slower. Per job, expected (worst): forward 9 (16), mgrad
 7.5 (12), scaling_b 6.5 (12), grad 4.5 (9), scaling_a 3.5 (8), scaling_mp 3 (6), a1 2.5 (6), a3 2 (4), hh 1.75 (3), hh3 2.5 (4), hh4a 2.5 (5), hh4c 3.5 (7), m2g 4
-(7.5), mesc 4.25 (8), m1 2.5 (5), escaper 1.75 (4), auto 1.5 (3), pins 1.3 (3), s1b 1 (2), preflight 1 (2), m3 5 (10: m3_node4 is four nodes).
+(7.5), mesc 4.25 (8), m1 2.5 (5), escaper 1.75 (4), auto 1.5 (3), pins 1.3 (3), s1b 1 (2), preflight 1 (2), m3 5 (10: m3_node4 is four nodes), m4 6 (9: m4_node2 is two nodes; M4 session 2).
 
 **A4 on top** (`--only a4`): the 1-card tier ~60-80 GPU-hours = 15-20 node-hours (charged per GPU), the node tier
 ~25-40 node-hours expected, ~200 at worst (its README: run `A4_ARGS="--tier 1card"` first; in the node tier
@@ -151,12 +153,18 @@ each); HoreKa's dedicated cards should be faster, not slower. Per job, expected 
 **If the budget must be cut, submit in two waves** (track H2's recommendation, 2026-11-25). M4 (the LET exchange)
 and M5 (the multi-node bring-up) wait on the multi-process and multi-node numbers, so they go first:
 
-1. **The multi-node core, ~21 node-hours expected (41 at worst, `--dry-run`):**
-   `--only pins,scaling_mp,m1_node1,m1_node2,m2g_node1,m2g_node2,mesc_node1,mesc_node2,m3_node1,m3_node4`
+1. **The multi-node core, ~27 node-hours expected (50 at worst, `--dry-run`):**
+   `--only pins,scaling_mp,m1_node1,m1_node2,m2g_node1,m2g_node2,mesc_node1,mesc_node2,m3_node1,m3_node4,m4_node1,m4_node2`
    (the sanity row, N processes x 1 GPU vs 1 x N, the cross-domain cost on 4 and 8 cards, the multi-node
-   bring-up and the #398 barrier probe across nodes, escapers on the mesh, sharded I/O at 1e8 and 1e9);
+   bring-up and the #398 barrier probe across nodes, escapers on the mesh, sharded I/O at 1e8 and 1e9, the LET
+   exchange and work cuts on 4 and 8 GPUs);
 2. **then the rest** of the default set, resubmitted into the same run (`H0_RUN_ID=<run id>`), dropping from the
    list above as needed.
+
+**M5's scaling runs (optional, NOT in the default set):** `bench/slurm/m4/m5_scaling.sbatch`, one submission per
+node count (1 / 2 / 4 / 8 nodes, `MODE=weak` at 3.125e7 per GPU = 1e9 on 8 nodes, `MODE=strong` at 1e9 on 4 and 8
+nodes), the default vs LET + work cuts: ~15-20 node-hours weak, ~12 strong (estimates; its header has the
+commands). Submit after `m4_node1` / `m4_node2` say which arm to keep.
 
 The older single-node core (~25 node-hours) still answers the single-node questions:
 `--only scaling_a,scaling_mp,m2g_node1,m2g_node2,a3,forward,auto,pins`
@@ -181,7 +189,7 @@ The older single-node core (~25 node-hours) still answers the single-node questi
    `SUMMARY-horeka-*.md`.
 6. **9. The jobs added since H1**: the rows of hh, hh3, hh4a and hh4c as tables (hh4a: the internal shares
    fixed vs adaptive; hh4c: the start's and the first segment's walls, the steady step per card count, the stripped stars, each
-   card's peak) and M3's `SUMMARY.md` for m3_node1 / m3_node4.
+   card's peak), M3's `SUMMARY.md` for m3_node1 / m3_node4 and M4's for m4_node1 / m4_node2.
 
 `rows.jsonl` has one JSON object per row with its job's provenance; the lead compares those with the local
 numbers.
