@@ -223,6 +223,8 @@ def _reports(handle) -> list:
     max over the mesh), the all_gather's rows, bits and retries."""
     from jaccpot.distributed.cross import CROSS_NEEDS_FIELDS
 
+    if handle is None:
+        return []
     caps = getattr(handle.force, "cross_caps", None)
     ndev = int(handle.ndev)
     gathered_rows = None if caps is None else (ndev - 1) * int(caps.max_summary_nodes)
@@ -310,7 +312,9 @@ def main() -> None:
         }
         for e in (*first.edges, *res.edges)
     ]
-    rec["segments_report"] = _reports(first.handle) + _reports(res.handle)
+    # the continued run's runner holds every segment's report (the first run's
+    # handle moved into it)
+    rec["segments_report"] = _reports(res.handle or first.handle)
     rec["peak_bytes"] = [
         int((d.memory_stats() or {}).get("peak_bytes_in_use", 0))
         for d in jax.local_devices()
