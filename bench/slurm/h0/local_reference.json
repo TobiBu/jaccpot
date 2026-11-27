@@ -1,6 +1,72 @@
 {
- "_about": "Local single-card L pins (bench/dce_pins.py record --pins L2, then L1,L3; root /export/scratch/tbuck/mn-scratch/h1/pins), recorded by track H1 on 2026-11-10 AT THE BUNDLE'S PINS: jaccpot main e5043069 (library code; bench/ and docs/ of the H1 branch), yggdrax f722c24, nornax 30be376, mimirax 1101a6e, jax 0.11.2, A100-PCIE-40GB cards of the SHARED development machine selected by autocvd (on-free-card), production flags (fusion autotuner off). The H0 sanity row (SUMMARY.md section 7) compares HoreKa's h0-L-main with h1-L-main and h1-L-main-b. B/p, far-pair counts and L3's rel-L2 are the same program on the same IC and must agree to the digits shown (they reproduced the 2026-10-30 records below exactly; L3's B/p alternates between 255.36 and 257.36 run to run, as before). The walls are a RATIO check only: these cards are shared with other users (host load 50-65 during the runs; 'contaminated' is dce_pins' own flag for another process on the card), and HoreKa's are SXM cards on dedicated nodes. The older tags (ab-*, s11s2-*) are kept for reference; they were recorded at older code.",
+ "_about": "Local single-card L pins (bench/dce_pins.py record --pins L2, then L1,L3; root /export/scratch/tbuck/mn-scratch/h2/pins), recorded by track H2 on 2026-11-25 AT THE BUNDLE'S PINS: jaccpot main 44ddccb0 (library code; bench/ and docs/ of the H2 branch), yggdrax 24de6c3, nornax e9097126, mimirax 339c041d, jax 0.11.2, A100-PCIE-40GB cards of the SHARED development machine selected by autocvd (on-free-card), production flags (fusion autotuner off). The H0 sanity row (SUMMARY.md section 7) compares HoreKa's h0-L-main with h2-L-main and h2-L-main-b. B/p, far-pair counts and L3's rel-L2 are the same program on the same IC and must agree to the digits shown (they reproduced H1's h1-L-main of 2026-11-10 below exactly: yggdrax f722c24 -> 24de6c3 left these programs' counts and B/p unchanged). The walls are a RATIO check only: these cards are shared with other users (host load 59-108 during the runs; 'contaminated' is dce_pins' own flag for another process on the card), and HoreKa's are SXM cards on dedicated nodes. The older tags (h1-*, ab-*, s11s2-*) are kept for reference; they were recorded at older code.",
  "tags": {
+  "h2-L-main": {
+   "about": "the bundle's pins (A), card 3 (L2), 6 (L1, L3)",
+   "L1": {
+    "n": 8000000,
+    "step_ms_min": 77.645,
+    "step_ms_median": 78.641,
+    "bytes_per_particle": 315.74,
+    "far_pair_count": 39093974,
+    "contaminated": false,
+    "loadavg_max": 65.2
+   },
+   "L2": {
+    "n": 100000000,
+    "step_ms_min": 858.973,
+    "step_ms_median": 865.532,
+    "bytes_per_particle": 256.77,
+    "far_pair_count": 402173018,
+    "contaminated": false,
+    "loadavg_max": 45.8
+   },
+   "L3": {
+    "n": 25000000,
+    "step_ms_min": 240.77,
+    "step_ms_median": 245.154,
+    "bytes_per_particle": 255.36,
+    "far_pair_count": 94801662,
+    "contaminated": false,
+    "loadavg_max": 89.7,
+    "force_ms_min": 100.3,
+    "force_ms_median": 100.444,
+    "rel_l2": 0.0004179115652402862
+   }
+  },
+  "h2-L-main-b": {
+   "about": "the same, A-vs-A control, card 6",
+   "L1": {
+    "n": 8000000,
+    "step_ms_min": 76.817,
+    "step_ms_median": 78.242,
+    "bytes_per_particle": 315.74,
+    "far_pair_count": 39093974,
+    "contaminated": false,
+    "loadavg_max": 86.3
+   },
+   "L2": {
+    "n": 100000000,
+    "step_ms_min": 851.803,
+    "step_ms_median": 853.993,
+    "bytes_per_particle": 256.77,
+    "far_pair_count": 402173018,
+    "contaminated": false,
+    "loadavg_max": 59.4
+   },
+   "L3": {
+    "n": 25000000,
+    "step_ms_min": 239.501,
+    "step_ms_median": 245.11,
+    "bytes_per_particle": 255.36,
+    "far_pair_count": 94801662,
+    "contaminated": false,
+    "loadavg_max": 108.1,
+    "force_ms_min": 100.427,
+    "force_ms_median": 100.952,
+    "rel_l2": 0.0004179115652402862
+   }
+  },
   "h1-L-main": {
    "about": "the bundle's pins (A), card 7",
    "L1": {

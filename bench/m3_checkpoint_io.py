@@ -90,6 +90,26 @@ if _FUSION.split("=")[0] not in _flags:
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# the mesh's ragged exchanges on NCCL, as every other multi-GPU bench sets them (without, XLA's one-shot kernel:
+# 4-6x slower on PCIe; jaccpot.distributed.fused.RAGGED_EXCHANGE_XLA_FLAGS)
+from _ragged_exchange_flags import add_ragged_exchange_flags  # noqa: E402
+
+add_ragged_exchange_flags()
+
+
+def _allow_py_spy() -> None:
+    """Let py-spy read this process's stack (``ptrace_scope`` 1): read a stuck rank before killing it."""
+    try:
+        import ctypes
+
+        ctypes.CDLL(None).prctl(
+            0x59616D61, ctypes.c_ulong(-1), 0, 0, 0
+        )  # PR_SET_PTRACER, ANY
+    except Exception:  # noqa: BLE001 - not Linux, or no prctl: nothing to allow
+        pass
+
+
+_allow_py_spy()
 
 import numpy as np  # noqa: E402
 
