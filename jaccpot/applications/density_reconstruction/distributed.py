@@ -315,6 +315,13 @@ class DistributedForwardOperator:
             cross_caps=self.cross_caps,
         )
         force.prepare(shard.positions, shard.masses, shard.count)
+        if force.needs_cross_sizing:
+            # cross_caps="auto" is sized by a measurement, as MeshSegmentRunner
+            # does at its start. Unsized, the exchange runs at
+            # CrossCapacities.for_measurement (one granule per row) and every
+            # verdict fails once the cut ships more than that (2 devices,
+            # N=16384: 8328 particles shipped per device, bits OVERFLOW_CROSS).
+            force.plan_cross(lambda: _measure_cross_needs(force, shard))
         force.with_grad_plan(shard.positions, shard.masses, shard.count)
         grad_fn = make_mesh_grad_fn(force)
 
@@ -632,3 +639,49 @@ def make_distributed_forward_operator(
         capacity_headroom=float(capacity_headroom),
         cross_caps=cross_caps,
     )
+
+
+def _measure_cross_needs(force: Any, shard: Any) -> np.ndarray:
+    """The cross needs of one forward at ``shard``, max over devices (host).
+
+    What :meth:`FusedMeshForce.plan_cross` expects of its ``measure``: the mesh
+    force's forward ``shard`` under its ``shard_map``, traced afresh on the
+    force's CURRENT hook (``plan_cross`` replaces the hook between
+    measurements), its needs vector reduced over the mesh and cut to the cross
+    fields (``MeshSegmentRunner._measure_cross`` on the runner's own program).
+
+    Parameters
+    ----------
+    force : Any
+        A prepared ``FusedMeshForce``.
+    shard : Any
+        The ``rollout.decompose`` placement (positions, masses, count, ids).
+
+    Returns
+    -------
+    np.ndarray
+        ``cross.CROSS_NEEDS_FIELDS`` of the forward.
+    """
+    from jax.sharding import PartitionSpec as P
+
+    from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+    spec = P(force.axis_name)
+
+    def body(x: Any, m: Any, n: Any, i: Any) -> Any:
+        out = force.shard(x, m, jnp.minimum(n[0], x.shape[0]), i)
+        return out[2].reshape(1, -1)
+
+    program = jax.jit(
+        jax.shard_map(
+            body,
+            mesh=force.mesh,
+            in_specs=(spec, spec, spec, spec),
+            out_specs=spec,
+            check_vma=False,
+        )
+    )
+    with force.context():
+        force.before_trace()
+        needs = program(shard.positions, shard.masses, shard.count, shard.ids)
+    return np.asarray(jax.device_get(needs)).max(axis=0)[len(NEEDS_FIELDS) :]
