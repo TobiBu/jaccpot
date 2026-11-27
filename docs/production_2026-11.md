@@ -2643,7 +2643,7 @@ min (6 arms); each `SUMMARY.md` has the rows (LET rows recv 1941-2007 vs the all
   all_gather's none; whether the bytes saved on NVLink / InfiniBand pay for that is what `m4_node1` / `m4_node2`
   measure (the `let` vs `all_gather` step wall at 4 and 8 GPUs).
 - **Recommendation:** keep `all_gather` the default for now; switch the default to `let` (two rounds, the far round
-  on) when HoreKa shows the LET's step wall within ~5 % of the all_gather's at 4 GPUs and below it at 8, and run M5's
+  off) when HoreKa shows the LET's step wall within ~5 % of the all_gather's at 4 GPUs and below it at 8, and run M5's
   scaling with `let` + `work` either way. Work cuts likewise stay opt-in until `m4_node1` shows the step wall follows
   the imbalance (the slowest device).
 
