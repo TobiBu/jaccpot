@@ -19,8 +19,8 @@
 #                                 the coupling does not read it)
 # The clusters' cost is slow_* minus galaxy_1e8; the coupling's is slow_*_fmm minus slow_*_none.
 #
-# Needs nornax with FusedClustersForce's grouped back-reaction (HH3a): the bundle's H0_NORNAX_HH3 checkout
-# (pins.env H0_NORNAX_HH3_COMMIT), put first on PYTHONPATH by job "hh3"; run alone, set PYTHONPATH yourself.
+# Needs nornax with FusedClustersForce's grouped back-reaction (HH3a): nornax main since #37; the bundle's
+# src/nornax (pins.env) has it. Run alone, set PYTHONPATH yourself.
 #
 # On HoreKa this runs as job "hh3" of the bundle (bench/slurm/h0/README.md: one checkout, one setup, every job).
 #

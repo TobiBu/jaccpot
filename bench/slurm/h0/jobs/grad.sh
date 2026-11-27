@@ -9,8 +9,10 @@ if [ "${SMOKE:-}" = 1 ]; then
   # CPU interpret mode costs ~20 min per gradient row
   export SMOKE_N=2048 H0_SMOKE_INTERPRET=all
   # (step / nested / the 1e8 offload rows: XLA:CPU compiles of 50-156 GB that H0 could not complete; the GPU
-  # preflight runs step / nested / offload at 2e5 before any node-hours)
-  export ROWS=${ROWS:-'^(s8_8e6_galaxy|s8_8e6|s8_1e8|r_8e6_T1_fwd|r_8e6_T1_dfwd|r_8e6_T16_grad_offload)$'}
+  # preflight runs step / nested / offload at 2e5 before any node-hours. r_8e6_T16_grad_offload is left out too
+  # since H2: H1 compiled and timed it on XLA:CPU at ~390 GB, and its profiler trace grew past 646 GB of host
+  # memory; ROWS=... brings it back)
+  export ROWS=${ROWS:-'^(s8_8e6_galaxy|s8_8e6|s8_1e8|r_8e6_T1_fwd|r_8e6_T1_dfwd)$'}
 fi
 PY=$H0_PY OUT=$OUT/timing bash bench/slurm/grad_rollout_timing.sbatch
 h0_done
