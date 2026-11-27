@@ -2254,6 +2254,52 @@ CPU, forced host devices (this host, loaded); the full table is nornax `docs/hyb
 - `tests/distributed/test_mesh_force_targets.py` (`distributed_segment`): the hook leaves the force bitwise, the
   partial fields summed over two devices are the field of all sources at the points.
 
+## HH5 — cluster hardening: a carried restore keeps the writer's tree (hybrid Hermite session 5, wave 9, 2026-11-25)
+
+Track HH5 (wave 9). jaccpot's part is the restore of a carried scheme (HH4b request 2); the clusters' part (empty
+slots out of the star tree, re-plans that grow only what failed, `coupling="fmm"` with one cluster) is nornax's
+(`docs/hybrid_hermite.md` section 17). Scripts and rows: `mn-scratch/hh5/`.
+
+### The failure (HH4b, 1e7 on GPU)
+
+A `.npz`-restored clusters run (`ProductionRunner(scheme=ClustersRunnerScheme(...))`) refused its first segment:
+"fused payload static target-block cap was not preflighted before entering traced strict refresh:
+num_leaves=1448960 ...". A carried scheme's restore re-prepares its force at the restart's positions for its
+structure, installs the writer's template shapes, and runs every program pinned to the writer's trace-time state
+(`jaccpot.carried.trace_state`, HH3b). Two things were not in that record:
+
+1. **The static target-block preflight key** `(num_leaves, block_size, cap)` (and the resolved cap): the eager
+   prepare sets it on the engine, and the traced refresh refuses to start unless the key equals its own. The restore's
+   re-prepare set it with ITS leaf count; the pinned programs trace with the writer's template.
+2. **The leaf capacity before the re-prepare.** `leaf_capacity="auto"` is fixed at an engine's FIRST prepare (the
+   writer's at its start, or grown by a tree re-plan, `_replan_tree_from_needs`). A fresh process sizes its own at the
+   restart's positions, so the re-prepared tree had another shape: besides (1), its static-radix topology key (a hash
+   of the tree's shape, in the template's static aux) differed, and the restore reported `provider_key` -- "not
+   bitwise" (HH4b's bundle warning). `ProductionRunner`'s own restore installs the recorded leaf capacity before its
+   prepare; the carried path did not.
+
+HH4b's workaround (`patch_jaccpot_csr_restore_preflight` in Odisseo's demo) loosened the check on the CSR lane only.
+
+### The fix (`jaccpot/carried.py`)
+
+- `trace_state` records, per engine, `static_target_blocks = {cap, preflight}`; `pinned_trace_state` installs them
+  (a record written before HH5 has none: the engine's own, as before). The traced refresh's check then compares the
+  writer's template with the writer's key, as in the writing process -- the check itself is unchanged.
+- `install_recorded_tree(engines, record)` (new, public): the record's leaf capacity and depth bound on the engines
+  BEFORE a restore re-prepares on them (left installed: the writer's engines had them). nornax's
+  `ClustersRunnerScheme.restore` calls it (nornax `f5d84c9`); a carried scheme should.
+- No change to `_large_n_pipeline.py`'s check, to `production.py` or to any default program.
+
+### Gates
+
+| gate | result |
+|---|---|
+| CPU reproduction on main (`hh5/scripts/repro_preflight.py`; the HH3b runner system, the writer's galaxy leaf capacity 2048 -- as a re-plan grows it -- vs 1024 from a fresh prepare; `.npz` at segment 2, fresh process) | main: **RuntimeError "fused payload static target-block cap was not preflighted ... num_leaves=2048 block_size=4 max_blocks_per_leaf=64"** (`runs/pf_grow/restore_main.log`) |
+| the same checkpoint (written by main) restored by HH5 | continues (no refusal); `mismatches` = `versions` only (another git HEAD wrote it); 1 / 23 arrays differ from main's own run (HH5's star tree after the stripping edge, nornax section 17) |
+| HH5 writer + HH5 restore, same system | **bitwise**: `restored["bitwise"]` True, no mismatch, 0 / 23 arrays differ from the uninterrupted run (`runs/pf_grow_tip`) |
+| `test_a_restart_keeps_the_writers_tree_and_target_block_preflight[npz, orbax]` (`integration-strict-carried`): a writer with a grown leaf capacity, restored in a fresh runner | bitwise to the uninterrupted run, no mismatch; a scheme without `install_recorded_tree` continues too (the record's key) and reports `provider_key` |
+| GPU 1e7 + Pal 5 4096 (HH4b's `pal5_live_gpu` configuration), `.npz` restart after 2 segments, fresh process, NO Odisseo patch | **runs**: `restored["bitwise"]` True, no mismatch (the engines' record matched the re-prepared providers' digests), segments 3-4 ran (8 stars stripped), ledgered drift <= 4.4e-8, device peak 5.2 GB (writer) / 4.6 GB (restore); a shared A100, functional (`mn-scratch/hh5/runs/gpu_restore_1e7`). HH4b's restore of the same configuration refused its first segment |
+| identity `provider_hlo_identity compare w9-main-cpu hh5-tip-cpu` (jaccpot ab56ce44, yggdrax 24de6c3) | **PASS 36/36** |
 ## M4 — the exchange that scales: a LET exchange of the cross summaries (wave 9, session 1, 2026-11-25)
 
 **Question** (plan M4): the symmetric cross exchange (M1) all_gathers every device's whole two-sided summary tree,

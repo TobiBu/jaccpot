@@ -43,6 +43,7 @@ import numpy as np
 
 __all__ = [
     "key_digest",
+    "install_recorded_tree",
     "pinned_trace_state",
     "provider_record",
     "provider_with_record",
@@ -93,16 +94,34 @@ def trace_state(engines: Sequence[Any]) -> dict:
     """
     from jaccpot.production import _jsonable
     from jaccpot.runtime import _level_shapes
+    from jaccpot.runtime._large_n_pipeline import (
+        _STATIC_TARGET_BLOCKS_CAP_ATTR,
+        _STATIC_TARGET_BLOCKS_PREFLIGHT_ATTR,
+    )
 
     out = []
     for engine in engines:
         impl = getattr(engine, "_impl", engine)
         caps = getattr(impl, "_strict_fused_validated_caps", None)
+        preflight = getattr(impl, _STATIC_TARGET_BLOCKS_PREFLIGHT_ATTR, None)
         out.append(
             {
                 "walk_caps": None if caps is None else _jsonable(dict(caps)),
                 "leaf_capacity": getattr(impl, "_tree_leaf_capacity", None),
                 "upward_num_levels": getattr(impl, "_cells_upward_num_levels", None),
+                # the static target-block cap the force's eager prepare settled on
+                # and its preflight key (num_leaves, block_size, cap): the traced
+                # refresh builds with the cap and refuses to start without the
+                # key, which must be the WRITER's (its template's leaf count), not
+                # a restore's re-prepare's (HH5 item 3)
+                "static_target_blocks": {
+                    "cap": getattr(impl, _STATIC_TARGET_BLOCKS_CAP_ATTR, None),
+                    "preflight": (
+                        None
+                        if preflight is None
+                        else [int(v) for v in tuple(preflight)]
+                    ),
+                },
             }
         )
     return {
@@ -118,6 +137,10 @@ def trace_state(engines: Sequence[Any]) -> dict:
 
 def _install(engines: Sequence[Any], record: dict) -> None:
     from jaccpot.runtime import _level_shapes
+    from jaccpot.runtime._large_n_pipeline import (
+        _STATIC_TARGET_BLOCKS_CAP_ATTR,
+        _STATIC_TARGET_BLOCKS_PREFLIGHT_ATTR,
+    )
     from jaccpot.runtime.capacity_plan import install_walk_caps
 
     for engine, rec in zip(engines, record["engines"]):
@@ -128,6 +151,16 @@ def _install(engines: Sequence[Any], record: dict) -> None:
             impl._tree_leaf_capacity = int(rec["leaf_capacity"])
         if rec["upward_num_levels"] is not None:
             impl._cells_upward_num_levels = int(rec["upward_num_levels"])
+        # absent in a record written before HH5: the engine's own (as before)
+        blocks = rec.get("static_target_blocks") or {}
+        if blocks.get("cap") is not None:
+            setattr(impl, _STATIC_TARGET_BLOCKS_CAP_ATTR, int(blocks["cap"]))
+        if blocks.get("preflight") is not None:
+            setattr(
+                impl,
+                _STATIC_TARGET_BLOCKS_PREFLIGHT_ATTR,
+                tuple(int(v) for v in blocks["preflight"]),
+            )
     _level_shapes._WIDTHS.clear()
     _level_shapes._WIDTHS.update(
         {(int(a), int(b)): int(w) for a, b, w in record["level_widths"]}
@@ -136,6 +169,41 @@ def _install(engines: Sequence[Any], record: dict) -> None:
     _level_shapes._LEVELS.update(
         {(int(a), int(b)): int(n) for a, b, n in record["level_counts"]}
     )
+
+
+def install_recorded_tree(engines: Sequence[Any], record: Optional[dict]) -> None:
+    """Give ``engines`` a record's tree bounds BEFORE a restore re-prepares on them.
+
+    A carried scheme's restore re-prepares its force at the restart's positions
+    for its structure and then installs the writer's template shapes. The leaf
+    capacity is part of that structure: ``leaf_capacity="auto"`` is fixed at an
+    engine's FIRST prepare (the writer's at its start, or grown by a tree
+    re-plan), so a fresh process's prepare at the restart's positions settles on
+    another one. Its tree then has another shape than the template the writer's
+    programs were traced with: the static-radix topology key differs (a restore
+    that is "not bitwise", ``provider_key``), and the fused payload's static
+    target-block preflight key differs (a traced refresh that refuses to start;
+    HH5 item 3). ``ProductionRunner``'s own restore installs the recorded leaf
+    capacity before its prepare; this is the same for a carried scheme. The
+    record's leaf capacity and level-loop depth bound are installed and LEFT on
+    the engines (the writer's engines had them); its walk caps are not (the
+    re-prepare measures its own, and every program runs pinned to the record's).
+
+    Parameters
+    ----------
+    engines : Sequence[Any]
+        The engines (or their solvers) in :func:`trace_state`'s order.
+    record : Optional[dict]
+        :func:`trace_state`'s record; ``None``: a no-op.
+    """
+    if record is None:
+        return
+    for engine, rec in zip(engines, record["engines"]):
+        impl = getattr(engine, "_impl", engine)
+        if rec.get("leaf_capacity") is not None:
+            impl._tree_leaf_capacity = int(rec["leaf_capacity"])
+        if rec.get("upward_num_levels") is not None:
+            impl._cells_upward_num_levels = int(rec["upward_num_levels"])
 
 
 @contextlib.contextmanager
