@@ -2579,32 +2579,39 @@ middle checkpoint and a chain of three restarts are **bitwise** equal (state and
 and one process == two processes bitwise: 14/14. `tests/distributed/test_mesh_work_cuts.py` (CI): a clumpy cube on 2
 devices, work 306k / 511k -> 409k / 409k per device, momentum at round-off (fp64), a run twice bitwise.
 
-**The LET's far-peer first round** (`CrossCapacities.let_far_particles`, default 16 x the first round's size; `0`
-turns it off). Every peer gets the first round's top, so session 1's rows per device could not flatten (~11k of ~105k
+**The LET's far-peer first round** (`CrossCapacities.let_far_particles`: the first size for far peers; `0`, the
+default, turns it off -- measured below). Every peer gets the first round's top, so session 1's rows per device could not flatten (~11k of ~105k
 rows at 1e6 per card for every peer, near or far). Now a peer whose root sphere and this device's do not overlap
-(centres farther apart than the two root radii; one all_gather of the roots) gets a coarser first-round top; the later
-rounds are the same. The requests stay exact: each node's top ancestor is computed for both first sizes and chosen per
+(the boxes of the two domains' live leaves' spheres are separated; one all_gather of the boxes) gets a coarser
+first-round top; the later rounds are the same. The requests stay exact: each node's top ancestor is computed for both first sizes and chosen per
 peer, so every cut node is still a node of its round's top. `record=` carries `let_far_peers`.
 
 **Bytes vs device count (gate 2), forced CPU devices** (`m4/exp2/let_probe.py`; uniform cube, 4096 particles per
-device, `dehnen`, fp64, leaf 64; all_gather, then the LET without and with the far round, on one decomposition):
+device, `dehnen`, fp64, leaf 64; on one decomposition: all_gather, then the LET with the far round off, on, and with
+three rounds; every LET arm bitwise to all_gather with every device's pair sets equal, at every device count). Rows
+received per device, and in units of the device's own live summary tree `S` (which differs between device counts at
+the same particles per device: the cell leaves follow the global Morton levels):
 
-| devices | all_gather live rows recv / device | LET rows recv / device (2 rounds) | exact minimum | LET / exact | all_gather padded bytes | LET bytes (mean) | bitwise, pairs equal |
-|---|---|---|---|---|---|---|---|
-| 2 | 511 | 441 | 316 | 1.40 | 65 KB | 32 KB | yes |
-| 4 | 774 | 500 | 421 | 1.19 | 196 KB | 36 KB | yes |
-| 8 | 3,890 | 1,746 | 966 | 1.81 | 458 KB | 126 KB | yes |
-| 16 | 7,683 | 2,421 | 1,375 | 1.76 | 982 KB | 174 KB | yes |
-| 32 | (running at the PR; added when done) | | | | | | |
+| devices | `S` / device | all_gather live rows (/ `S`) | LET rows, far off (/ `S`) | exact minimum (/ `S`) | all_gather / LET | LET bytes (mean) vs all_gather padded |
+|---|---|---|---|---|---|---|
+| 2 | 511 | 511 (1.0) | 441 (0.9) | 316 (0.6) | 1.16 | 32 KB vs 65 KB |
+| 4 | 258 | 774 (3.0) | 500 (1.9) | 421 (1.6) | 1.55 | 36 KB vs 196 KB |
+| 8 | 555 | 3,890 (7.0) | 1,746 (3.1) | 966 (1.7) | 2.23 | 126 KB vs 458 KB |
+| 16 | 512 | 7,683 (15.0) | 2,416 (4.7) | 1,375 (2.7) | 3.18 | 174 KB vs 982 KB |
+| 32 | 258 | 8,007 (31.0) | 2,112 (8.2) | 1,257 (4.9) | 3.79 | 152 KB vs 2.03 MB |
 
-From 8 to 16 devices the all_gather grows 1.98x, the LET 1.39x and the exact minimum 1.42x: the LET follows the
-minimum, which still grows here because a device's neighbour count does (up to 26 in 3-D); flat needs saturation.
-The far round (domain boxes separated) found 8 far peers on the two corner devices and 1 on the others at 16 (0 at
-2-8: Morton domains are fragmented along the curve and their boxes touch), and changed nothing at these sizes (2,421
-vs 2,416 rows): with 4096 particles per device the first round's top is the root alone anyway. The O(ndev) top it
-targets (~11k of ~105k rows at 1e6 per card) exists only at production sizes per card, with many devices: HoreKa's
-(`m4_node2`, M5). A three-round LET (first size 16x larger) is exact but sent more (8: 2,760, 16: 5,210 rows): a
-requested subtree that already fits the next size goes whole. Not the default.
+The all_gather grows as `ndev - 1` trees; the LET follows the exact minimum (1.6-1.8x it beyond 4 devices) and its
+advantage widens with the device count (1.2x -> 3.8x). It is not flat here: with 4096 particles per device a domain is
+tiny next to the walk's reach, so most peers are near; saturation (at most 26 neighbours in 3-D) needs production sizes
+per card, i.e. HoreKa (`m4_node1` / `m4_node2`, M5).
+
+**The far round is OFF by default** (`let_far_particles=0`). It is exact (bitwise, pairs equal at every count), but it
+did not pay here: the box test found no far peer at 2-8 devices (Morton domains are fragmented along the curve, their
+boxes touch), 1-8 per device at 16 (2,421 vs 2,416 rows) and 5-23 at 32, where it sent MORE (2,251 vs 2,112 rows,
++6.6 %): those peers still opened the root, and a root-only first top made their requests whole-domain. A three-round
+LET (first size 16x larger, the same effect for every peer) sent more still (8: 2,760, 16: 5,210, 32: 4,467): a
+requested subtree that already fits the next size goes whole. The O(ndev) top both target (~11k of ~105k rows at 1e6
+per card for every peer) exists only at production sizes per card: `let_far_particles` stays for HoreKa to measure.
 
 **GPU functional (gate 3).** Queued behind one `on-free-card` waiter (2 cards, the merger state at t = 1.36 subsampled to 1e6 per card: the LET with and without the far round against all_gather with an A-vs-A control, then count / work / work cuts); all eight local cards were busy through the session. Added here when it runs.
 

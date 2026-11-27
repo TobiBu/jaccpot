@@ -2415,12 +2415,13 @@ class CrossCapacities:
             else tuple(int(m) for m in let_coarse_particles)
         )
         # The LET's first round for a FAR peer (domain boxes apart): a coarser top,
-        # since every peer gets the first round's top. None: 16 x the first size.
-        # 0: off (every peer the first size).
+        # since every peer gets the first round's top. 0 / None (the default): off,
+        # every peer the first size -- on 32 forced devices (cube, 4096 per device)
+        # the far peers still opened the root, and a root-only top made their
+        # requests whole-domain: +6.6 % rows (docs/production_2026-11.md, ## M4
+        # session 2). HoreKa decides whether it pays at production sizes per card.
         self.let_far_particles = (
-            16 * self.let_coarse_particles[0]
-            if let_far_particles is None
-            else int(let_far_particles)
+            0 if let_far_particles is None else int(let_far_particles)
         )
 
     def __repr__(self) -> str:
