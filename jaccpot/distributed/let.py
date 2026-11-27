@@ -428,8 +428,8 @@ def let_exchange(
     error_order : int
         ``p`` under eq (16a) (the rows carry its table), else ``0``. Static.
     far_particles : Optional[int]
-        The first round's size for a FAR peer (its root sphere and this device's
-        do not overlap: centres farther apart than the two root radii), coarser
+        The first round's size for a FAR peer (its domain's box and this device's,
+        each the box of every live node's sphere, are separated), coarser
         than ``coarse_particles[0]``: a far peer's walk opens little, and every
         peer gets the first round's top, so this is what keeps the rows per
         device from growing with the device count. The later rounds are the
@@ -490,11 +490,15 @@ def let_exchange(
             raise ValueError(
                 f"far_particles={far_particles} must exceed the first size {levels[0]}"
             )
-        # far peers: the root spheres (row 0: centre, radius) do not overlap
-        root = jnp.where(valid[0], rows[0, 0:4], 0.0)
-        roots = jax.lax.all_gather(root, axis_name, tiled=False)
-        gap = jnp.sqrt(jnp.sum((roots[:, 0:3] - root[None, 0:3]) ** 2, axis=1))
-        is_far = gap > roots[:, 3] + root[3]
+        # far peers: the domains' boxes (every live node's sphere, centre +- radius,
+        # so every particle) are separated along some axis
+        live = valid & (rows[:, _COL_ACTIVE] > 0.5)
+        big_ = jnp.asarray(jnp.inf, dtype)
+        lo = jnp.min(jnp.where(live[:, None], rows[:, 0:3] - rows[:, 3:4], big_), 0)
+        hi = jnp.max(jnp.where(live[:, None], rows[:, 0:3] + rows[:, 3:4], -big_), 0)
+        boxes = jax.lax.all_gather(jnp.concatenate([lo, hi]), axis_name, tiled=False)
+        apart = (boxes[:, 0:3] > hi[None, :]) | (boxes[:, 3:6] < lo[None, :])
+        is_far = jnp.any(apart, axis=1) & jnp.all(jnp.isfinite(boxes), axis=1)
         first_far = internal & (count > int(far_particles))
         anc_far = top_ancestor(int(far_particles))
 

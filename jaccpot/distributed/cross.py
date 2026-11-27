@@ -2414,7 +2414,7 @@ class CrossCapacities:
             if let_coarse_particles is None
             else tuple(int(m) for m in let_coarse_particles)
         )
-        # The LET's first round for a FAR peer (root spheres apart): a coarser top,
+        # The LET's first round for a FAR peer (domain boxes apart): a coarser top,
         # since every peer gets the first round's top. None: 16 x the first size.
         # 0: off (every peer the first size).
         self.let_far_particles = (
