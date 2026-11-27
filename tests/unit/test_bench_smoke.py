@@ -65,133 +65,212 @@ CASES: list[tuple[str, list[str]]] = [
             "16",
         ],
     ),
+    # Sections 4-7 run preset="galaxy" on the fused lane (REBASE_PLAN D3); on CPU
+    # bench/scaling/_galaxy.py takes the lane's CPU route (kernels interpreted),
+    # so these cases run the programs a card runs, slowly.
     (
         "bench.validation.mac_comparison",
         [
             "--n",
-            "512",
-            "--order",
-            "4",
-            "--distribution",
-            "plummer",
-            "--theta",
-            "0.5,0.7",
+            "2048",
             "--eps",
-            "1e-4,1e-5",
-            # The eq-16b arm needs an O(N^2) force scale and a second
-            # prepare_state per point; the two production arms are enough to
-            # prove the wrapper drives the engine and re-envelopes its output.
-            "--arm",
-            "fixed,mass",
-            "--leaf-size",
-            "16",
+            "1e-3,1e-4",
+            "--theta",
+            "0.6,0.8",
+            "--repeats",
+            "1",
+            "--warmup",
+            "0",
+            "--accuracy-targets",
+            "256",
         ],
     ),
     (
         "bench.scaling.wallclock",
         [
             "--n-min-exp",
-            "9",
+            "11",
             "--n-max-exp",
-            "10",
+            "12",
             "--n-steps",
             "2",
             "--repeats",
-            "2",
-            "--warmup",
             "1",
-            "--leaf-size",
-            "32",
+            "--warmup",
+            "0",
             "--direct-max-n",
-            "1024",
+            "4096",
             "--accuracy-max-n",
-            "1024",
+            "4096",
+            "--accuracy-targets",
+            "256",
             "--fit-min-n",
             "0",
-            "--preset",
-            "accurate",
         ],
     ),
     (
         "bench.scaling.interaction_counts",
         [
             "--n-min-exp",
-            "9",
+            "11",
             "--n-max-exp",
-            "10",
+            "12",
             "--n-steps",
             "2",
-            "--leaf-size",
-            "16",
             "--fit-min-n",
             "0",
         ],
     ),
     (
         "bench.scaling.gpu_vs_cpu_speedup",
-        [
-            "--n",
-            "512",
-            "--repeats",
-            "2",
-            "--warmup",
-            "1",
-            "--leaf-size",
-            "16",
-            "--cpu-max-n",
-            "512",
-            "--preset",
-            "accurate",
-        ],
+        ["--n", "2048", "--repeats", "1", "--warmup", "0"],
     ),
+    (
+        "bench.scaling.stage_breakdown",
+        ["--n", "2048", "--repeats", "1", "--warmup", "0", "--trace-calls", "1"],
+    ),
+    (
+        "bench.scaling.capacity",
+        # --no-grad: the gradient has no reverse on the fused lane's CPU route
+        # (a dynamic-bound fori_loop in the L2L); the GPU run measures it.
+        ["--n", "2048", "--fit-min-n", "0", "--no-grad"],
+    ),
+    # The gradient benches take the gates' CPU route (the S9 interpret set,
+    # grad_bench_lib.prepare_env) at order 2: at p6 one value_and_grad compiles
+    # for ~40 min on CPU. The paper runs stay at p6.
     (
         "bench.differentiability.grad_correctness",
         [
             "--n",
-            "128",
+            "512",
             "--thetas",
-            "0.5",
+            "0.6",
+            "--eps",
+            "",
+            "--order",
+            "2",
             "--orders",
-            "4",
-            "--basis",
-            "real",
+            "2",
             "--wrt",
             "positions",
             "--fd-samples",
             "3",
-            "--leaf-size",
-            "16",
+            "--full-samples",
+            "1",
         ],
     ),
     (
         "bench.differentiability.autodiff_overhead",
         [
             "--n",
-            "256",
-            "--basis",
-            "real",
-            "--repeats",
+            "512",
+            "--order",
             "2",
-            "--warmup",
+            "--reps",
+            "2",
+            "--dtype",
+            "float64",
+            "--arms",
+            "step",
+        ],
+    ),
+    (
+        # fig12's multi-GPU point: bench/multigpu_grad_gate.py --mode mesh as a
+        # subprocess, two forced host devices
+        "bench.differentiability.autodiff_overhead",
+        [
+            "--mode",
+            "mesh",
+            "--ndev",
+            "2",
+            "--n",
+            "2048",
+            "--distribution",
+            "cube",
+            "--softening",
+            "1e-2",
+            "--mac",
+            "dehnen",
+            "--theta",
+            "0.8",
+            "--order",
+            "2",
+            "--reps",
+            "2",
+            "--dtype",
+            "float64",
+        ],
+    ),
+    (
+        # forces two host devices itself under JAX_PLATFORMS=cpu
+        "bench.differentiability.distributed_grad_correctness",
+        [
+            "--ndev",
+            "2",
+            "--n",
+            "2048",
+            "--distribution",
+            "cube",
+            "--mac",
+            "dehnen",
+            "--theta",
+            "0.8",
+            "--order",
+            "2",
+            "--check-targets",
+            "256",
+        ],
+    ),
+    # The mesh lane on two forced host devices (each script's worker sets the
+    # count). comm_overhead's CPU records are never `valid`: a CPU split of
+    # collective vs compute time proves the trace plumbing, not a number.
+    (
+        "bench.multigpu.load_balance",
+        [
+            "--ndevs",
+            "2",
+            "--per-device-n",
+            "512",
+            "--distributions",
+            "plummer",
+            "--mac",
+            "dehnen",
+            "--segments",
+            "0",
+        ],
+    ),
+    (
+        "bench.multigpu.comm_overhead",
+        [
+            "--ndevs",
+            "2",
+            "--per-device-n",
+            "512",
+            "--mac",
+            "dehnen",
+            "--steps",
             "1",
-            "--leaf-size",
-            "16",
+            "--warm-segments",
+            "1",
+            "--time-segments",
+            "1",
+            "--trace-segments",
+            "1",
+            "--trace-force",
+            "0",
         ],
     ),
 ]
-
-# `stage_breakdown` is deliberately absent: it instruments the strict refresh
-# path, which `refresh_prepared_state` implements only for
-# preset='large_n_gpu'/radix/solidfmm and which raises on CPU. A CPU smoke test
-# of it could only assert that it fails, which is not a guard. Its own script
-# prints a warning when it is run on CPU.
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize(
     "module,extra",
     CASES,
-    ids=[module.rsplit(".", 1)[-1] for module, _ in CASES],
+    ids=[
+        module.rsplit(".", 1)[-1] + ("_mesh" if "mesh" in extra else "")
+        for module, extra in CASES
+    ],
 )
 def test_bench_script_runs_and_writes_a_valid_artifact(
     module: str, extra: list[str], tmp_path: pathlib.Path
@@ -255,6 +334,100 @@ def test_bench_script_runs_and_writes_a_valid_artifact(
     assert payload["data"], f"{module} wrote an empty data block"
 
 
+def _gate_record(tag_ndev: int, *, bits: int = 0, gpu: bool = True) -> dict:
+    """The fields of bench/multigpu_segment_gate.py's segment-mode record that
+    from_matrix reads (25 needs entries: NEEDS_FIELDS + CROSS_NEEDS_FIELDS)."""
+    rep = {
+        "segment": 1,
+        "steps": 2,
+        "retries": 0,
+        "bits": bits,
+        "counts": [8] * tag_ndev,
+        "needs": [0] * 25,
+        "migrated": 0,
+        "declined": False,
+    }
+    return {
+        "mode": "segment",
+        "mac": "dehnen",
+        "ic": "plummer",
+        "n": 16,
+        "ndev": tag_ndev,
+        "steps": 2,
+        "segments": 5,
+        "softening": 1e-7,
+        "devices": [("cuda:%d" if gpu else "cpu:%d") % i for i in range(tag_ndev)],
+        "start_report": dict(rep, segment=1, steps=0),
+        "reports": [rep] * 5,
+        "segment_s": [9.0, 3.0, 2.0, 1.0, 1.0],
+        "force_only_ms": [400.0, 300.0],
+        "rel_l2_start": 1e-3,
+        "rel_l2_end": 1e-3,
+        "counts0": [8] * tag_ndev,
+    }
+
+
+def test_from_matrix_validity_rules(tmp_path: pathlib.Path) -> None:
+    m = tmp_path / "matrix"
+    m.mkdir()
+    rows = {
+        "strong_P8e6_geo_1c": (_gate_record(1), False, 0),
+        "strong_P8e6_geo_2c": (_gate_record(2, bits=0x8), False, 0),  # overflowed
+        "strong_P8e6_geo_4c": (None, False, 1),  # died: no TAG.json
+        "weak_P4e6pc_2c": (_gate_record(2), True, 0),  # contended
+    }
+    for tag, (rec, contended, rc) in rows.items():
+        if rec is not None:
+            (m / f"{tag}.json").write_text(json.dumps(rec))
+        (m / f"{tag}.smi.txt").write_text(
+            json.dumps({"tag": tag, "rc": rc, "contended": contended, "gate_args": []})
+        )
+    (m / f"strong_P8e6_geo_4c.log").write_text("Traceback: boom\n")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "bench.multigpu.from_matrix",
+            "--matrix-dir",
+            str(m),
+            "--strong-out",
+            str(tmp_path / "s.json"),
+            "--weak-out",
+            str(tmp_path / "w.json"),
+            "--device-kind",
+            "test",
+            "--interconnect",
+            "test",
+        ],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        env=dict(os.environ, JAX_PLATFORMS="cpu"),
+    )
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    strong = {
+        r["tag"]: r
+        for r in json.loads((tmp_path / "s.json").read_text())["data"]["records"]
+    }
+    weak = {
+        r["tag"]: r
+        for r in json.loads((tmp_path / "w.json").read_text())["data"]["records"]
+    }
+    one = strong["strong_P8e6_geo_1c"]
+    assert (
+        one["valid"]
+        and one["step_s"] == pytest.approx(0.5)
+        and one["force_s"] == pytest.approx(0.3)
+    )
+    assert not strong["strong_P8e6_geo_2c"]["valid"]
+    assert strong["strong_P8e6_geo_2c"]["capacity_ok"] is False
+    assert not strong["strong_P8e6_geo_4c"]["valid"]
+    assert "Traceback" in strong["strong_P8e6_geo_4c"]["log_tail"]
+    assert not weak["weak_P4e6pc_2c"]["valid"] and weak["weak_P4e6pc_2c"]["capacity_ok"]
+    cfg = json.loads((tmp_path / "s.json").read_text())["config"]
+    assert cfg["device_label_asserted_by_operator"] is True
+
+
 @pytest.mark.slow
 def test_every_paper_bench_script_is_covered() -> None:
     """A new bench script must be added to CASES or explicitly excused here.
@@ -265,22 +438,15 @@ def test_every_paper_bench_script_is_covered() -> None:
 
     covered = {module.rsplit(".", 1)[-1] for module, _ in CASES}
     excused = {
-        # See the note above CASES.
-        "stage_breakdown",
-        # Needs >= 2 devices, so it cannot run on a CPU-only runner as itself.
-        # It *can* be coerced onto two forced host devices
-        # (XLA_FLAGS=--xla_force_host_platform_device_count=2), but only with
-        # --halo-exchange buf: the production path uses jax.lax.ragged_all_to_all,
-        # which XLA:CPU does not implement. That makes a CPU smoke case a 150 s
-        # exercise of the deprecated fallback -- the buf path exists only for
-        # JAX < 0.9.1 and goes away when the floor in pyproject.toml rises -- so
-        # it would guard a route we intend to delete while leaving the real one
-        # untested. Covered on real devices by
-        # tests/distributed/test_distributed_grad_correctness.py instead.
-        "distributed_grad_correctness",
+        # Figures 08/09 are converted from bench/multigpu_scaling_matrix.py's
+        # outputs: from_matrix is covered by test_from_matrix_validity_rules, and
+        # run_matrix only launches the library matrix (its CPU run is the HoreKa
+        # bundle's SMOKE job).
+        "from_matrix",
+        "run_matrix",
     }
     on_disk = set()
-    for directory in ("validation", "scaling", "differentiability"):
+    for directory in ("validation", "scaling", "differentiability", "multigpu"):
         for path in (REPO_ROOT / "bench" / directory).glob("*.py"):
             name = path.stem
             if name.startswith("_") or name == "__init__":

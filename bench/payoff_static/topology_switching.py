@@ -47,12 +47,36 @@ it is answered here rather than assumed. It is explicitly **not** justified by
 appeal to ordering stability: the Yggdrax run shows the Morton permutation
 changing on every step of a converging descent at these ``N``.
 
+On the fused lane (November 2026 rebase)
+----------------------------------------
+Section 7 now runs on the production fused lane (``--lane fused``, the default;
+the lane is recorded in the config and each record's ``operator`` block). That
+lane rebuilds its topology every step in production, in one jitted program, so
+the question "is there still anything to decide?" has to be answered, not
+assumed. There is: within a fit a topology epoch is still a frozen
+``FusedPreparedTopology`` (tree, far CSR, near CSR and gradient plan), reused
+for ``k`` steps, and ``k`` still trades a stale interaction list against the
+rebuild's cost. What changed is the cost side, which is now measured per point:
+``rebuild_cost.prepare_over_gradient`` is the mean later rebuild over the mean
+later gradient. When it is small, ``k = 1`` costs nothing and the cadence panel
+reduces to the statement that rebuilding every step is free; when it is not,
+the churn rates say what a larger ``k`` buys.
+
+The switch instrumentation reads the fused states themselves:
+:mod:`~jaccpot.applications.density_reconstruction.topology` fingerprints a
+``FusedPreparedTopology``'s ``LargeNPreparedState`` (padded near CSR trimmed,
+target-sorted far CSR expanded). ``state_type`` in each record names what was
+fingerprinted, so a run that silently fell back to another lane is visible.
+The plotted rate is ``near_set_churn``, the sampled near-set overlap (D-024),
+named in ``primary_switch_metric``.
+
 Usage
 -----
-CPU smoke::
+CPU smoke (the fused CPU route compiles slowly: ~10-20 s per prepare)::
 
     JAX_PLATFORMS=cpu python -m bench.payoff_static.topology_switching \\
-        --n 192 --tracers 64 --iterations 6 --cadences 1,2 \\
+        --n 192 --tracers 64 --iterations 6 --cadences 1,2 --order 3 \\
+        --leaf-size 16 --learning-rates 1e-3 --fd-samples 2 \\
         --gpu-select none --json-out /tmp/smoke.json
 
 Paper run::
@@ -71,6 +95,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from bench.payoff_static import _common  # noqa: E402
 from examples.jaccpot_paper.common import jsonio, runmeta  # noqa: E402
 
 DEFAULT_OUT = "density_reconstruction/topology_switching.json"
@@ -130,6 +155,7 @@ def _parse_args() -> argparse.Namespace:
         default=1,
         help="Sampling stride for the intensive churn rates",
     )
+    _common.add_lane_args(p)
     runmeta.add_common_args(p)
     return p.parse_args()
 
@@ -178,6 +204,7 @@ def _setup(n: int, args: argparse.Namespace) -> Any:
         order=int(args.order),
         theta=float(args.theta),
         leaf_size=int(args.leaf_size),
+        **_common.operator_kwargs(args),
     )
     parameterization = make_parameterization("positions", config=config)
     return config, truth, operator, parameterization
@@ -462,9 +489,31 @@ def _run_cadence(
         clean=truth.clean_accelerations,
     )
 
+    timing = result.timing or {}
+    later_prepare = timing.get("mean_later_prepare_seconds")
+    later_gradient = timing.get("mean_later_gradient_seconds")
     record: Dict[str, Any] = {
         "N": int(n),
         "M": int(args.tracers),
+        "lane": operator.record().get("lane"),
+        "operator": operator.record(),
+        # What the switch instrumentation fingerprinted: a FusedPreparedTopology
+        # on the fused lane, an FMMPreparedState on the radix lane.
+        "state_type": (type(captured_states[0]).__name__ if captured_states else None),
+        "primary_switch_metric": "near_set_churn",
+        # The cost side of the cadence trade: how dear a rebuild is against the
+        # gradient step it precedes. Eager path, so dispatch-inclusive; with
+        # k=1 every step pays it.
+        "rebuild_cost": {
+            "mean_later_prepare_seconds": later_prepare,
+            "mean_later_gradient_seconds": later_gradient,
+            "prepare_over_gradient": (
+                later_prepare / later_gradient
+                if later_prepare is not None and later_gradient
+                else None
+            ),
+            "path": timing.get("path"),
+        },
         "num_free_parameters": int(parameterization.num_free),
         "rebuild_cadence": int(cadence),
         "learning_rate": float(learning_rate),
@@ -615,7 +664,7 @@ def _merge_runs(args: argparse.Namespace) -> int:
     records: List[Dict[str, Any]] = []
     merged_config: Optional[Dict[str, Any]] = None
     metas: List[Dict[str, Any]] = []
-    pinned = ("theta", "order", "basis", "leaf_size", "softening", "M")
+    pinned = ("theta", "order", "basis", "leaf_size", "softening", "M", "lane")
 
     for source in sources:
         path = source if source.startswith("/") else str(jsonio.results_path(source))
@@ -707,7 +756,7 @@ def main() -> int:
     rates = [float(v) for v in str(args.learning_rates).split(",") if v]
 
     print(
-        f"topology_switching: N in {n_list}, cadences {cadences}, "
+        f"topology_switching: lane={args.lane}, N in {n_list}, cadences {cadences}, "
         f"learning rates {rates}, {args.iterations} iterations",
         flush=True,
     )
@@ -729,6 +778,7 @@ def main() -> int:
         "learning_rates": rates,
         "intensive_every": int(args.intensive_every),
         "near_set_sample": int(args.near_set_sample),
+        **_common.lane_config(args),
     }
     records: List[Dict[str, Any]] = []
 

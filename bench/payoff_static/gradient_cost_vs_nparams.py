@@ -64,15 +64,48 @@ is a real cost -- it is why ``fit.py`` runs the eager path by default, since
 recompiles at every rebuild -- but it is one-time per topology, and folding it
 into a per-evaluation number would misreport both.
 
+The lane, and the x-axis (November 2026 rebase)
+-----------------------------------------------
+Section 7 runs on the production fused lane (``--lane fused``, the default here;
+``make_forward_operator`` itself still defaults to the radix lane, so the lane
+is passed explicitly and recorded in the config and in every record's
+``operator`` block). fp64 by default (``--dtype``); the geometric ``"dehnen"``
+MAC, because ``dehnen_error`` is mass-dependent and refused with zero-mass
+tracers. The September numbers quoted above were measured on the radix lane and
+are kept as the record of that run, not as predictions for this one.
+
+The x-axis runs from ``P = 3e3`` to ``P = 3e8`` (``N = 1e8`` sources on one
+card): the default ``--n`` ladder ends at 1e8, and the sweep stops at the first
+failing ``N`` and records it, so the ladder's top is where the single card's
+ceiling is, measured. The finite-difference annotations are extrapolated from
+the largest ``N`` that ran, at every ``--annotate-at`` parameter count (default
+1e6 ... 3e8).
+
+**The ratio is measured per point, not assumed** (D-023: reverse cost is a
+bounded multiple of forward, flat across parameter count -- a claim to test).
+Every record carries ``backward_over_forward`` (wall clock) and
+``backward_over_forward_flops`` (XLA cost analysis), and ``data.ratio_summary``
+collects them per ``N`` with their spread over the compute-bound points.
+Launch-latency-bound points are flagged and kept out of the spread.
+
+**Inputs are jit arguments.** The parameters, the frozen topology (the fused
+lane's ``FusedTopology`` and ``LargeNGradPlan``, or the radix
+``FMMPreparedState``), the tracer positions and the observed field all enter
+the jitted programs as arguments; closed over, ``jax.jit`` would embed every
+array of the topology in the program as a constant. One leaf per tree stays
+concrete, because the library needs it to be: ``node_level``, whose maximum
+gives the L2L cascade static loop bounds (see :func:`_state_arguments`); each
+record names it and its size.
+
 Usage
 -----
-CPU smoke::
+CPU smoke (the fused CPU route compiles slowly: ~10-20 s per prepare)::
 
     JAX_PLATFORMS=cpu python -m bench.payoff_static.gradient_cost_vs_nparams \\
-        --n 256,512 --repeats 2 --warmup 1 --gpu-select none \\
-        --json-out /tmp/smoke.json
+        --n 256,512 --tracers 32 --order 3 --leaf-size 16 --repeats 2 \\
+        --warmup 1 --gpu-select none --json-out /tmp/smoke.json
 
-Paper run::
+Paper run (one card; autocvd picks a free one)::
 
     python -m bench.payoff_static.gradient_cost_vs_nparams
 """
@@ -83,18 +116,24 @@ import argparse
 import pathlib
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from bench.payoff_static import _common  # noqa: E402
 from examples.jaccpot_paper.common import jsonio, runmeta  # noqa: E402
 
 DEFAULT_OUT = "density_reconstruction/gradient_cost_vs_nparams.json"
 
-#: Parameter counts the figure annotates in human units. 1e7 is the headline.
-ANNOTATE_AT = (1_000_000, 10_000_000, 30_000_000)
+#: Parameter counts the figure annotates in human units: 1e7 was September's
+#: headline; 3e8 is ``N = 1e8`` sources on one card, the rebased x-axis' end.
+ANNOTATE_AT = (1_000_000, 10_000_000, 30_000_000, 100_000_000, 300_000_000)
+
+#: The default ``N`` ladder: P = 3N from 3e3 to 3e8. The sweep stops at the first
+#: failure, so the top rungs are where the single card's ceiling is measured.
+DEFAULT_N = "1024,4096,16384,65536,262144,1048576,4194304,16777216,33554432,100000000"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -108,16 +147,27 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument(
         "--n",
-        default="1024,4096,16384,65536,262144,1048576",
-        help="Comma-separated source counts N; free parameters are 3N",
+        default=DEFAULT_N,
+        help=(
+            "Comma-separated source counts N; free parameters are 3N. The "
+            "default runs to N=1e8 (P=3e8) and stops at the first N that fails"
+        ),
+    )
+    p.add_argument(
+        "--annotate-at",
+        default=",".join(str(v) for v in ANNOTATE_AT),
+        help=(
+            "Parameter counts P at which data.annotations extrapolates finite "
+            "differences, (P + 1) x the largest N's measured forward"
+        ),
     )
     p.add_argument("--tracers", type=int, default=4096, help="Tracer count M")
     p.add_argument("--order", type=int, default=4, help="Expansion order")
     p.add_argument("--theta", type=float, default=0.5, help="MAC parameter")
     p.add_argument("--leaf-size", type=int, default=64, help="Leaf size")
     p.add_argument("--softening", type=float, default=1.0e-2, help="Plummer softening")
-    p.add_argument("--preset", default="accurate", help="jaccpot preset")
     p.add_argument("--basis", default="real", help="Expansion basis")
+    _common.add_lane_args(p)
     p.add_argument("--repeats", type=int, default=5, help="Timed repeats")
     p.add_argument("--warmup", type=int, default=2, help="Untimed warmup calls")
     p.add_argument(
@@ -182,7 +232,7 @@ def _reset_peak_memory() -> None:
         pass
 
 
-def _cost_analysis(fn: Any, argument: Any) -> Optional[Dict[str, float]]:
+def _cost_analysis(fn: Any, arguments: Tuple[Any, ...]) -> Optional[Dict[str, float]]:
     """Return XLA's FLOP and byte counts for a compiled callable.
 
     Wall-clock alone cannot carry this figure's claim, because at small ``N``
@@ -200,8 +250,8 @@ def _cost_analysis(fn: Any, argument: Any) -> Optional[Dict[str, float]]:
     ----------
     fn : Any
         A ``jax.jit``-wrapped callable.
-    argument : Any
-        One example argument, for lowering.
+    arguments : Tuple[Any, ...]
+        Its example arguments, for lowering.
 
     Returns
     -------
@@ -210,7 +260,7 @@ def _cost_analysis(fn: Any, argument: Any) -> Optional[Dict[str, float]]:
         cost analysis (or the callable is not jitted).
     """
     try:
-        compiled = fn.lower(argument).compile()
+        compiled = fn.lower(*arguments).compile()
         analysis = compiled.cost_analysis()
     except Exception:  # pragma: no cover - backend dependent
         return None
@@ -245,6 +295,70 @@ def _cost_analysis(fn: Any, argument: Any) -> Optional[Dict[str, float]]:
         if value is not None:
             record[key] = float(value)
     return record
+
+
+def _state_arguments(state: Any) -> Tuple[List[Any], Callable[[Any], Any], int]:
+    """Split a prepared state into jit arguments and a function rebuilding it.
+
+    Every array of the frozen topology goes into the jitted programs as an
+    ARGUMENT -- closed over, ``jax.jit`` embeds it in the program as a constant
+    -- with one exception the library forces: each tree's per-node level array
+    (``RadixTreeTopology.node_level``). The L2L cascade reads its maximum on the
+    host when it is concrete, so the level loop has static bounds and a reverse
+    (``jaccpot/runtime/kernels/_l2l.py``); passed as an argument it is a tracer,
+    the loop bound is dynamic, and ``jax.grad`` refuses the ``fori_loop``
+    ("Reverse-mode differentiation does not work for lax.while_loop or
+    lax.fori_loop with dynamic start/stop values"; found by bisecting the fused
+    topology's leaves at N=256 on CPU). It is one int32 per tree node, and the
+    record reports its size.
+
+    Parameters
+    ----------
+    state : Any
+        A fused lane ``FusedPreparedTopology`` or a radix ``FMMPreparedState``.
+
+    Returns
+    -------
+    Tuple[List[Any], Callable[[Any], Any], int]
+        ``(arrays, rebuild, pinned_bytes)``: the argument leaves,
+        ``rebuild(arrays)`` -> the state ``evaluate_at_topology`` takes, and the
+        bytes of the leaves kept concrete.
+    """
+    import dataclasses
+
+    import jax
+    from yggdrax.tree import Tree, get_node_levels
+
+    from jaccpot.applications.density_reconstruction.forward import (
+        FusedPreparedTopology,
+    )
+
+    fused = isinstance(state, FusedPreparedTopology)
+    dynamic = (state.topology, state.plan) if fused else state
+    trees = [
+        node
+        for node in jax.tree_util.tree_leaves(
+            dynamic, is_leaf=lambda node: isinstance(node, Tree)
+        )
+        if isinstance(node, Tree)
+    ]
+    pinned = {id(get_node_levels(tree)) for tree in trees}
+    leaves, treedef = jax.tree_util.tree_flatten(dynamic)
+    argument_index = [i for i, leaf in enumerate(leaves) if id(leaf) not in pinned]
+    pinned_bytes = sum(
+        int(getattr(leaf, "nbytes", 0)) for leaf in leaves if id(leaf) in pinned
+    )
+
+    def rebuild(arrays: Any) -> Any:
+        filled = list(leaves)
+        for index, array in zip(argument_index, arrays):
+            filled[index] = array
+        rebuilt = jax.tree_util.tree_unflatten(treedef, filled)
+        if fused:
+            return dataclasses.replace(state, topology=rebuilt[0], plan=rebuilt[1])
+        return rebuilt
+
+    return [leaves[i] for i in argument_index], rebuild, pinned_bytes
 
 
 def _measure_one(
@@ -303,14 +417,46 @@ def _measure_one(
         order=int(args.order),
         theta=float(args.theta),
         leaf_size=int(args.leaf_size),
-        preset=str(args.preset),
         basis=str(args.basis),
+        **_common.operator_kwargs(args),
     )
     # One prepared state for every arm: rebuilding inside a timed region would
     # put host-side tree construction into the forward number and not into the
-    # backward one.
+    # backward one. Its cost is recorded, outside every timed region.
+    started = time.perf_counter()
     state = operator.prepare(positions)
+    prepare_seconds = time.perf_counter() - started
+    state_arrays, rebuild_state, pinned_bytes = _state_arguments(state)
+    tracer_arg = jnp.asarray(tracers, dtype=jnp.float64)
     observed = jnp.zeros((int(args.tracers), 3), dtype=jnp.float64)
+    operator_record = operator.record()
+
+    def at_tracers(arrays: Any, tracer_positions: Any, positions_now: Any) -> Any:
+        """The operator's map with the topology and tracers as traced inputs.
+
+        ``dataclasses.replace`` swaps the operator's tracer block for the
+        argument, so ``evaluate_at_topology`` -- the operator's own map, not a
+        copy of it -- reads tracers that are a jit argument rather than an
+        embedded constant.
+
+        Parameters
+        ----------
+        arrays : Any
+            The topology's argument leaves (:func:`_state_arguments`).
+        tracer_positions : Any
+            ``(M, 3)`` tracer positions.
+        positions_now : Any
+            ``(N, 3)`` source positions, differentiated.
+
+        Returns
+        -------
+        Any
+            ``(M, 3)`` accelerations at the tracers.
+        """
+        import dataclasses
+
+        live = dataclasses.replace(operator, tracer_positions=tracer_positions)
+        return live.evaluate_at_topology(rebuild_state(arrays), positions_now)
 
     kinds = ["positions"] + (["parametric"] if args.parametric else [])
     records: List[Dict[str, Any]] = []
@@ -322,16 +468,21 @@ def _measure_one(
             else parameterization.pack(parameterization.true_params(config))
         )
 
-        def forward_fn(p: Any) -> Any:
-            return operator.evaluate_at_topology(
-                state, parameterization.to_positions(p)
+        # Every input is an argument: parameters, the topology's arrays, the
+        # tracers and the observed field. `arguments` is what each call passes.
+        arguments = (params, state_arrays, tracer_arg, observed)
+
+        def forward_fn(p: Any, arrays: Any, tracer_positions: Any, obs: Any) -> Any:
+            del obs
+            return at_tracers(
+                arrays, tracer_positions, parameterization.to_positions(p)
             )
 
-        def objective(p: Any) -> Any:
-            predicted = operator.evaluate_at_topology(
-                state, parameterization.to_positions(p)
+        def objective(p: Any, arrays: Any, tracer_positions: Any, obs: Any) -> Any:
+            predicted = at_tracers(
+                arrays, tracer_positions, parameterization.to_positions(p)
             )
-            return jnp.sum((predicted - observed) ** 2)
+            return jnp.sum((predicted - obs) ** 2)
 
         want_jit = str(args.mode) == "jit"
         mode = "jit" if want_jit else "eager"
@@ -358,10 +509,10 @@ def _measure_one(
             # includes a compile.
             try:
                 started = time.perf_counter()
-                jax.block_until_ready(forward_call(params))
+                jax.block_until_ready(forward_call(*arguments))
                 forward_compile_seconds = time.perf_counter() - started
                 started = time.perf_counter()
-                jax.block_until_ready(gradient_call(params))
+                jax.block_until_ready(gradient_call(*arguments))
                 gradient_compile_seconds = time.perf_counter() - started
             except Exception as exc:
                 # Record the MESSAGE, not just the type. The first version of
@@ -380,7 +531,7 @@ def _measure_one(
 
         _reset_peak_memory()
         forward_min, forward_mean, forward_sd = timing.time_min_repeat(
-            lambda: forward_call(params),
+            lambda: forward_call(*arguments),
             warmup=int(args.warmup),
             repeats=int(args.repeats),
         )
@@ -388,14 +539,18 @@ def _measure_one(
 
         _reset_peak_memory()
         grad_min, grad_mean, grad_sd = timing.time_min_repeat(
-            lambda: gradient_call(params),
+            lambda: gradient_call(*arguments),
             warmup=int(args.warmup),
             repeats=int(args.repeats),
         )
         grad_peak = _peak_memory_bytes()
 
-        forward_cost = _cost_analysis(forward_call, params) if mode == "jit" else None
-        gradient_cost = _cost_analysis(gradient_call, params) if mode == "jit" else None
+        forward_cost = (
+            _cost_analysis(forward_call, arguments) if mode == "jit" else None
+        )
+        gradient_cost = (
+            _cost_analysis(gradient_call, arguments) if mode == "jit" else None
+        )
         flop_ratio = None
         if forward_cost and gradient_cost and forward_cost["flops"]:
             flop_ratio = gradient_cost["flops"] / forward_cost["flops"]
@@ -408,6 +563,15 @@ def _measure_one(
         record = {
             "N": int(n),
             "M": int(args.tracers),
+            "lane": operator_record.get("lane"),
+            "operator": operator_record,
+            # Host-side topology build, once per N, outside every timed region.
+            "prepare_seconds": prepare_seconds,
+            # Inputs enter the jitted programs as arguments; the one exception
+            # (the trees' node_level, see _state_arguments) and its size.
+            "inputs_as_jit_arguments": True,
+            "closed_over_state_leaves": ["node_level"],
+            "closed_over_state_bytes": pinned_bytes,
             "parameterization": kind,
             "num_free_parameters": num_free,
             "forward_seconds": forward_min,
@@ -474,9 +638,61 @@ def _measure_one(
         # is the whole point here, since this sweep runs until the device is
         # exhausted and must not hold a prepared state across N -- without
         # leaving a closure pointing at an unbound name.
-        parameterization = params = None
-    state = None
+        parameterization = params = arguments = None
+    state = state_arrays = None
     return records
+
+
+def _ratio_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Collect the reverse/forward ratio per point, and its spread.
+
+    D-023 is a claim to test -- reverse cost a bounded multiple of forward, flat
+    across parameter count -- so the ratio is read off every point rather than
+    assumed, and the spread is taken over the compute-bound points only: a
+    launch-latency-bound point's wall-clock ratio reports kernel fusion, not the
+    reverse pass (see :func:`_cost_analysis`).
+
+    Parameters
+    ----------
+    records : List[Dict[str, Any]]
+        The usable (not failed) records.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Per-arm lists of ``(N, P, wall ratio, flop ratio, latency_bound)`` and,
+        over the compute-bound points, the wall-clock ratio's min, max and
+        max/min.
+    """
+    summary: Dict[str, Any] = {}
+    for kind in sorted({r["parameterization"] for r in records}):
+        rows = sorted(
+            (r for r in records if r["parameterization"] == kind),
+            key=lambda r: r["N"],
+        )
+        points = [
+            {
+                "N": r["N"],
+                "num_free_parameters": r["num_free_parameters"],
+                "backward_over_forward": r["backward_over_forward"],
+                "backward_over_forward_flops": r["backward_over_forward_flops"],
+                "latency_bound": r["latency_bound"],
+            }
+            for r in rows
+        ]
+        bound = [
+            p["backward_over_forward"]
+            for p in points
+            if not p["latency_bound"] and p["backward_over_forward"]
+        ]
+        summary[kind] = {
+            "points": points,
+            "compute_bound_points": len(bound),
+            "ratio_min": min(bound) if bound else None,
+            "ratio_max": max(bound) if bound else None,
+            "ratio_spread": (max(bound) / min(bound)) if bound else None,
+        }
+    return summary
 
 
 def main() -> int:
@@ -495,10 +711,12 @@ def main() -> int:
 
     from bench.scaling import _timing as timing
 
-    n_list = [int(v) for v in str(args.n).split(",") if v]
+    n_list = [int(float(v)) for v in str(args.n).split(",") if v]
+    annotate_at = [int(float(v)) for v in str(args.annotate_at).split(",") if v]
     print(
-        f"gradient_cost_vs_nparams: N in {n_list}, M={args.tracers}, "
-        f"order={args.order}, theta={args.theta}, leaf={args.leaf_size}",
+        f"gradient_cost_vs_nparams: lane={args.lane}, N in {n_list}, "
+        f"M={args.tracers}, order={args.order}, theta={args.theta}, "
+        f"leaf={args.leaf_size}, {args.dtype}",
         flush=True,
     )
 
@@ -514,10 +732,14 @@ def main() -> int:
         "M": int(args.tracers),
         "leaf_size": int(args.leaf_size),
         "softening": float(args.softening),
+        # `preset` stays at top level for the September notebooks; it is only
+        # read on the radix lane.
         "preset": str(args.preset),
         "repeats": int(args.repeats),
         "warmup": int(args.warmup),
         "mode": str(args.mode),
+        "annotate_at": annotate_at,
+        **_common.lane_config(args),
     }
     records: List[Dict[str, Any]] = []
 
@@ -552,8 +774,10 @@ def main() -> int:
                 (r for r in usable if r["parameterization"] == "positions"),
                 key=lambda r: r["N"],
             )
+            reference_p = int(largest["num_free_parameters"])
             annotations = {
                 "reference_N": largest["N"],
+                "reference_num_free_parameters": reference_p,
                 "reference_forward_seconds": largest["forward_seconds"],
                 "reference_forward_backward_seconds": largest[
                     "forward_backward_seconds"
@@ -562,8 +786,12 @@ def main() -> int:
                     str(p): {
                         "seconds": (p + 1) * largest["forward_seconds"],
                         "years": (p + 1) * largest["forward_seconds"] / 31_557_600.0,
+                        # Beyond the largest measured P the forward of the
+                        # problem with P parameters is dearer than the
+                        # reference's, so the extrapolation is a lower bound.
+                        "beyond_measured_P": bool(p > reference_p),
                     }
-                    for p in ANNOTATE_AT
+                    for p in annotate_at
                 },
             }
         return jsonio.write_result(
@@ -574,6 +802,7 @@ def main() -> int:
                 "records": records,
                 "annotations": annotations,
                 "min_forward_seconds": forward_reference,
+                "ratio_summary": _ratio_summary(usable),
             },
         )
 

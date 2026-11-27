@@ -85,7 +85,51 @@ SCRIPTS = {
         "--diagnostics-every",
         "1",
     ],
+    # The mesh lane at ndev=1 (a one-device mesh is now a measured point, not a
+    # skip) and ndev=2, each in its own process as the script requires, on
+    # forced host devices with the S9 interpret set (--cpu-interpret). One
+    # jitted epoch, as in test_density_reconstruction_distributed.py: the eager
+    # mesh gradient takes ~7 minutes per step in interpret mode.
     "multigpu_scaling": [
+        "--cpu-interpret",
+        "--jit-within-epoch",
+        "--n",
+        "128",
+        "--tracers",
+        "32",
+        "--iterations",
+        "2",
+        "--rebuild-cadence",
+        "2",
+        "--device-counts",
+        "1",
+        "--order",
+        "3",
+        "--leaf-size",
+        "16",
+    ],
+    "multigpu_scaling@ndev2": [
+        "--cpu-interpret",
+        "--jit-within-epoch",
+        "--n",
+        "128",
+        "--tracers",
+        "32",
+        "--iterations",
+        "2",
+        "--rebuild-cadence",
+        "2",
+        "--device-counts",
+        "2",
+        "--order",
+        "3",
+        "--leaf-size",
+        "16",
+    ],
+    # Parameter sharding of the single-card fused operator.
+    "multigpu_scaling@parameter_sharding": [
+        "--mode",
+        "parameter_sharding",
         "--n",
         "128",
         "--tracers",
@@ -108,11 +152,12 @@ REQUIRED_CONFIG_KEYS = ("n", "theta", "order", "basis", "seed", "device", "preci
 @pytest.mark.parametrize("script", sorted(SCRIPTS))
 def test_bench_script_smoke(script, tmp_path):
     """Each bench script completes at tiny N and writes a conforming JSON."""
-    out = tmp_path / f"{script}.json"
+    module = script.split("@")[0]
+    out = tmp_path / f"{module}.json"
     command = [
         sys.executable,
         "-m",
-        f"bench.payoff_static.{script}",
+        f"bench.payoff_static.{module}",
         *SCRIPTS[script],
         "--gpu-select",
         "none",
@@ -147,28 +192,25 @@ def test_bench_script_smoke(script, tmp_path):
     assert record["meta"].get("git_sha"), f"{script} recorded no git sha"
     assert record["meta"].get("jax_version"), f"{script} recorded no jax version"
     assert record["data"].get("records"), f"{script} produced no records"
-    # And no record may be a silent failure.
-    failures = [r for r in record["data"]["records"] if r.get("failed")]
+    # And no record may be a silent failure, or a skipped point.
+    failures = [
+        r for r in record["data"]["records"] if r.get("failed") or r.get("skipped")
+    ]
     assert not failures, f"{script} recorded failed points at tiny N: {failures}"
+    # Section 7 runs on the fused lane, chosen explicitly, not the library's
+    # default; the mesh benches record the mesh lane.
+    expected = "fused_mesh" if "--cpu-interpret" in SCRIPTS[script] else "fused"
+    assert record["config"].get("lane") == expected, record["config"].get("lane")
 
 
 @pytest.mark.slow
-@pytest.mark.skip(
-    reason=(
-        "the probe's ladder is the September path's DistributedFMMConfig caps "
-        "(max_pair_queue, ...), which the fused mesh lane does not have, and on "
-        "CPU the mesh gradient runs only under the S9 interpret set; the ported "
-        "operator refuses the old caps. Rewrite over CrossCapacities or retire "
-        "the probe (REBASE_PLAN step A2)."
-    )
-)
 def test_distributed_caps_probe_smoke(tmp_path):
-    """The caps probe runs too, on forced host devices rather than a GPU.
+    """The cross-capacity probe runs on two forced host devices.
 
-    It is not in ``SCRIPTS`` because it is shaped differently from the four
-    sweeps: it needs a multi-device mesh, so it forces CPU devices into
-    existence before JAX initialises, and its payload is a ladder of attempts
-    rather than a record per measured point.
+    It is not in ``SCRIPTS`` because it is shaped differently from the sweeps:
+    it needs a two-device mesh (``--cpu-interpret`` forces the host devices and
+    applies the S9 interpret set before JAX initialises), and its payload is a
+    ladder of rungs times placements rather than a record per measured point.
     """
     out = tmp_path / "caps.json"
     completed = subprocess.run(
@@ -176,16 +218,19 @@ def test_distributed_caps_probe_smoke(tmp_path):
             sys.executable,
             "-m",
             "bench.payoff_static.distributed_caps_probe",
+            "--cpu-interpret",
+            "--device-count",
+            "2",
             "--n",
             "256",
             "--tracers",
             "32",
+            "--order",
+            "3",
             "--leaf-size",
             "16",
-            "--device-count",
-            "2",
-            "--host-devices",
-            "2",
+            "--gpu-select",
+            "none",
             "--json-out",
             str(out),
         ],
@@ -212,10 +257,17 @@ def test_distributed_caps_probe_smoke(tmp_path):
     for key in REQUIRED_CONFIG_KEYS:
         assert key in payload["config"], f"caps probe config lost {key}"
     assert payload["meta"]["git_sha"], "caps probe wrote no provenance"
+    assert payload["config"]["caps_kind"] == "CrossCapacities"
+    sizing = payload["data"]["sizing"]
+    assert sizing and not sizing[0].get("failed"), f"sizing failed: {sizing}"
     attempts = payload["data"]["attempts"]
-    assert len(attempts) == len(
-        payload["config"]["ladder"]
-    ), "one attempt per rung of the caps ladder"
-    # Every rung must report an outcome; at this size none should fail.
+    assert len(attempts) == len(payload["config"]["ladder"]) * len(
+        payload["config"]["placements"]
+    ), "one attempt per rung and placement"
+    # At this size every rung, the library's unplanned default included, keeps
+    # the verdict clean, and the gradient at the start placement is finite.
     for a in attempts:
-        assert a["ran"] is True, f"caps probe rung failed at tiny N: {a}"
+        assert a["ran"] is True and a["verdict_ok"] is True, f"rung failed: {a}"
+        if a["placement"] == payload["config"]["placements"][0]:
+            assert a["gradient_finite"] is True, f"non-finite gradient: {a}"
+    assert payload["data"]["suggested_caps"][0]["cli"], "no --caps string"

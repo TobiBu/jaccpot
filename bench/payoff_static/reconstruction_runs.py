@@ -71,13 +71,30 @@ own ``degenerate: True`` flag and caveat string from
 :mod:`~jaccpot.applications.density_reconstruction.diagnostics`. It is not a
 score and the record says so in the same breath as the number.
 
+Lane, precision and N (November 2026 rebase)
+--------------------------------------------
+The fits run on the production fused lane (``--lane fused``, the default here;
+``make_forward_operator`` itself still defaults to the radix lane, so the lane is
+passed explicitly and recorded in the config and in each record's ``operator``
+block), in fp64 (``--dtype float64``, the default: fp32 finite-difference checks
+bottom out near 4e-4, above the agreement section 7 quotes). The MAC is the
+geometric ``"dehnen"`` unless ``--mac`` says otherwise, since ``dehnen_error`` is
+refused with zero-mass tracers. The numbers quoted above are September's radix
+lane runs, kept as the record of why the settings are what they are.
+
+Larger N is a command-line choice: ``--n`` is the source-count axis and its
+first entry the reference point every other axis varies against, so
+``--n 131072,1048576`` moves the whole sweep up and keeps one N-axis point
+below it. ``--tracers`` scales M independently.
+
 Usage
 -----
-CPU smoke::
+CPU smoke (the fused CPU route compiles slowly: ~10-20 s per prepare)::
 
     JAX_PLATFORMS=cpu python -m bench.payoff_static.reconstruction_runs \\
-        --n 192 --tracers 64 --iterations 6 --cases smoke \\
-        --gpu-select none --json-out /tmp/smoke.json
+        --n 128 --tracers 32 --iterations 3 --order 3 --leaf-size 16 \\
+        --cases smoke --softenings 1e-2 --noise-fractions 0.0 \\
+        --perturbers lmc_like --gpu-select none --json-out /tmp/smoke.json
 
 Paper run::
 
@@ -96,6 +113,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from bench.payoff_static import _common  # noqa: E402
 from examples.jaccpot_paper.common import jsonio, runmeta  # noqa: E402
 
 DEFAULT_OUT = "density_reconstruction/reconstruction_runs.json"
@@ -132,7 +150,14 @@ def _parse_args() -> argparse.Namespace:
             "as separate processes and stitching them here"
         ),
     )
-    p.add_argument("--n", default="16384,131072", help="Source counts N")
+    p.add_argument(
+        "--n",
+        default="16384,131072",
+        help=(
+            "Source counts N; the first is the reference every other axis "
+            "varies against, the rest are the N-axis points"
+        ),
+    )
     p.add_argument("--tracers", type=int, default=8192, help="Tracer count M")
     p.add_argument("--iterations", type=int, default=240, help="Gradient steps")
     p.add_argument("--learning-rate", type=float, default=2.0e-3, help="Step size")
@@ -173,6 +198,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--perturbers", default="lmc_like,none", help="Perturber modes to sweep"
     )
+    _common.add_lane_args(p)
     runmeta.add_common_args(p)
     return p.parse_args()
 
@@ -194,7 +220,7 @@ def _case_list(args: argparse.Namespace) -> List[Dict[str, Any]]:
         in the number of axes rather than exponential, and every point still
         differs from the reference in exactly one respect.
     """
-    n_list = [int(v) for v in str(args.n).split(",") if v]
+    n_list = [int(float(v)) for v in str(args.n).split(",") if v]
     softenings = [float(v) for v in str(args.softenings).split(",") if v]
     noises = [float(v) for v in str(args.noise_fractions).split(",") if v]
     perturbers = [v for v in str(args.perturbers).split(",") if v]
@@ -311,6 +337,7 @@ def _run_case(case: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
         order=int(args.order),
         theta=float(args.theta),
         leaf_size=int(args.leaf_size),
+        **_common.operator_kwargs(args),
     )
     kind = str(case["parameterization"])
     parameterization = make_parameterization(kind, config=config)
@@ -394,6 +421,8 @@ def _run_case(case: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
 
     record = {
         **case,
+        "lane": operator.record().get("lane"),
+        "operator": operator.record(),
         "num_free_parameters": int(parameterization.num_free),
         "M": int(args.tracers),
         "learning_rate": learning_rate,
@@ -548,7 +577,7 @@ def _merge_runs(args: argparse.Namespace) -> int:
     records: List[Dict[str, Any]] = []
     merged_config: Optional[Dict[str, Any]] = None
     metas: List[Dict[str, Any]] = []
-    pinned = ("theta", "order", "basis", "leaf_size", "softening", "M")
+    pinned = ("theta", "order", "basis", "leaf_size", "softening", "M", "lane")
 
     for source in sources:
         path = source if source.startswith("/") else str(jsonio.results_path(source))
@@ -636,11 +665,14 @@ def main() -> int:
     runmeta.enable_x64(args.dtype)
 
     cases = _case_list(args)
-    print(f"reconstruction_runs: {len(cases)} cases", flush=True)
+    print(
+        f"reconstruction_runs: lane={args.lane}, {args.dtype}, {len(cases)} cases",
+        flush=True,
+    )
 
     out = args.json_out or DEFAULT_OUT
     config_record = {
-        "n": [int(v) for v in str(args.n).split(",") if v],
+        "n": [int(float(v)) for v in str(args.n).split(",") if v],
         "theta": float(args.theta),
         "order": int(args.order),
         "basis": "real",
@@ -657,6 +689,7 @@ def main() -> int:
         ],
         "initial_guesses": list(INITIAL_GUESSES),
         "cases": str(args.cases),
+        **_common.lane_config(args),
     }
     records: List[Dict[str, Any]] = []
 

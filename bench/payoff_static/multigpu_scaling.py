@@ -15,49 +15,100 @@ model is not a ceiling.
 
 What is and is not sharded
 --------------------------
-This script shards the **optimisation**: the parameter array is placed across
-the mesh, so a parameter count exceeding one device's memory becomes runnable.
-That is precisely the claim as stated. It is *not* the same thing as jaccpot's
-distributed FMM force evaluation (``jaccpot.distributed``, section 5), which
-partitions the *sources* across devices and exchanges halos. A run's record
-says which of the two it used in ``sharding_mode``, because a wall-clock number
-from one is not comparable with the other, and because "runs on 8 GPUs" would
-otherwise be ambiguous between them.
+``--mode distributed`` (the default) partitions the **sources** across the
+devices: the observation operator is
+:class:`~jaccpot.applications.density_reconstruction.distributed.DistributedForwardOperator`,
+the fused mesh lane (``FusedMeshForce`` with its WP-G gradient,
+``make_mesh_grad_fn``), particles placed as Morton domains, the cross-domain
+exchange sized by ``CrossCapacities``. ``--mode parameter_sharding`` keeps the
+single-card operator (``make_forward_operator(lane=--lane)``, the fused lane by
+default) and only places the parameter array across the devices; September
+measured that this moves neither the wall clock nor the ceiling, and it is kept
+because that negative result is part of the argument. A run's record says which
+of the two it used in ``sharding_mode``, because a wall-clock number from one is
+not comparable with the other.
 
+ndev = 1 is a mesh point
+------------------------
+The September path's per-device tree build asserted on a single domain, so
+distributed mode used to skip one device. The mesh lane runs a one-device mesh
+(no cross exchange), so ndev=1 is now measured on the same code path as 2, 4
+and 8, and the strong-scaling curve has its own baseline instead of borrowing
+the single-card operator's.
+
+Failures are data, and of two kinds
+-----------------------------------
 An OOM is a data point, not a crash. Every failure is recorded with its device
-count, parameter count and exception type, the JSON is rewritten after every
-point, and the sweep continues -- the whole figure is about where the ceiling
-is.
+count, parameter count, exception type and ``failure_kind``, the JSON is
+rewritten after every point, and the sweep continues. ``failure_kind`` separates
+``"out_of_memory"`` (the ceiling) from ``"verdict"`` -- the mesh force's bits
+said some device's lists overflowed or are not ones the reverses read
+(``DistributedForwardOperator.prepare`` refuses those, since their gradient
+would be NaN). A verdict failure is a capacity setting, **not** a ceiling, and
+the ceiling arm says so.
+
+Cross capacities
+----------------
+``--caps`` takes ``CrossCapacities`` keywords (``name=value,...``); the
+September ``DistributedFMMConfig`` caps (``max_pair_queue`` and friends) do not
+exist on this lane and are refused. Without ``--caps`` the operator passes
+``cross_caps="auto"``, which it sizes at every epoch's ``prepare`` with the
+force's own ``plan_cross`` (fixed 2026-11-27; as first ported in A3 it ran at the
+measurement capacities and failed from N=16384 on two devices). That planning is
+up to a few measurement compiles per epoch, and they land in the fit's
+``wall_seconds`` and ``mean_later_prepare_seconds``. A fig20 TIMING run should
+therefore pass the explicit ``--caps`` that ``distributed_caps_probe.py`` prints,
+so prepare times measure the prepare, not the sizing.
 
 One device count per process, in distributed mode
 -------------------------------------------------
-Asking one process for several counts **deadlocks**. After a 2-device clique has
-been formed, acquiring a 4-device one hangs in the collective rendezvous
-(``Acquire clique: devices=4``) with every GPU idle and no timeout -- measured
-here as 59 minutes of nothing. So more than one ``--device-counts`` entry is
-refused in distributed mode; run the script once per count and merge::
+JAX fixes the device count when it initialises, and asking one process for
+several mesh sizes **deadlocked** the September path: after a 2-device clique
+had been formed, acquiring a 4-device one hung in the collective rendezvous
+(``Acquire clique: devices=4``) with every GPU idle -- 59 minutes of nothing. So
+more than one ``--device-counts`` entry is refused in distributed mode; run the
+script once per count and merge::
 
-    for n in 2 4; do
+    for n in 1 2 4; do
         python -m bench.payoff_static.multigpu_scaling --mode distributed \\
             --device-counts $n --json-out density_reconstruction/mg_$n.json
     done
     python -m bench.payoff_static.multigpu_scaling --merge-from \\
-        density_reconstruction/mg_2.json,density_reconstruction/mg_4.json
+        density_reconstruction/mg_1.json,density_reconstruction/mg_2.json,\\
+density_reconstruction/mg_4.json
 
 Parameter sharding has no collectives to deadlock on and takes several counts in
 one process happily.
 
 Usage
 -----
-CPU smoke (one "device")::
+CPU smoke of the mesh lane, one process per device count (``--cpu-interpret``
+forces that many host devices and applies the S9 interpret set, the mesh
+gradient's only CPU route; it compiles for minutes and measures no timing)::
+
+    for n in 1 2; do
+        python -m bench.payoff_static.multigpu_scaling --cpu-interpret \\
+            --jit-within-epoch --n 128 --tracers 32 --iterations 2 \\
+            --rebuild-cadence 2 \\
+            --order 3 --leaf-size 16 --device-counts $n \\
+            --gpu-select none --json-out /tmp/mg_$n.json
+    done
+
+CPU smoke of parameter sharding (the single-card fused operator)::
 
     JAX_PLATFORMS=cpu python -m bench.payoff_static.multigpu_scaling \\
-        --n 128 --tracers 32 --iterations 3 --device-counts 1 \\
+        --mode parameter_sharding --n 128 --tracers 32 --iterations 3 \\
+        --order 3 --leaf-size 16 --device-counts 1 \\
         --gpu-select none --json-out /tmp/smoke.json
 
-Paper run (claims the whole mesh in one autocvd selection)::
+Paper run (claims the whole mesh in one autocvd selection, one count per
+process). Size the cross capacities first; ``--caps`` is the probe's
+``data.suggested_caps[0].cli`` for the same N and device count::
 
-    python -m bench.payoff_static.multigpu_scaling --device-counts 1,2,4,8
+    python -m bench.payoff_static.distributed_caps_probe --device-count 4 \\
+        --n 262144 --json-out density_reconstruction/caps_probe_4.json
+    python -m bench.payoff_static.multigpu_scaling --device-counts 4 \\
+        --caps CAPS_FROM_PROBE --json-out density_reconstruction/mg_4.json
 """
 
 from __future__ import annotations
@@ -71,6 +122,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from bench.payoff_static import _common  # noqa: E402
 from examples.jaccpot_paper.common import jsonio, runmeta  # noqa: E402
 
 DEFAULT_OUT = "density_reconstruction/multigpu_scaling.json"
@@ -106,9 +158,10 @@ def _parse_args() -> argparse.Namespace:
         default="distributed",
         help=(
             "Which multi-device path to measure. 'distributed' partitions the "
-            "SOURCES across devices via jaccpot.distributed (section 5's path) "
-            "and is the one that supports the claim; 'parameter_sharding' "
-            "shards only the parameter array and is kept because its failure "
+            "SOURCES across devices on the fused mesh lane "
+            "(DistributedForwardOperator) and is the one that supports the "
+            "claim; 'parameter_sharding' shards only the parameter array of "
+            "the single-card operator (--lane) and is kept because its failure "
             "to help is a measured result"
         ),
     )
@@ -130,13 +183,31 @@ def _parse_args() -> argparse.Namespace:
         "--caps",
         default="",
         help=(
-            "Comma-separated DistributedFMMConfig cap overrides, e.g. "
-            "'max_pair_queue=2000000,process_block=512'. They default to "
-            "auto-sizing from N, and the auto-sized values are what set the "
-            "distributed path's memory ceiling, so a ceiling reported without "
-            "these is a statement about the defaults"
+            "Comma-separated CrossCapacities overrides for the mesh lane's "
+            "cross-domain exchange, e.g. 'send_particle_cap=65536,"
+            "recv_particle_cap=65536' (distributed_caps_probe.py prints a "
+            "measured set). Empty: cross_caps='auto', sized per epoch by "
+            "plan_cross (adds measurement compiles to prepare times; see the "
+            "module docstring). The September "
+            "DistributedFMMConfig caps are refused"
         ),
     )
+    p.add_argument(
+        "--rebuild-cadence",
+        type=int,
+        default=1,
+        help="Re-place / rebuild the topology every k steps (fit default 1)",
+    )
+    p.add_argument(
+        "--jit-within-epoch",
+        action="store_true",
+        help=(
+            "Compile each epoch's gradient (run_fit's jit_within_epoch). Off by "
+            "default, as in run_fit; the record names the path"
+        ),
+    )
+    _common.add_lane_args(p)
+    _common.add_cpu_interpret_arg(p)
     p.add_argument(
         "--ceiling-iterations",
         type=int,
@@ -193,6 +264,30 @@ def _parse_caps(text: str) -> Dict[str, int]:
         except ValueError as exc:
             raise ValueError(f"cap override {entry!r} has a non-integer value") from exc
     return caps
+
+
+def _failure_kind(exc: BaseException) -> str:
+    """Classify a failed point: memory, the mesh force's verdict, or other.
+
+    Parameters
+    ----------
+    exc : BaseException
+        What the point raised.
+
+    Returns
+    -------
+    str
+        ``"out_of_memory"`` (an allocator refusal: the ceiling),
+        ``"verdict"`` (the operator refused a placement whose lists overflowed
+        or that the reverses cannot read: a capacity setting, not a ceiling),
+        or ``"error"``.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    if "RESOURCE_EXHAUSTED" in text or "out of memory" in text.lower():
+        return "out_of_memory"
+    if "mesh force bits" in text or "overflowed" in text:
+        return "verdict"
+    return "error"
 
 
 def _fit_once(
@@ -262,8 +357,10 @@ def _fit_once(
             order=int(args.order),
             theta=float(args.theta),
             leaf_size=int(args.leaf_size),
+            mac_type=args.mac,
+            working_dtype=str(args.dtype),
             devices=list(devices),
-            caps=_parse_caps(args.caps),
+            caps=_parse_caps(args.caps) or None,
         )
     else:
         operator = make_forward_operator(
@@ -274,6 +371,7 @@ def _fit_once(
             order=int(args.order),
             theta=float(args.theta),
             leaf_size=int(args.leaf_size),
+            **_common.operator_kwargs(args),
         )
     parameterization = make_parameterization("positions", config=config)
     start = initial_positions(
@@ -292,15 +390,17 @@ def _fit_once(
         config=FitConfig(
             num_iterations=int(args.iterations if iterations is None else iterations),
             learning_rate=float(args.learning_rate),
-            rebuild_cadence=1,
+            rebuild_cadence=int(args.rebuild_cadence),
+            jit_within_epoch=bool(args.jit_within_epoch),
             regularization=Regularization.none(),
             history_every=1,
             # The intensive churn is O(P) host work per rebuild and this arm is
             # about wall-clock, so it is sampled rather than measured every step.
             intensive_every=max(int(args.iterations) // 4, 1),
             seed=int(args.seed),
-            # The distributed operator exposes no radix prepared state, so the
-            # switch instrumentation has nothing to fingerprint.
+            # The mesh operator's partition is per-device trees with no global
+            # leaf partition, so the switch instrumentation has nothing to
+            # fingerprint.
             track_switches=not distributed,
         ),
         # Parameter sharding is what `devices` does; the distributed operator
@@ -316,6 +416,7 @@ def _fit_once(
     return {
         "N": int(n),
         "M": int(args.tracers),
+        "lane": operator.record().get("lane"),
         "num_free_parameters": int(parameterization.num_free),
         "num_devices": len(devices),
         "devices": [str(d) for d in devices],
@@ -362,7 +463,7 @@ def _merge_device_count_runs(args: argparse.Namespace) -> int:
     ceiling: List[Dict[str, Any]] = []
     merged_config: Optional[Dict[str, Any]] = None
     metas: List[Dict[str, Any]] = []
-    pinned = ("theta", "order", "basis", "leaf_size", "softening", "M", "mode")
+    pinned = ("theta", "order", "basis", "leaf_size", "softening", "M", "mode", "lane")
 
     for source in sources:
         path = source if source.startswith("/") else str(jsonio.results_path(source))
@@ -458,6 +559,15 @@ def main() -> int:
     if _merge_sources(args.merge_from):
         return _merge_device_count_runs(args)
     device_counts = [int(v) for v in str(args.device_counts).split(",") if v]
+    if args.cpu_interpret:
+        # Before any jax import: the platform and the device count are read once.
+        _common.apply_cpu_interpret(max(device_counts))
+    if str(args.mode) == "distributed":
+        # The mesh lane's NCCL ragged-exchange flags, which XLA reads only when
+        # the backend starts (the library merely warns when they are missing).
+        from bench._ragged_exchange_flags import add_ragged_exchange_flags
+
+        add_ragged_exchange_flags()
     if str(args.mode) == "distributed" and len(device_counts) > 1:
         raise SystemExit(
             "distributed mode takes ONE device count per process. Asking one "
@@ -476,6 +586,8 @@ def main() -> int:
 
     import jax
 
+    if args.cpu_interpret:
+        _common.patch_cpu_lane()
     available = jax.devices()
     print(
         f"multigpu_scaling: JAX sees {len(available)} device(s): "
@@ -503,9 +615,18 @@ def main() -> int:
         "ceiling_ladder": ladder,
         "ceiling_iterations": int(args.ceiling_iterations),
         "caps": _parse_caps(args.caps),
+        "caps_kind": "CrossCapacities" if str(args.mode) == "distributed" else None,
         "sharding_mode": str(args.mode),
         "mode": str(args.mode),
+        "rebuild_cadence": int(args.rebuild_cadence),
+        "jit_within_epoch": bool(args.jit_within_epoch),
+        "cpu_interpret": bool(args.cpu_interpret),
+        # The single-card lane (parameter_sharding); distributed mode is always
+        # the fused mesh lane, named in each record's operator block.
+        **_common.lane_config(args),
     }
+    if str(args.mode) == "distributed":
+        config_record["lane"] = "fused_mesh"
     records: List[Dict[str, Any]] = []
     ceiling: List[Dict[str, Any]] = []
 
@@ -546,37 +667,6 @@ def main() -> int:
             )
             flush()
             continue
-        if str(args.mode) == "distributed" and count < 2:
-            # Upstream limitation, not a configuration error: the distributed
-            # evaluator's per-device tree build asserts "Need at least one
-            # particle" inside yggdrax when there is a single domain. The path
-            # exists for cross-device halos and is not built for ndev=1. The
-            # single-device number belongs to the radix operator, a DIFFERENT
-            # code path -- run --mode parameter_sharding for it, and do not put
-            # the two on one strong-scaling curve without saying so.
-            print(
-                f"  ndev={count}: SKIPPED in distributed mode -- the "
-                "distributed evaluator requires at least 2 devices "
-                "(yggdrax build_tree asserts on a single domain)",
-                flush=True,
-            )
-            records.append(
-                {
-                    "num_devices": count,
-                    "skipped": True,
-                    "mode": str(args.mode),
-                    "reason": (
-                        "distributed force evaluation requires ndev >= 2; "
-                        "yggdrax's per-device build_tree asserts 'Need at "
-                        "least one particle' with a single domain. The "
-                        "single-device baseline is the radix operator, a "
-                        "different code path."
-                    ),
-                }
-            )
-            flush()
-            continue
-
         devices = list(available[:count])
         try:
             record = _fit_once(n=strong_n, devices=devices, args=args)
@@ -590,12 +680,17 @@ def main() -> int:
                 flush=True,
             )
         except Exception as exc:
-            print(f"  ndev={count}: FAILED ({type(exc).__name__}: {exc})", flush=True)
+            kind = _failure_kind(exc)
+            print(
+                f"  ndev={count}: FAILED [{kind}] ({type(exc).__name__}: {exc})",
+                flush=True,
+            )
             records.append(
                 {
                     "num_devices": count,
                     "N": strong_n,
                     "failed": True,
+                    "failure_kind": kind,
                     "error_type": type(exc).__name__,
                     "error": str(exc)[:500],
                 }
@@ -620,9 +715,15 @@ def main() -> int:
                 )
                 flush()
             except Exception as exc:
+                kind = _failure_kind(exc)
+                note = (
+                    "<-- this is the ceiling"
+                    if kind == "out_of_memory"
+                    else "<-- NOT a memory ceiling: see failure_kind"
+                )
                 print(
-                    f"    ceiling ndev={count} N={n:>10}: FAILED "
-                    f"({type(exc).__name__})  <-- this is the ceiling",
+                    f"    ceiling ndev={count} N={n:>10}: FAILED [{kind}] "
+                    f"({type(exc).__name__})  {note}",
                     flush=True,
                 )
                 ceiling.append(
@@ -632,6 +733,7 @@ def main() -> int:
                         "N": int(n),
                         "num_free_parameters": 3 * int(n),
                         "failed": True,
+                        "failure_kind": kind,
                         "error_type": type(exc).__name__,
                         "error": str(exc)[:500],
                     }
