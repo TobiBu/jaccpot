@@ -2254,6 +2254,243 @@ CPU, forced host devices (this host, loaded); the full table is nornax `docs/hyb
 - `tests/distributed/test_mesh_force_targets.py` (`distributed_segment`): the hook leaves the force bitwise, the
   partial fields summed over two devices are the field of all sources at the points.
 
+## M4 — the exchange that scales: a LET exchange of the cross summaries (wave 9, session 1, 2026-11-25)
+
+**Question** (plan M4): the symmetric cross exchange (M1) all_gathers every device's whole two-sided summary tree,
+`S` rows per device, so every device receives `(ndev - 1) x S` rows per force: the volume grows linearly with the
+device count at fixed particles per device, and so does the gathered table's memory. Can each device send a peer only
+what that peer's cross walk can open, keep M1's momentum argument, and get the same forces?
+
+**Answer:** yes, opt-in (`exchange="let"`), bitwise to the all_gather path on every configuration tried (CPU 2/4/8
+devices, both MACs; GPU 2 cards), pair sets identical on every device, momentum at round-off.
+On 2 and 4 A100s (1e6 Plummer per card) the LET receives 3.8-5.8x fewer bytes per device than the all_gather, within 1.39-1.48x of the exact minimum; whether the volume stays flat at 32 GPUs is HoreKa's to measure (M5).
+
+### Design (`jaccpot/distributed/let.py`)
+
+Request rounds of decreasing granularity (`CrossCapacities.let_coarse_particles`, default `(64, 4)` leaves' worth of
+live particles), between the summary rows (`_summary_rows`) and the default exchange's walk:
+
+1. **Round blocks.** In round `r` each device sends every peer the nodes whose parent is EXPANDED for that peer:
+   above the FIRST size (everywhere), requested by that peer, or inside a subtree the peer requested in round `j < r`
+   and above round `j + 1`'s size (the whole subtree when it already holds no more than that size). The finer sizes
+   apply only inside requested subtrees, so a far peer gets the first round's top and nothing more. Expanded is closed
+   upward, so every ancestor of a sent node is expanded and no per-peer ancestor query is needed; every cut node of a
+   round is a node of that round's global top (the root and the children of nodes above its size), so one
+   peer-independent pointer doubling per size finds the requester of every node inside a requested subtree. A sent
+   internal node that is not expanded is a CUT node (a flag column). One ragged all-to-all.
+2. **Request walk.** Each device runs the cross walk (same MAC, criterion table, floor, capacities and orientation:
+   lower device first) between its FULL tree and every block it received, in one seeded walk. Every cut node gets two
+   children: a PROBE (a leaf copy of itself) and a dead slot. Above the cuts the walk is the full walk on the same
+   floats, so it splits a cut node exactly when the full walk would; a split always leaves an output pair holding the
+   probe (accepted, near, or under the other side's split), and an unsplit cut node never puts its probe in a pair.
+   A probe in an output pair is a request; the requests go back in a ragged all-to-all whose blocks are the received
+   blocks reversed, so they arrive aligned with the sender's own send buffer.
+3. **Final blocks.** The same rule after the last round, whose requests go whole, in one ragged all-to-all; the cross walk runs
+   over them (`_let_walk`) and the default exchange continues.
+
+- **The pair sets are the all_gather path's, exactly.** A node the full walk splits has every ancestor split. The
+  highest one that is not expanded was sent (its parent is expanded) as a cut node in some round, and that round's
+  request walk requested it. So every node the full walk splits travels with its children, and the walk over the final
+  blocks visits the full walk's pairs on bitwise-identical rows. No bound, no MAC-specific geometry.
+- **Momentum (M1) by construction.** Device `s` walks (its block for `d`, the block `d` sent it), device `d` (the block
+  `s` sent it, its block for `s`): the SAME two blocks, in the same orientation (lower device first).
+- **Device order (a bug found on four A100s).** yggdrax's walks queue every child pair as `(lo, hi)` by index, so a
+  radius tie is split by INDEX order, and the all_gather layout's index order is the device order. A LET table that
+  put this device's rows first whatever its index made the highest device orient its pairs the other way from its
+  peers on a tie: on 4 x 1e6 Plummer (fp32) device 3's pair set differed (acc 1.7e-7), the CPU fp64 runs and two
+  cards never hit a tie. Both the request walks and the final walk now run on the table permuted into device order
+  (`let.device_order_walk`: received rows of lower devices, this device's, the rest) and map the pairs back.
+- **Downstream unchanged.** The walk's pairs in the LET index space `[send buffer | receive buffer]` feed the default
+  exchange's code (`cross._symmetric_exchange(let=...)`): a slot of the send (receive) buffer IS one (peer, node), the
+  blocks run in device order and within a block in the sender's ascending summary index, so the rows, sizes and pair
+  rows equal the `[ndev x S]` presence maps' (`_let_rows_by_peer`), and the multipole and particle exchanges, the
+  (target, source) order and every sum are the default's. The presence maps span `T + R` slots, not `ndev x S`.
+- **Static shapes.** `CrossCapacities.let_send_cap`, `let_recv_cap` (rows; every round's blocks are part of the final
+  ones, so the final buffers serve every round) and `let_coarse_particles`. Their needs are exact past the buffers
+  (`CROSS_NEEDS_FIELDS` `let_send_cap`, `let_recv_cap`); the last request walk's pair counts are maxed into the walk's
+  own needs. A buffer overflow or a lost request (any device: `pmax`) sets the cross flag and marks the walk's needs as lower bounds; the segment
+  retry's `replanned` grows them like every other capacity. A measurement on the all_gather exchange reports 0 for the
+  LET's and leaves them alone (`from_needs`).
+- **What was tried first (and why it is gone).** A per-peer descriptor and a conservative "could this node be split"
+  bound (`7ee0beb7`, `fb1cc8b9`: radius bins with boxes, then annuli): bitwise and pair-exact, but on Plummer it sent
+  every row. The radix tree of a centrally concentrated system has nodes of radius 8+ around a 0.3 core, and no compact
+  summary of a peer's tree bounds that: even the bare opening angle at theta 1 opened every node, against 38-42 % of
+  rows the walk actually needed (2 x 1e6, `dehnen_error`). The request walk asks the walk instead of bounding it.
+  Then one request round at 64 leaves asked for ~every cut node under eq (16a) (100 % of rows); a second round at 4
+  leaves (57 %) at first applied its size everywhere, so every peer got the finest top (~34k of 104k rows per peer on
+  four cards) whatever it requested; finer sizes now apply only inside requested subtrees.
+
+### API
+
+- `make_cross_hook(exchange="all_gather" | "let" | None)`; `None` reads `JACCPOT_CROSS_EXCHANGE` (default
+  `all_gather`). `FusedMeshForce(cross_exchange=...)` and `make_mesh_cross_hook(exchange=...)` pass it through; the
+  runner's mesh mode, the multi-process runtime and M3's restarts pick the env var up unchanged.
+- The LET runs on the symmetric exchange (the default), any MAC and the criterion; forward only (`grad_sink`
+  refused: the reverse seams replay the all_gather layout); the controls (one-sided, CSR, tiles, receiver walks)
+  refuse it.
+- `hook.exchange` names the exchange; `hook.let_options["coarse_particles"]` overrides the granularity (a test seam).
+- Diagnostics (`record=`): `let_send_rows`, `let_recv_rows`, `let_send_bytes`, `let_recv_bytes`, `let_send_sizes`,
+  `let_recv_sizes`, `let_overflow`, `let_requested`, `let_coarse_rows`; the walk pairs are recorded in the gathered `[ndev x S]` index space under both
+  exchanges, so pair sets compare as they are.
+
+### Gates
+**GPU (gate 5; also gates 1-3 at production-like size).** Plummer (a = 0.3, r < 20), 1e6 particles per card, galaxy
+of the probe `m4/exp/let_probe.py`: leaf 64, p4, theta 0.8 / eq (16a) at eps 1e-4 (floor 0.0246), fp32 working dtype,
+`--xla_gpu_deterministic_ops=true` + the #398 ragged flags (native NCCL), cards by autocvd on the shared host
+(functional only, no timings). Each run: the start force on one decomposition with the all_gather exchange twice
+(A-vs-A control) and the LET once; the pair sets compared per device in the gathered index space; the exact minimal LET
+counted from the all_gather walk's pairs (every node a pair touches, its ancestors and the children of every split
+node). Capacities `for_shard`, LET buffers `(ndev - 1) x S`, default rounds `(4096, 256)` particles.
+
+| MAC | cards | acc vs all_gather | pair sets | A-vs-A | rows recv / device: all_gather live, LET mean (max), exact | bytes recv / device: all_gather (padded), LET mean (max) |
+|---|---|---|---|---|---|---|
+| `dehnen` | 2 | bitwise | 2/2 equal | bitwise | 109,047; 43,134 (43,255); 30,939 | 8.39 MB; 1.55 MB (1.56) |
+| `dehnen_error` | 2 | bitwise | 2/2 equal | bitwise | 109,047; 63,647 (66,033); 43,859 | 14.68 MB; 3.82 MB (3.96) |
+| `dehnen` | 4 | bitwise | 4/4 equal | bitwise | 311,755; 107,851 (183,807); 86,593 | 25.17 MB; 3.88 MB (6.62) |
+| `dehnen_error` | 4 | bitwise | 4/4 equal | bitwise | 311,755; 174,831 (256,619); 124,379 | 44.04 MB; 10.49 MB (15.40) |
+
+Final code (e0528f5b). No overflow, no hang, `momentum` (`|sum m a| / sum m |a|`, fp32) 5.1e-9 to 7.3e-9 on both
+exchanges alike. The LET sends 1.25-1.45x the exact minimum (whole requested subtrees of at most 256 particles).
+Rounds: `(65536, 4096, 256)` on four cards is bitwise too and sends the same (109,380 / 174,831 rows): with four
+domains every peer is a neighbour; at 2 cards `(4096, 512, 64)` sent 1.50x exact against `(4096, 256)`'s 1.45x. One
+round at 1024 particles requested ~every cut node under eq (16a) (100 % of rows). The four-card rows above were first
+run before the device-order fix: device 3's pair set differed there (below).
+
+**CPU, forced devices (gate 1; fp64).** The same probe on forced CPU devices (the interpret-mode lane), 8192 particles
+per device, leaf 64, the A4 ICs subsampled (`a4/local/ics/{galaxy,merger}.npz`) and Plummer; rounds `(4096, 256)`:
+
+| MAC | IC | dev | N/dev | dtype | acc bitwise | pairs equal | momentum | live S/dev | all_gather live rows recv (mean) | LET rows recv mean / max | exact rows recv | LET/exact | all_gather B recv (padded) | LET B recv mean / max | requests | overflow |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| dehnen | galaxy | 4 | 8192 | f64 | True | True | 1.4e-10 | 931 | 2794 | 2451 / 2665 | 1769 | 1.39 | 393024 | 176472 / 191880 | 622 | False |
+| dehnen | merger | 4 | 8192 | f64 | True | True | 1.9e-10 | 942 | 2826 | 2425 / 2791 | 2015 | 1.2 | 393024 | 174636 / 200952 | 616 | False |
+| dehnen | plummer | 8 | 8192 | f64 | True | True | 2.8e-17 | 920 | 6445 | 4353 / 5471 | 2945 | 1.48 | 917056 | 313470 / 393912 | 2130 | False |
+| dehnen (c28d4e21) | plummer | 2 | 8192 | f64 | True | True | 2.0e-17 | 1008 | 1008 | 1008 / 1121 | 996 | 1.01 | 131008 | 72576 / 80712 | 127 | False |
+| dehnen (c28d4e21) | plummer | 4 | 8192 | f64 | True | True | 2.1e-17 | 927 | 2781 | 2750 / 2811 | 2400 | 1.15 | 393024 | 198000 / 202392 | 672 | False |
+
+`dehnen_error` on CPU: the CI test (2 devices) and M1's momentum test (below); its CPU compiles took 2-2.5 h each on
+this host, so the larger CPU cases ran `dehnen` and eq (16a) is covered on 2 and 4 A100s above. Rows marked
+`(c28d4e21)` ran the rule before e0528f5b (finer sizes everywhere: more rows, the same pairs). At these
+sizes most rows are needed (~1000 summary nodes per device): the CPU rows pin exactness on more devices and ICs, the
+GPU rows show the volume. The galaxy and merger ICs' momentum residuals, 1.4e-10 and 1.9e-10, are the same on both
+exchanges (bitwise): their particle masses differ by component (disc, bulge, halo), unlike M1's equal-mass round-off
+table; a one-card check of that is open (not an exchange question). A
+`dehnen_error` merger run was invalid (the all_gather force itself flagged a local-lane capacity, bit 512, under the
+probe's fixed test capacities) and is not reported.
+
+**Bytes (gate 2): not demonstrable on <= 4 devices; the claim moves to M5.** At 1e6 per card the LET's received bytes
+per device grow 2.5x from 2 to 4 cards (`dehnen`; `dehnen_error` 2.7x) against the all_gather's 3.0x: the LET is 5.4x
+/ 6.5x (`dehnen`) and 3.8x / 4.2x (`dehnen_error`) below the all_gather at 2 / 4 cards, but on four Morton domains of a
+Plummer sphere every domain borders every other at the centre, so the neighbour count has not saturated. What stays
+O(ndev) in the LET is the first round's top (the root and the children of every node above 4096 particles, ~11k of
+~105k rows at 1e6 per card), which every peer receives, near or far. Flatness needs the neighbour count to saturate
+(a device in a 3-D decomposition of 32 has ~26 neighbours at most) and a coarser first round for the far peers
+(`let_coarse_particles=(65536, 4096, 256)` is bitwise and costs the same at four cards): M5 item 1.
+
+**Momentum (gate 3).** `tests/distributed/test_mesh_cross_momentum.py` (M1) with `JACCPOT_CROSS_EXCHANGE=let`: 2
+passed, residuals identical to the all_gather run's (`dehnen` total 1.74e-17, cross part 4.06e-17, share 0.52;
+`dehnen_error` 6.45e-17 / 1.23e-16). Every probe row above: momentum identical on both exchanges.
+
+**Multi-process (scope 3) and restarts (gate 6).** M3's `write_and_restart` scenario
+(`tests/distributed/_checkpoint_scenarios.py`: ESC's Plummer 1024 + 8 fliers, escapers off, the fused CPU lane
+`dehnen`, 6 segments x 10 steps at dt 1e-3, migrating, an orbax checkpoint at every edge) with
+`JACCPOT_CROSS_EXCHANGE=let`, one process x 2 devices (`sp`) and 2 processes x 1 device (`mp`, `jax.distributed`,
+gloo), and the all_gather exchange (`sp`) as reference (`m4/exp/restart_let.py`): the run in one go, a fresh runner
+restarted from its middle checkpoint, and a chain of three runs each restarted from the previous one's last checkpoint
+are **bitwise** equal (state and carried acceleration) on both sides; `sp == mp` bitwise; and the LET runs equal the
+all_gather run bitwise. 24/24 comparisons.
+
+**Identity.** `provider_hlo_identity compare w9-main-cpu m4-tip-cpu`: **PASS 36/36** (the single-card programs; the
+diff touches `jaccpot/distributed/` only).
+
+**CI.** `tests/distributed/test_mesh_let_exchange.py` (new job `test-distributed-segment-let`, 4 forced devices):
+2 passed locally with `JACCPOT_RUNTIME_TYPECHECK=1` in 4:47, CI-like peak RSS 4.35 GB (`-n 0`); the LET receives
+fewer rows than the all_gather's live ones on every device (`dehnen` x4: 213-241 vs 325-369). `test_shards.py check`
+rc 0. Top-level `tests/unit` guards and `tests/unit/distributed` (typecheck): pass.
+`tests/distributed/test_cross_capacities_cpu_e2e.py` (4 forced devices): 6 passed, 2 skipped, after a fix
+(`replanned` grew the LET buffers from a need of 0). pre-commit clean.
+
+
+### Memory per device (from the shapes)
+
+| | all_gather (default) | LET |
+|---|---|---|
+| summary rows received | `(ndev - 1) x S_cap x k` floats (the padded tree, static) | `R x (k + 1)` (`let_recv_cap`), live rows only on the wire |
+| walk table | `ndev x S_cap` rows (the gathered table) | `T + R` rows (`T = let_send_cap`) |
+| presence maps (4 per force) | `ndev x S_cap` int32 each | `T` or `R` int32 each |
+| request rounds | - | per round: a send buffer `T x (k + 2)` and a receive buffer `R x (k + 2)`, a request walk over `S + 2 R + 1` rows (the cross walk's list capacities), the requests back (`R` floats out, `T` in) |
+| request tags | - | `ndev x S` int8 (the round each node was requested in, per peer) |
+| per-peer pack | - | `O(S)` temporaries per peer (fori_loop); one `log2 S` pointer doubling per size, per force |
+
+`k = 8` (geometric) or `8 + p + 2` (eq (16a)). On CPU the ragged exchange's fallback all_gathers the send buffer
+(`ndev x T` rows), so the memory claim holds on the native (GPU) transport only. The single-card default path is
+untouched.
+
+### Cost-weighted cuts (scope 2: primitive only)
+
+`migration.work_balanced_splitters_shard(positions, count, work, cubic=..., max_rows=...)`: the count-balanced cuts'
+structure (the devices' live codes in device order ARE the global sequence) with every row weighted by its work: cut
+`j` is the code of the first row whose inclusive cumulative work exceeds `j / ndev` of the total (the rank by one
+`psum`, the code by one `pmin`). `max_rows` clips every cut's rank to within `s` of the count-balanced rank, `s =
+(max_rows - ceil(N / ndev)) // 2`, so no device ends with more than `max_rows` rows and the migration is never
+declined for its shard. `tests/unit/distributed/test_work_balanced_splitters.py` (4 forced devices, in
+`distributed-tier`): a 10x-costlier quarter of the Morton curve is split to within one row's work; uniform work gives
+the count cuts; `max_rows` binds.
+NOT wired into the runner yet, and gate 4 (merger at pericentre, imbalance <= 10 %) not run: the per-particle work has
+to come out of the fused lane (per-leaf near pair counts x leaf occupancy, far pairs per node pushed down to the
+leaves), which is session 2's first item.
+
+### The hierarchical exchange (design; cannot be tested locally)
+
+HoreKa: 4 A100s per node on NVLink, nodes on InfiniBand HDR. Today the LET is ONE ragged all-to-all over the
+flat mesh axis; NCCL routes each pair over NVLink or IB, so the bytes on IB are already only what remote peers need,
+but every device posts `ndev - 1` messages and a remote node receives up to four copies of the coarse rows (each of its
+devices gets its own block from every sender).
+
+- **Per-node LET, then an on-node fan-out.** Sender `s` sends each remote NODE one block: its top plus the union of
+  the subtrees that node's four devices requested (the requests OR over the node), and sends that one block to the device with its own local index on the remote node (an all-to-all over the node axis:
+  `nnodes - 1` messages over IB instead of `4 (nnodes - 1)`). That device broadcasts it inside its node over NVLink
+  (an all_gather over the local axis). On-node peers keep per-device blocks.
+- **Momentum still holds by construction** if BOTH ends walk the same blocks: `s` walks (its block for node(d), d's
+  block for node(s)) and `d` the same pair, so a device keeps its per-node send blocks for its own walk. The pairs then
+  equal the all_gather path's because a union of exact requests still holds every row each walk opens.
+  Cost: a remote node's four devices walk the same coarser block, and the block is a little larger than any one of
+  theirs.
+- **In JAX:** a 2-D mesh `("node", "local")` and the hook's collectives on one axis each (`all_to_all` over `"node"`,
+  `all_gather` over `"local"`); the fused lane's mesh is 1-D today, so this needs the lane's axis plumbing to accept a
+  tuple of axes (the M2 runtime already builds the global mesh process by process).
+- **Overlap:** the request rounds and the LET exchange depend only on the summary rows (after the upward pass);
+  the local walk and the local M2L do not depend on them. XLA's latency-hiding scheduler
+  (`--xla_gpu_enable_latency_hiding_scheduler=true`) can overlap the collective with that work; whether it does on the
+  fused lane's program is an M5 profile item.
+- **The first round is the O(ndev) term.** Every peer gets the first round's top (a few % of the tree), and each
+  request walk costs about one cross walk. At 32 GPUs that top is ~0.3-1 tree per device against the all_gather's 31
+  trees. Session 2: skip the first round's top for peers whose root pair the walk accepts outright (decided from the
+  roots alone), and measure whether two rounds or three pay on HoreKa.
+
+### M5 inputs (what HoreKa must measure for M4's claims)
+
+1. **Bytes per device per force**, LET vs all_gather, weak scaling at 1/2/4/8 nodes (4/8/16/32 GPUs) on Plummer, the
+   disc and the merger at ~3e7 per GPU: `record=` gives `let_send_bytes` / `let_recv_bytes` and `summary_nodes`; the
+   all_gather's is `(ndev - 1) x max_summary_nodes x k x 4` B. The claim to check: the LET's received bytes per device
+   stay flat in the device count (within the geometry's surface-to-volume change), the all_gather's grow linearly.
+2. **Exchange time** per force: the named scopes `cross_let_top`, `cross_let_request` (the request walk),
+   `cross_let_pack`, `cross_exchange_let`
+   against the all_gather (`cross_summary_tree` + the gather), in an `nsys`/XLA profile on 1 and 8 nodes.
+3. **Weak-scaling efficiency** with the LET (U4: >= 70 %, "the higher the better") and device peak memory against
+   the all_gather at 1e9 on 32 GPUs.
+4. **Bitwise on HoreKa:** LET vs all_gather at 2 nodes with `--xla_gpu_deterministic_ops=true` and an A-vs-A control
+   (as gate 5 here).
+5. **The cross-node NCCL barrier re-check** (the #398 hang, upstream draft `docs/xla_ragged_nccl_barrier_bug_report.md`,
+   not filed): `bench/repro_jax_ragged_all_to_all_nccl_fallback.py` as 2 nodes x 4 GPUs, one process per GPU
+   (`jaccpot.distributed.multiprocess.initialize`, SLURM launcher), three arms: (a) the production flags
+   (`RAGGED_EXCHANGE_XLA_FLAGS`, barrier off): expect every row back, 20 calls; (b) the NCCL fallback with the barrier
+   at its jax 0.11 default (on): expect the remote rows missing on call 0 and a hang on call 1 -- does it also hang when
+   the remote peer is on ANOTHER node, and does the intra-node pair still fail?; (c) XLA's default one-shot kernel
+   (no flags): does it run across nodes at all (it needs peer access), and at what speed against (a)? Each arm under
+   `timeout 300` with `py-spy dump` on expiry. The job file belongs to M5 (`bench/slurm/`, owned by the lead this
+   wave).
+6. **Cost-weighted cuts** (after session 2 wires them): the per-device work (local + cross near and far pair counts)
+   max/mean on the merger at pericentre at 8 and 32 GPUs, count cuts vs work cuts, and the step time.
 ## H2 — the HoreKa bundle on the mains of 2026-11-25 (wave 9, 2026-11-25)
 
 Nothing had run on HoreKa yet; since H1 audited the bundle (2026-11-10) jaccpot main moved through waves 6-8 and

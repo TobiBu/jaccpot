@@ -82,6 +82,9 @@ _NORNAX_DISTRIBUTED = "tests/integration/test_mutual_distributed_nornax.py"
 _SEGMENT_CRITERION = "tests/distributed/test_mesh_segment_dehnen_error.py"
 _SEGMENT_MIGRATION = "tests/distributed/test_mesh_segment_migration_fused.py"
 _SEGMENT_MOMENTUM = "tests/distributed/test_mesh_cross_momentum.py"
+# the LET exchange against the all_gather exchange (M4), a job of its own: two
+# exchanges x two MACs of fused-lane compilation on forced devices
+_SEGMENT_LET = "tests/distributed/test_mesh_let_exchange.py"
 # the fused multi-GPU lane's reverse mode end to end (WP-G G4): three whole-lane
 # gradient cases (2 and 4 devices, the criterion), each ~10-25 min of interpret-mode
 # compilation on CPU, so a job of its own beside the seams' and plumbing's
@@ -230,7 +233,10 @@ _STRICT_GRAD_RUNNER_OPT: tuple[str, ...] = (
 # (one device) they collected and skipped, so the repartition gate they pin (the
 # rollout's bitwise ownership invariance) ran nowhere. They run with the
 # forced-device tier instead; their four-device cases still skip there (two).
-_UNIT_MULTI_DEVICE: tuple[str, ...] = ("tests/unit/distributed/test_fused_rollout.py",)
+_UNIT_MULTI_DEVICE: tuple[str, ...] = (
+    "tests/unit/distributed/test_fused_rollout.py",
+    "tests/unit/distributed/test_work_balanced_splitters.py",
+)
 
 SHARDS: dict[str, list[str]] = {
     # test-full matrix
@@ -324,6 +330,7 @@ SHARDS: dict[str, list[str]] = {
         f"--ignore={_SEGMENT_CRITERION}",
         f"--ignore={_SEGMENT_MIGRATION}",
         f"--ignore={_SEGMENT_MOMENTUM}",
+        f"--ignore={_SEGMENT_LET}",
         f"--ignore={_SEGMENT_ESCAPERS}",
         f"--ignore={_SEGMENT_SCHEME}",
         *(f"--ignore={path}" for path in _SEGMENT_RUNNER_FILES),
@@ -343,6 +350,7 @@ SHARDS: dict[str, list[str]] = {
     # the mesh's momentum across devices, total and cross part at round-off (M1):
     # ~4.6 min of calls on a loaded host; with it the segment job took 30 of its 40
     "distributed-segment-momentum": [_SEGMENT_MOMENTUM, "-m", "distributed_segment"],
+    "distributed-segment-let": [_SEGMENT_LET, "-m", "distributed_segment"],
     # reverse-mode gradients of the fused multi-GPU lane (WP-G): the cross seams'
     # oracles and the plumbing's bitwise forward, then the end-to-end gradient gates
     "distributed-grad": [
@@ -382,6 +390,7 @@ GATED_SHARDS: tuple[str, ...] = (
     "distributed-segment-scheme",
     "distributed-segment-runner",
     "distributed-segment-momentum",
+    "distributed-segment-let",
     "distributed-grad",
     "distributed-grad-gates",
     "distributed-segment-escapers",
