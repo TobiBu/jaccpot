@@ -10,7 +10,8 @@ run or did not finish is reported as such) and writes:
   sanity row against the local single-card pins (``local_reference.json``); for the jobs
   folded in by track H1 (scaling_mp, forward, mgrad, escaper, a1, a3, m1_*, m2g_*,
   mesc_*, a4) each job's own summary (the matrix's or track's ``SUMMARY.md``, the bench's
-  ``summary.txt``) or a table of its rows;
+  ``summary.txt``) or a table of its rows; for the jobs added since (hh, hh3, hh4a, hh4c,
+  m3_*) a table of their rows or M3's ``SUMMARY.md`` (section 9, track H2);
 * ``RUN_DIR/rows.jsonl`` -- one JSON object per row, each with its job's provenance
   header (commits, jax, node, GPU, driver) under ``"provenance"``.
 
@@ -31,8 +32,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 JACCPOT = HERE.parents[2]
 LOCAL_REFERENCE = HERE / "local_reference.json"
-#: the local tags the sanity row compares with (local_reference.json: the bundle's pins, track H1)
-SANITY_TAGS = ("h1-L-main", "h1-L-main-b")
+#: the local tags the sanity row compares with (local_reference.json: the bundle's pins, track H2)
+SANITY_TAGS = ("h2-L-main", "h2-L-main-b")
 #: every job of submit_all.sh, in its order
 JOBS = (
     "preflight",
@@ -54,6 +55,12 @@ JOBS = (
     "m2g_node2",
     "mesc_node1",
     "mesc_node2",
+    "hh",
+    "hh3",
+    "hh4a",
+    "hh4c",
+    "m3_node1",
+    "m3_node4",
     "a4",
 )
 
@@ -142,6 +149,17 @@ def section_provenance(o: Out, run: Path, provs: dict) -> None:
             )
         )
         short = lambda s: (s or "-")[:10]  # noqa: E731
+        # the per-row benches record a failed row as a FAILED line in the job's log and go on
+        logs = list((run / "logs").glob(f"h0-{job}-*.out")) + list(
+            (run / "logs").glob(f"{job}.out")
+        )
+        nfail = sum(
+            line.count("FAILED")
+            for p in logs
+            for line in p.read_text(errors="replace").splitlines()
+        )
+        if nfail and status == "done":
+            status = f"done, {nfail} FAILED line(s) in its log"
         rows.append(
             [
                 job,
@@ -864,6 +882,83 @@ def section_folded(o: Out, run: Path, provs: dict) -> None:
             section_text(o, f"### a4: accuracy suite, tier {tier}", path)
 
 
+#: the jobs added after H1 (HH2a, HH3a, HH4a, HH4c): (job, rows dir, title, [(column, key, format)])
+_ADDED = (
+    (
+        "hh",
+        "timing/rows",
+        "hh: HH2a's target_points vs the galaxy step at 1e8 (`target_points_timing.py`)",
+        [("ms min", "ms_min", "{:.1f}"), ("ms median", "ms_median", "{:.1f}")],
+    ),
+    (
+        "hh3",
+        "timing/rows",
+        "hh3: HH3a's K-cluster slow step vs the galaxy step at 1e8 (`hybrid_clusters_timing.py`)",
+        [("ms min", "ms_min", "{:.1f}"), ("ms median", "ms_median", "{:.1f}")],
+    ),
+    (
+        "hh4a",
+        "share/rows",
+        "hh4a: HH4a's internal sum's share of a slow step (`hybrid_clusters_runs.py share`)",
+        [
+            ("slow s", "t_slow_s", "{:.3f}"),
+            ("step fixed16 s", "t_step_fixed16_s", "{:.3f}"),
+            ("step adaptive s", "t_step_adaptive_s", "{:.3f}"),
+            ("share fixed16", "share_fixed16", "{:.3f}"),
+            ("share adaptive", "share_adaptive", "{:.3f}"),
+            ("pairs fixed16", "pairs_fixed16_per_step", "{:.2e}"),
+            ("pairs adaptive", "pairs_adaptive_per_step", "{:.2e}"),
+        ],
+    ),
+    (
+        "hh4c",
+        "mesh/rows",
+        "hh4c: HH4c's clusters on the mesh, 1 / 2 / 4 cards (`hybrid_clusters_runs.py mesh`)",
+        [
+            ("start s", "start_wall_s", "{:.1f}"),
+            ("first segment s", "first_segment_wall_s", "{:.1f}"),
+            ("steady step s", "steady_step_s", "{:.3f}"),
+            ("stripped", "n_stripped_end", "{}"),
+            ("total s", "total_s", "{:.1f}"),
+        ],
+    ),
+)
+
+
+def _peak_gib(row: dict) -> str:
+    peak = row.get("peak_bytes")
+    peaks = peak if isinstance(peak, list) else [peak]
+    peaks = [p for p in peaks if isinstance(p, (int, float))]
+    return " / ".join(f"{p / 2**30:.2f}" for p in peaks) if peaks else "-"
+
+
+def section_added(o: Out, run: Path, provs: dict) -> None:
+    """The jobs added after H1: their rows (hh, hh3, hh4a, hh4c) and M3's summaries."""
+    o("## 9. The jobs added since H1 (HH2a, HH3a, M3, HH4a, HH4c)")
+    o()
+    for job, sub, title, cols in _ADDED:
+        rows = _json_rows(o, job, run / job / sub, provs.get(job))
+        o(f"### {title}")
+        o()
+        if rows:
+            o.table(
+                ["row"] + [c[0] for c in cols] + ["peak GiB"],
+                [
+                    [tag]
+                    + [_f(r.get(key), fmt) for _, key, fmt in cols]
+                    + [_peak_gib(r)]
+                    for tag, r in rows
+                ],
+            )
+        else:
+            o("_no rows_")
+            o()
+    for job in ("m3_node1", "m3_node4"):
+        section_text(
+            o, f"### {job} (`bench/slurm/m3/summarize.py`)", run / job / "SUMMARY.md"
+        )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("run", type=Path)
@@ -885,6 +980,7 @@ def main() -> int:
     section_s1b(o, run, provs.get("s1b"))
     section_auto(o, run, provs.get("auto"))
     section_folded(o, run, provs)
+    section_added(o, run, provs)
     (run / "SUMMARY.md").write_text("\n".join(o.lines) + "\n")
     with open(run / "rows.jsonl", "w") as fh:
         for r in o.rows:
