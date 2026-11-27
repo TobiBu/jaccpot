@@ -113,6 +113,9 @@ entry a3 env CUDA_VISIBLE_DEVICES="$FIRST_CARD" "$H0_PY" bench/fused_memory_budg
   --drift-order legacy --env JACCPOT_STRICT_CARRY=particles --out "$OUT/a3.json"
 entry m1 srun "${MP[@]}" "$H0_PY" bench/mesh_cross_momentum.py --arm mp --mac dehnen_error --n-per-gpu "$((N / GPN))" \
   --segments 1 --steps 2 --out "$OUT/m1"
+# M4: the LET exchange and work cuts through the production runner (2 segments: one rebalance with work cuts)
+entry m4 srun "${MP[@]}" "$H0_PY" bench/m4_exchange_cuts.py --arm mp --mac dehnen_error --exchange let --cuts work \
+  --n-per-gpu "$((N / GPN))" --segments 2 --steps 2 --out "$OUT/m4"
 entry m2g bash -c "srun ${MP[*]} $H0_PY bench/multiprocess_gate.py collectives --arm mp --out $OUT/m2g/col_mp \
   && JAX_COORDINATOR_PORT=$((PORT + 3)) srun ${MP[*]} $H0_PY bench/multiprocess_gate.py run --arm mp --n-per-gpu $((N / GPN)) \
   --repeats 1 --out $OUT/m2g/mp"

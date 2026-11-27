@@ -85,6 +85,8 @@ _SEGMENT_MOMENTUM = "tests/distributed/test_mesh_cross_momentum.py"
 # the LET exchange against the all_gather exchange (M4), a job of its own: two
 # exchanges x two MACs of fused-lane compilation on forced devices
 _SEGMENT_LET = "tests/distributed/test_mesh_let_exchange.py"
+# work-balanced rebalance cuts (M4 session 2), a job of its own: two fused-lane runners
+_SEGMENT_CUTS = "tests/distributed/test_mesh_work_cuts.py"
 # the fused multi-GPU lane's reverse mode end to end (WP-G G4): three whole-lane
 # gradient cases (2 and 4 devices, the criterion), each ~10-25 min of interpret-mode
 # compilation on CPU, so a job of its own beside the seams' and plumbing's
@@ -331,6 +333,7 @@ SHARDS: dict[str, list[str]] = {
         f"--ignore={_SEGMENT_MIGRATION}",
         f"--ignore={_SEGMENT_MOMENTUM}",
         f"--ignore={_SEGMENT_LET}",
+        f"--ignore={_SEGMENT_CUTS}",
         f"--ignore={_SEGMENT_ESCAPERS}",
         f"--ignore={_SEGMENT_SCHEME}",
         *(f"--ignore={path}" for path in _SEGMENT_RUNNER_FILES),
@@ -351,6 +354,7 @@ SHARDS: dict[str, list[str]] = {
     # ~4.6 min of calls on a loaded host; with it the segment job took 30 of its 40
     "distributed-segment-momentum": [_SEGMENT_MOMENTUM, "-m", "distributed_segment"],
     "distributed-segment-let": [_SEGMENT_LET, "-m", "distributed_segment"],
+    "distributed-segment-cuts": [_SEGMENT_CUTS, "-m", "distributed_segment"],
     # reverse-mode gradients of the fused multi-GPU lane (WP-G): the cross seams'
     # oracles and the plumbing's bitwise forward, then the end-to-end gradient gates
     "distributed-grad": [
@@ -391,6 +395,7 @@ GATED_SHARDS: tuple[str, ...] = (
     "distributed-segment-runner",
     "distributed-segment-momentum",
     "distributed-segment-let",
+    "distributed-segment-cuts",
     "distributed-grad",
     "distributed-grad-gates",
     "distributed-segment-escapers",

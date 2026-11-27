@@ -2326,6 +2326,7 @@ class CrossCapacities:
         let_send_cap: Optional[int] = None,
         let_recv_cap: Optional[int] = None,
         let_coarse_particles: Optional[tuple[int, ...]] = None,
+        let_far_particles: Optional[int] = None,
     ) -> None:
         self.max_cells = int(max_cells)
         # None: 1 under the two-sided export, 4 under the one-sided one (see
@@ -2412,6 +2413,15 @@ class CrossCapacities:
             (64 * self.leaf_width, 4 * self.leaf_width)
             if let_coarse_particles is None
             else tuple(int(m) for m in let_coarse_particles)
+        )
+        # The LET's first round for a FAR peer (domain boxes apart): a coarser top,
+        # since every peer gets the first round's top. 0 / None (the default): off,
+        # every peer the first size -- on 32 forced devices (cube, 4096 per device)
+        # the far peers still opened the root, and a root-only top made their
+        # requests whole-domain: +6.6 % rows (docs/production_2026-11.md, ## M4
+        # session 2). HoreKa decides whether it pays at production sizes per card.
+        self.let_far_particles = (
+            0 if let_far_particles is None else int(let_far_particles)
         )
 
     def __repr__(self) -> str:
@@ -3387,6 +3397,9 @@ def make_cross_hook(
                 axis_name=axis_name,
                 walk=request_walk,
                 error_order=let_order,
+                far_particles=(
+                    int(let_options.get("far_particles", cap.let_far_particles)) or None
+                ),
             )
             gathered = None
         else:
@@ -3525,6 +3538,9 @@ def make_cross_hook(
                     record["let_overflow"] = let_blocks.overflow
                     record["let_requested"] = let_blocks.requested
                     record["let_coarse_rows"] = let_blocks.coarse_needed
+                    record["let_far_peers"] = jnp.sum(
+                        jnp.asarray(let_blocks.far_peers), dtype=jnp.int32
+                    )
                     record["let_orig"] = let_blocks.orig
                     record["let_peer"] = let_blocks.peer
                     record["let_send_capacity"] = int(let_blocks.send_capacity)

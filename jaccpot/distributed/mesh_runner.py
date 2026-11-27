@@ -1524,6 +1524,8 @@ class MeshBackend:
                     "repartitioned": bool(report.repartitioned),
                     "declined": bool(report.declined),
                     "sent_off_device": int(report.sent_off_device),
+                    # work cuts only: per device, the work before and after
+                    **({"work": report.work} if getattr(report, "work", None) else {}),
                 }
             ),
             "migration": (

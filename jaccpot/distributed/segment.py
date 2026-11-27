@@ -279,6 +279,11 @@ class SegmentReport:
     migration_need : int
         ``migrate=True``: the most rows a device sent or received in one of its
         migrations (what ``migration_cap`` has to hold).
+    work : list
+        Work cuts (``cuts="work"``) and a rebalance before the segment: per device
+        the work it held before the rebalance and the work the new cuts give it
+        (:func:`~jaccpot.distributed.work.row_work`'s estimate at the edge),
+        ``[before, after]``; empty otherwise.
     """
 
     segment: int
@@ -294,6 +299,7 @@ class SegmentReport:
     failures: list = field(default_factory=list)
     migrated: int = 0
     migration_need: int = 0
+    work: list = field(default_factory=list)
 
 
 def _mesh_all(flag: Array, axis_name: str) -> Array:
@@ -699,6 +705,92 @@ def _direct_potential_shard(
     return jnp.where(live, phi, jnp.zeros((), phi.dtype))
 
 
+#: a work-balanced cut gives a device at most this fraction of its shard (the rows a
+#: segment's migrations still need room for)
+_WORK_CUT_FILL = 0.9
+
+
+def _mesh_cuts(cuts: Optional[str], force: Any) -> str:
+    """The rebalance's cuts: ``cuts``, else ``JACCPOT_MESH_CUTS`` (default ``count``).
+
+    Parameters
+    ----------
+    cuts : Optional[str]
+        ``"count"``, ``"work"`` or ``None``.
+    force : Any
+        The runner's force; work cuts need the fused force's topology (a direct
+        force's per-particle work is uniform, so it keeps the count cuts).
+
+    Returns
+    -------
+    str
+        ``"count"`` or ``"work"``.
+
+    Raises
+    ------
+    ValueError
+        For any other ``cuts``.
+    """
+    from jaccpot._env import env_choice
+
+    if cuts is None:
+        cuts = env_choice("JACCPOT_MESH_CUTS", "count", ("count", "work"))
+    if str(cuts) not in ("count", "work"):
+        raise ValueError(f"cuts={cuts!r}: 'count', 'work' or None")
+    if cuts == "work" and getattr(force, "near_sink", "absent") == "absent":
+        return "count"
+    return str(cuts)
+
+
+def _work_per_device(
+    positions: Array,
+    count: Array,
+    work: Array,
+    cuts: Array,
+    *,
+    cubic: bool,
+    axis_name: str,
+) -> tuple[Array, Array]:
+    """Per device, the work it holds now and the work ``cuts`` would give it.
+
+    Parameters
+    ----------
+    positions : Array
+        ``(cap, 3)`` this device's positions.
+    count : Array
+        ``(1,)`` its live rows.
+    work : Array
+        ``(cap,)`` each row's work.
+    cuts : Array
+        ``(ndev - 1,)`` the new cuts.
+    cubic : bool
+        The force's box shape.
+    axis_name : str
+        Mesh axis.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(before, after)``, ``(ndev,)`` each, replicated.
+    """
+    from jaccpot.distributed.migration import _codes
+
+    cap = positions.shape[0]
+    ndev = int(cuts.shape[0]) + 1
+    n_live = jnp.minimum(count[0], cap).astype(jnp.int32)
+    live = jnp.arange(cap) < n_live
+    w = jnp.where(live, work, 0.0).astype(jnp.float32)
+    me = jax.lax.axis_index(axis_name)
+    before = jax.lax.psum(
+        jnp.zeros((ndev,), jnp.float32).at[me].add(jnp.sum(w)), axis_name
+    )
+    codes = _codes(positions, n_live, cubic=cubic, axis_name=axis_name)
+    dest = jnp.searchsorted(cuts, codes, side="right").astype(jnp.int32)
+    dest = jnp.where(live, dest, ndev)
+    after = jax.ops.segment_sum(w, dest, num_segments=ndev + 1)[:ndev]
+    return before, jax.lax.psum(after, axis_name)
+
+
 def _force_box_cubic(force: Any) -> bool:
     """The box shape a force builds its trees in (``TreeConfig.cubic_bounds``).
 
@@ -1035,6 +1127,13 @@ class MeshSegmentRunner:
         (:func:`jaccpot.runtime.fmm_state.drift_positions`): ``"summed"`` (the
         default since A3) or ``"legacy"`` (the bitwise path to runs before A3;
         joins the compile keys).
+    cuts : Optional[str]
+        How a rebalance under migration cuts: ``"count"`` (even counts, the
+        default), ``"work"`` (even work, :mod:`jaccpot.distributed.work`: one force
+        at the edge measures every row's work, then
+        :func:`~jaccpot.distributed.migration.work_balanced_splitters_shard` with
+        a device at most 90 % of its shard; the fused force only, a direct force
+        keeps the count cuts) or ``None`` (``JACCPOT_MESH_CUTS``, unset ``count``).
 
     Raises
     ------
@@ -1059,6 +1158,7 @@ class MeshSegmentRunner:
         splitters: Any = None,
         scheme: Any = None,
         drift_order: str = "summed",
+        cuts: Optional[str] = None,
     ) -> None:
         from jaccpot.distributed.rollout import _mesh_devices
         from jaccpot.scheme import check_mesh_scheme
@@ -1101,6 +1201,10 @@ class MeshSegmentRunner:
                 raise ValueError(f"migration_cap must be >= 1, got {migration_cap}")
         #: the box shape the force builds its trees in, which the cuts live in
         self._migration_cubic = _force_box_cubic(force)
+        #: how a rebalance under migration cuts: "count" (even counts, the default)
+        #: or "work" (even work: :mod:`jaccpot.distributed.work`; the fused force
+        #: only -- a direct force's work per particle is uniform)
+        self.cuts = _mesh_cuts(cuts, force)
         self.splitters: Any = None
         if self.migrate:
             if splitters is None:
@@ -1154,6 +1258,7 @@ class MeshSegmentRunner:
         migration_cap: Any = "auto",
         scheme: Any = None,
         drift_order: str = "summed",
+        cuts: Optional[str] = None,
     ) -> "MeshSegmentRunner":
         """A runner on the fused lane's force (the template route).
 
@@ -1201,6 +1306,8 @@ class MeshSegmentRunner:
             As in the constructor.
         drift_order : str
             As in the constructor.
+        cuts : Optional[str]
+            As in the constructor.
 
         Returns
         -------
@@ -1241,6 +1348,7 @@ class MeshSegmentRunner:
             migration_cap=migration_cap,
             scheme=scheme,
             drift_order=drift_order,
+            cuts=cuts,
         )
 
     # ------------------------------------------------------------------
@@ -2303,6 +2411,7 @@ class MeshSegmentRunner:
             balanced_splitters_shard,
             migrate_shard,
             migration_need_shard,
+            work_balanced_splitters_shard,
         )
 
         scale = self.scale_carry and kind in ("move", "rebalance")
@@ -2335,6 +2444,25 @@ class MeshSegmentRunner:
                 mesh=self.mesh,
                 in_specs=(spec, spec, P()),
                 out_specs=(P(), P()),
+                check_vma=False,
+            )
+        elif kind == "work_cuts":
+            max_rows = int(_WORK_CUT_FILL * self.cap)
+
+            def work_cuts(state: Array, count: Array, work: Array) -> tuple:
+                x = state[:, 0]
+                cuts = work_balanced_splitters_shard(
+                    x, count, work, cubic=cubic, max_rows=max_rows, axis_name=axis
+                )
+                return (cuts,) + _work_per_device(
+                    x, count, work, cuts, cubic=cubic, axis_name=axis
+                )
+
+            mapped = jax.shard_map(
+                work_cuts,
+                mesh=self.mesh,
+                in_specs=(spec, spec, spec),
+                out_specs=(P(), P(), P()),
                 check_vma=False,
             )
         elif kind == "cuts":
@@ -2419,7 +2547,18 @@ class MeshSegmentRunner:
         """
         from jaccpot.distributed.migration import OVERFLOW_SHARD, migration_cap_for_need
 
-        cuts = self._migration_program("cuts")(state.state, state.count)
+        work_diag: dict = {}
+        if self.cuts == "work":
+            work = self._work_rows(state)
+            cuts, before, after = self._migration_program("work_cuts")(
+                state.state, state.count, work
+            )
+            work_diag = {
+                "work_before": np.asarray(jax.device_get(before), np.float64),
+                "work_after": np.asarray(jax.device_get(after), np.float64),
+            }
+        else:
+            cuts = self._migration_program("cuts")(state.state, state.count)
         need, _ = self._migration_program("need")(state.state, state.count, cuts)
         # at least the segments' buffer: one program for every rebalance that
         # fits it (most of them, once the first has evened the counts)
@@ -2464,12 +2603,93 @@ class MeshSegmentRunner:
                 out[5] if self.scale_carry and state.force_scale is not None else None
             ),
         )
-        return routed, {
+        diag = {
             "declined": np.full(self.ndev, declined),
             "recv_counts": counts[None].repeat(self.ndev, 0),
             "sent_off_device": sent,
             "max_util": np.full(self.ndev, counts.max() / self.cap, np.float32),
         }
+        if work_diag:
+            # per device: the work in the old ownership, and what the new cuts give
+            # it (the same estimate); a declined move keeps the old
+            diag.update({k: v[None].repeat(self.ndev, 0) for k, v in work_diag.items()})
+        return routed, diag
+
+    def _work_rows(self, state: MeshState) -> Array:
+        """Each row's work in the force at ``state`` (:func:`~jaccpot.distributed.work.row_work`).
+
+        One force at the edge's positions, its topology read through the force's
+        ``targets`` hook; the program is cached with the force's key.
+
+        Parameters
+        ----------
+        state : MeshState
+            The state at a segment edge.
+
+        Returns
+        -------
+        Array
+            ``(ndev x cap,)`` float32, mesh-sharded.
+        """
+        from jaccpot.distributed.work import row_work, work_far_weight
+
+        force, cap, axis = self.force, self.cap, self.axis_name
+        far_weight = work_far_weight()
+        scale = self.scale_carry
+        key = (
+            "mesh_work",
+            tuple(int(d.id) for d in self.devices),
+            axis,
+            cap,
+            str(state.state.dtype),
+            *force.key(),
+            scale,
+            far_weight,
+        )
+        cache = _programs_of(force.cache_owner)
+        program = cache.get(key)
+        fresh = program is None
+        if fresh:
+
+            def body(x: Array, m: Array, c: Array, i: Array, *fb: Array) -> Array:
+                live = jnp.minimum(c[0], cap)
+
+                def work(provider: Any, topology: Any) -> Array:
+                    return row_work(
+                        topology,
+                        force.near_sink,
+                        live,
+                        cap=cap,
+                        far_weight=far_weight,
+                    )
+
+                out = force.shard(
+                    x[:, 0],
+                    m,
+                    live,
+                    i,
+                    **({"force_scale": fb[0]} if fb else {}),
+                    targets=work,
+                )
+                return out[-1]
+
+            spec = P(axis)
+            n_in = 4 + int(scale)
+            program = cache[key] = jax.jit(
+                jax.shard_map(
+                    body,
+                    mesh=self.mesh,
+                    in_specs=(spec,) * n_in,
+                    out_specs=spec,
+                    check_vma=False,
+                )
+            )
+        args = (state.state, state.masses, state.count, state.ids)
+        args += self._scale_args(state)
+        with force.context():
+            if fresh:
+                force.before_trace()
+            return program(*args)
 
     def _migration_need(self, state: MeshState) -> int:
         """The most rows a device would send or receive migrating ``state``.
@@ -2979,6 +3199,11 @@ class MeshSegmentRunner:
             failures=failures,
             migrated=int(migrated_h),
             migration_need=int(migration_need_h),
+            work=(
+                [diag["work_before"][0].tolist(), diag["work_after"][0].tolist()]
+                if "work_before" in diag
+                else []
+            ),
         )
         if k > 0:
             self.reports.append(report)

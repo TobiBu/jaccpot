@@ -66,7 +66,13 @@ _RECORD = (
     "walk_near_count",
     "summary_nodes",
 )
-_LET_RECORD = ("let_send_rows", "let_recv_rows", "let_overflow", "let_requested")
+_LET_RECORD = (
+    "let_send_rows",
+    "let_recv_rows",
+    "let_overflow",
+    "let_requested",
+    "let_far_peers",
+)
 
 
 def _probe(force, shard, f_b, keys):
@@ -174,8 +180,10 @@ def test_the_let_exchange_is_the_all_gather_exchange(mac):
     live = rec_g["summary_nodes"].astype(np.int64)
     gathered = np.array([live.sum() - live[d] for d in range(ndev)])
     recv = rec_l["let_recv_rows"].astype(np.int64)
+    far = rec_l["let_far_peers"].tolist()
     print(
-        f"{mac} x{ndev}: LET rows received {recv.tolist()}, all_gather {gathered.tolist()}"
+        f"{mac} x{ndev}: LET rows received {recv.tolist()}, all_gather "
+        f"{gathered.tolist()}, far peers per device {far}"
     )
     assert np.all(recv <= gathered) and np.all(recv >= ndev - 1)
     # the walks asked for subtrees (the requests did something)

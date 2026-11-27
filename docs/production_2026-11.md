@@ -2537,6 +2537,116 @@ devices gets its own block from every sender).
    wave).
 6. **Cost-weighted cuts** (after session 2 wires them): the per-device work (local + cross near and far pair counts)
    max/mean on the merger at pericentre at 8 and 32 GPUs, count cuts vs work cuts, and the step time.
+### Session 2 (wave 10, 2026-11-27): work-balanced cuts, the far-peer round, the HoreKa rows
+
+**Work-balanced rebalance cuts** (opt-in: `MeshSegmentRunner(cuts="work")` / `MeshSegmentRunner.fused(cuts=)`, or
+`JACCPOT_MESH_CUTS=work`, which the production runner's mesh mode and the multi-process runtime pick up).
+
+- **The work** (`jaccpot/distributed/work.py`, `row_work`): read out of the fused force's own topology through the
+  force's `targets` hook, in the same trace as the force. Per row: its leaf's near particle-particle interactions (the
+  live particles of every leaf in the leaf's near list, `prepared.neighbor_list`, plus every peer row the cross
+  exchange pairs with it, the cross near sink), plus the device's local far pairs (the walk's `far_needed`) times
+  `JACCPOT_MESH_WORK_FAR_WEIGHT` (default 16 pair interactions per M2L, a guess for HoreKa to calibrate), spread evenly
+  over the device's particles. Each row's work lands at its input row (`tree.particle_indices`).
+- **The cuts**: at each rebalance under migration (`repartition_every`, the production default 1) the runner measures
+  the work with one force at the edge's positions (a cached `"mesh_work"` program), then
+  `migration.work_balanced_splitters_shard` cuts the Morton curve at equal cumulative work with a device at most 90 %
+  of its shard (`max_rows`), and the migration moves the rows (declined and re-planned as today). The count cuts stay
+  the default; a direct force (per-particle work uniform) keeps them.
+- **Diagnostics**: `SegmentReport.work = [work per device before, work per device after]` (the after is the same
+  estimate under the new cuts), and the production runner's plan record `repartition.work`.
+
+**Gate 1 (cuts), forced CPU devices** (`m4/exp2/cuts_probe.py`: `MeshSegmentRunner.fused`, migration on, a
+rebalance before every segment, 3 segments x 2 steps at dt 1e-3; the CI test's fp32 lane, leaf 64, p4, theta 0.8,
+`dehnen`; the same decomposition, count cuts then work cuts; the work per device measured afresh at the final state
+with the same estimate):
+
+| IC (4 devices) | N | count cuts: work max / mean | work cuts: max / mean | force, work vs count run (rel-L2) | momentum (fp32 lane) |
+|---|---|---|---|---|---|
+| Plummer (a 0.3, r < 20) | 8,192 | 1.311 | **1.016** | 1.5e-3 | ~1e-8 both |
+| merger just after first pericentre (`merger-2026-10-31/s1_main/restart_final_136.npz`, t = 1.36, step 1360; 65,536-row random subsample, 16,384 used, masses rescaled) | 16,384 | 1.099 | **1.045** | 1.2e-3 | ~1.4e-8 both |
+| A4 disc (`a4/local/ics/galaxy.npz`) | 16,384 | 1.247 | **1.012** | 8.2e-4 | in class |
+
+The force differences are the two runs' different decompositions (other trees, the fp32 force-error class), no flag
+or retry on any run. The first version clipped every cut to within `s` rows of the count-balanced rank, which also kept
+a dense device from SHRINKING (Plummer: 1.31 -> 1.12, the core device stopped at -447 rows); the cap now projects the
+ranks onto `0 <= r_j - r_{j-1} <= max_rows` (forward and backward passes), which bounds growth only.
+**Restarts and processes with work cuts:** M3's `write_and_restart` scenario (`tests/distributed/_checkpoint_scenarios.py`:
+ESC's Plummer + 8 fliers, escapers off, the fused CPU lane `dehnen`, 6 x 10 steps, migrating with a rebalance at every
+edge, an orbax checkpoint per edge) with `JACCPOT_MESH_CUTS=work` and `JACCPOT_CROSS_EXCHANGE=let`, one process x 2
+devices and 2 processes x 1 device (`m4/exp2/restart_work.py`): the run in one go, a fresh runner restarted from its
+middle checkpoint and a chain of three restarts are **bitwise** equal (state and carried acceleration) on both sides,
+and one process == two processes bitwise: 14/14. `tests/distributed/test_mesh_work_cuts.py` (CI): a clumpy cube on 2
+devices, work 306k / 511k -> 409k / 409k per device, momentum at round-off (fp64), a run twice bitwise.
+
+**The LET's far-peer first round** (`CrossCapacities.let_far_particles`: the first size for far peers; `0`, the
+default, turns it off -- measured below). Every peer gets the first round's top, so session 1's rows per device could not flatten (~11k of ~105k
+rows at 1e6 per card for every peer, near or far). Now a peer whose root sphere and this device's do not overlap
+(the boxes of the two domains' live leaves' spheres are separated; one all_gather of the boxes) gets a coarser
+first-round top; the later rounds are the same. The requests stay exact: each node's top ancestor is computed for both first sizes and chosen per
+peer, so every cut node is still a node of its round's top. `record=` carries `let_far_peers`.
+
+**Bytes vs device count (gate 2), forced CPU devices** (`m4/exp2/let_probe.py`; uniform cube, 4096 particles per
+device, `dehnen`, fp64, leaf 64; on one decomposition: all_gather, then the LET with the far round off, on, and with
+three rounds; every LET arm bitwise to all_gather with every device's pair sets equal, at every device count). Rows
+received per device, and in units of the device's own live summary tree `S` (which differs between device counts at
+the same particles per device: the cell leaves follow the global Morton levels):
+
+| devices | `S` / device | all_gather live rows (/ `S`) | LET rows, far off (/ `S`) | exact minimum (/ `S`) | all_gather / LET | LET bytes (mean) vs all_gather padded |
+|---|---|---|---|---|---|---|
+| 2 | 511 | 511 (1.0) | 441 (0.9) | 316 (0.6) | 1.16 | 32 KB vs 65 KB |
+| 4 | 258 | 774 (3.0) | 500 (1.9) | 421 (1.6) | 1.55 | 36 KB vs 196 KB |
+| 8 | 555 | 3,890 (7.0) | 1,746 (3.1) | 966 (1.7) | 2.23 | 126 KB vs 458 KB |
+| 16 | 512 | 7,683 (15.0) | 2,416 (4.7) | 1,375 (2.7) | 3.18 | 174 KB vs 982 KB |
+| 32 | 258 | 8,007 (31.0) | 2,112 (8.2) | 1,257 (4.9) | 3.79 | 152 KB vs 2.03 MB |
+
+The all_gather grows as `ndev - 1` trees; the LET follows the exact minimum (1.6-1.8x it beyond 4 devices) and its
+advantage widens with the device count (1.2x -> 3.8x). It is not flat here: with 4096 particles per device a domain is
+tiny next to the walk's reach, so most peers are near; saturation (at most 26 neighbours in 3-D) needs production sizes
+per card, i.e. HoreKa (`m4_node1` / `m4_node2`, M5).
+
+**The far round is OFF by default** (`let_far_particles=0`). It is exact (bitwise, pairs equal at every count), but it
+did not pay here: the box test found no far peer at 2-8 devices (Morton domains are fragmented along the curve, their
+boxes touch), 1-8 per device at 16 (2,421 vs 2,416 rows) and 5-23 at 32, where it sent MORE (2,251 vs 2,112 rows,
++6.6 %): those peers still opened the root, and a root-only first top made their requests whole-domain. A three-round
+LET (first size 16x larger, the same effect for every peer) sent more still (8: 2,760, 16: 5,210, 32: 4,467): a
+requested subtree that already fits the next size goes whole. The O(ndev) top both target (~11k of ~105k rows at 1e6
+per card for every peer) exists only at production sizes per card: `let_far_particles` stays for HoreKa to measure.
+
+**GPU functional (gate 3).** Queued behind one `on-free-card` waiter (2 cards, the merger state at t = 1.36 subsampled to 1e6 per card: the LET with and without the far round against all_gather with an A-vs-A control, then count / work / work cuts); all eight local cards were busy through the session. Added here when it runs.
+
+**The HoreKa rows** (`bench/slurm/m4/`, `bench/m4_exchange_cuts.py`; in the bundle as `m4_node1` / `m4_node2`, a
+preflight entry `m4`): the production runner's mesh mode as N processes x 1 GPU, per arm `JACCPOT_CROSS_EXCHANGE` x
+`JACCPOT_MESH_CUTS`; disc + bulge, galaxy preset; 1 node: 1e7 (2.5e6 per GPU) the four combinations, 1e8 the default
+vs LET + work; 2 nodes: the same per GPU on 8 GPUs (1e7, 2e8). Per arm: the step wall, the LET rows (the needs, max
+over the mesh) vs the all_gather's, the work imbalance before / after each rebalance, the momentum split, each card's
+peak. **Budget: ~6 node-hours expected (9 at worst).** `bench/slurm/m4/m5_scaling.sbatch` is M5's template (optional,
+outside the default set): weak scaling at 3.125e7 per GPU on 1 / 2 / 4 / 8 nodes (1e9 on 8 nodes), strong at 1e9 on 4
+and 8 nodes, the default vs LET + work; ~15-20 node-hours weak, ~12 strong. The cross-node NCCL barrier re-check (the
+#398 hang) is already in the bundle as `m2g_node2`'s barrier probe across nodes.
+
+**Smoke** (`SMOKE=1 bash bench/slurm/h0/submit_all.sh --only m4_node1,m4_node2`, preflight entry `m4`, two
+processes on the CPU at 2048 particles): preflight entry `m4` ok; `m4_node1` ok in 31 min (6 arms), `m4_node2` ok in 28
+min (6 arms); each `SUMMARY.md` has the rows (LET rows recv 1941-2007 vs the all_gather's 3072, imbalance 1.091 ->
+1.049 under work cuts, momentum 1.6e-8 in every arm; the CPU walls mean nothing).
+
+**The LET-default decision** (not switched; the recommendation is in the PR):
+
+- **Evidence for the LET:** exact on every configuration (bitwise to all_gather, pair sets equal): GPU 2 and 4 A100s
+  (both MACs, A-vs-A clean), forced CPU 2-32 devices (Plummer, cube, galaxy, merger), the request walks' device-order
+  fix included; momentum identical to all_gather's in every run (M1's test passes under it); restarts (M3: once ==
+  resumed == chained) and N processes == 1 process bitwise (session 1, 24/24; session 2 with work cuts below); memory:
+  `T + R` rows of buffers and walk table instead of `ndev x S`, plus an `ndev x S` int8 request tag; bytes per device
+  3.8-6.5x below the all_gather on 2-4 A100s, and growing ~1.4x per device doubling at 8 -> 16 devices against the
+  all_gather's ~2x (above).
+- **What is missing: time.** Every request round costs about one cross walk, and the LET has 2-3 rounds against the
+  all_gather's none; whether the bytes saved on NVLink / InfiniBand pay for that is what `m4_node1` / `m4_node2`
+  measure (the `let` vs `all_gather` step wall at 4 and 8 GPUs).
+- **Recommendation:** keep `all_gather` the default for now; switch the default to `let` (two rounds, the far round
+  off) when HoreKa shows the LET's step wall within ~5 % of the all_gather's at 4 GPUs and below it at 8, and run M5's
+  scaling with `let` + `work` either way. Work cuts likewise stay opt-in until `m4_node1` shows the step wall follows
+  the imbalance (the slowest device).
+
 ## H2 — the HoreKa bundle on the mains of 2026-11-25 (wave 9, 2026-11-25)
 
 Nothing had run on HoreKa yet; since H1 audited the bundle (2026-11-10) jaccpot main moved through waves 6-8 and

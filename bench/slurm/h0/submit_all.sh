@@ -79,6 +79,8 @@ JOBS=(
   "mesc_node2|2|$G|02:30:00|yes|MESC: escapers on the mesh at 1e8, 8 x 1 GPU (the Sgr IC)"
   "m3_node1|1|$G|02:00:00|yes|M3: sharded checkpoint I/O per rank at 1e8, elastic 4 -> 2/1 GPUs + chaining"
   "m3_node4|4|$G|02:00:00|yes|M3: sharded checkpoint I/O per rank at 1e9 on 16 GPUs, elastic 16 -> 12/8"
+  "m4_node1|1|$G|03:00:00|yes|M4: LET exchange vs all_gather x work vs count cuts, 4 x 1 GPU, 1e7 and 1e8"
+  "m4_node2|2|$G|03:00:00|yes|M4: LET exchange vs all_gather x work vs count cuts, 8 x 1 GPU, 1e7 and 2e8"
   "a4|-|-|per ladder|no|A4 accuracy suite: IC job (CPU) + one array per ladder and tier + summary"
 )
 
