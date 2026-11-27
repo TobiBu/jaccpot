@@ -287,11 +287,14 @@ def work_balanced_splitters_shard(
     (a ``psum``), and the device holding the rank offers its code (a ``pmin``).
 
     A work-balanced device can hold many more rows than the mean. ``max_rows``
-    bounds that: each cut's global rank is clipped to within ``s`` rows of the
-    count-balanced rank ``j N / ndev``, ``s = (max_rows - ceil(N / ndev)) // 2``,
-    so no device ends with more than ``max_rows`` rows and the migration to these
-    cuts is never declined for its shard (:data:`OVERFLOW_SHARD`). Uniform work
-    gives :func:`balanced_splitters_shard`'s cuts up to the rank's rounding.
+    bounds that and nothing else: the ranks are projected onto ``0 <= r_j -
+    r_{j-1} <= max_rows`` (a forward pass lowering each rank to at most
+    ``max_rows`` past the previous one, a backward pass raising it to at least
+    ``max_rows`` short of the next), so no device ends with more than ``max_rows``
+    rows and the migration to these cuts is never declined for its shard
+    (:data:`OVERFLOW_SHARD`), while a device holding a dense core may shrink as far
+    as its work asks. Uniform work gives :func:`balanced_splitters_shard`'s cuts up
+    to the rank's rounding.
 
     Parameters
     ----------
@@ -343,14 +346,44 @@ def work_balanced_splitters_shard(
     ).astype(jnp.int64)
     rank = jax.lax.psum(below, axis_name)
     if max_rows is not None:
-        even = (j * n_total) // ndev
-        slack = jnp.maximum((int(max_rows) - (n_total + ndev - 1) // ndev) // 2, 0)
-        rank = jnp.clip(rank, even - slack, even + slack)
+        rank = _rows_capped(rank, n_total, int(max_rows))
     rank = jnp.clip(rank, 0, jnp.maximum(n_total - 1, 0))
     local = rank - offset_n
     mine = (local >= 0) & (local < n_live)
     offered = jnp.where(mine, ordered[jnp.clip(local, 0, cap - 1)], _CODE_SENTINEL)
     return jax.lax.pmin(offered, axis_name)
+
+
+def _rows_capped(rank: Array, total: Array, max_rows: int) -> Array:
+    """Project ascending cut ranks so that every device holds at most ``max_rows``.
+
+    Parameters
+    ----------
+    rank : Array
+        ``(ndev - 1,)`` int64 ascending global ranks of the cuts.
+    total : Array
+        Live rows over the mesh.
+    max_rows : int
+        Most rows per device. Static.
+
+    Returns
+    -------
+    Array
+        The projected ranks (unchanged where every device already fits; feasible
+        whenever ``total <= ndev x max_rows``).
+    """
+    n = int(rank.shape[0])
+    cap = jnp.asarray(int(max_rows), rank.dtype)
+    out = list(rank[i] for i in range(n))
+    prev = jnp.asarray(0, rank.dtype)
+    for i in range(n):  # no device more than max_rows past the previous cut
+        out[i] = jnp.minimum(out[i], prev + cap)
+        prev = out[i]
+    nxt = jnp.asarray(total, rank.dtype)
+    for i in reversed(range(n)):  # nor more than max_rows before the next
+        out[i] = jnp.maximum(out[i], nxt - cap)
+        nxt = out[i]
+    return jnp.stack(out) if n else rank
 
 
 def _destinations(
